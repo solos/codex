@@ -190,28 +190,49 @@ impl WorkspaceRoutingResolver for AccountRequestProcessor {
         request: WorkspaceRoutingRequest,
     ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + '_>> {
         Box::pin(async move {
-            self.read_account(Some(&request))
-                .await
-                .map(|account| account.workspace_routing)
-                .map_err(|error| match error {
-                    AccountReadError::InvalidAccount(error) => io::Error::other(error),
-                    AccountReadError::Routing(WorkspaceRoutingError::RefreshTokenRejected(
-                        error,
-                    )) => io::Error::new(io::ErrorKind::PermissionDenied, error),
-                    AccountReadError::Routing(error) => io::Error::new(
-                        if error == WorkspaceRoutingError::DiscoveryUnauthorized {
-                            io::ErrorKind::PermissionDenied
-                        } else {
-                            io::ErrorKind::Other
-                        },
-                        error,
-                    ),
-                })
+            let read = match self.read_account(Some(&request)).await {
+                Ok(read) => read,
+                Err(AccountReadError::Routing(error)) => {
+                    // Never fail a request because workspace routing discovery could not
+                    // reach the ChatGPT backend; fall back to the configured base URL.
+                    tracing::warn!(
+                        %error,
+                        "workspace routing unavailable; continuing without workspace routing"
+                    );
+                    self.read_account_inner(
+                        Some(&request),
+                        /*discover_workspace_routing*/ false,
+                    )
+                    .await
+                    .map_err(AccountRequestProcessor::account_read_error_to_io)?
+                }
+                Err(error) => {
+                    return Err(AccountRequestProcessor::account_read_error_to_io(error));
+                }
+            };
+            Ok(read.workspace_routing)
         })
     }
 }
 
 impl AccountRequestProcessor {
+    fn account_read_error_to_io(error: AccountReadError) -> io::Error {
+        match error {
+            AccountReadError::InvalidAccount(error) => io::Error::other(error),
+            AccountReadError::Routing(WorkspaceRoutingError::RefreshTokenRejected(error)) => {
+                io::Error::new(io::ErrorKind::PermissionDenied, error)
+            }
+            AccountReadError::Routing(error) => io::Error::new(
+                if error == WorkspaceRoutingError::DiscoveryUnauthorized {
+                    io::ErrorKind::PermissionDenied
+                } else {
+                    io::ErrorKind::Other
+                },
+                error,
+            ),
+        }
+    }
+
     pub(super) async fn read_account_for_background_workspace_routing(
         &self,
     ) -> Result<Option<AccountRead>, AccountReadError> {
@@ -227,6 +248,25 @@ impl AccountRequestProcessor {
         self.read_account(/*request*/ None).await.map(Some)
     }
 
+    /// Background routing is best-effort: an unreachable ChatGPT backend must not
+    /// keep retrying discovery and delaying startup notifications.
+    pub(super) async fn read_account_for_background_workspace_routing_or_none(
+        &self,
+    ) -> Result<Option<AccountRead>, AccountReadError> {
+        match self.read_account(/*request*/ None).await {
+            Ok(read) => Ok(Some(read)),
+            Err(AccountReadError::Routing(
+                error @ (WorkspaceRoutingError::DiscoveryTimeout
+                | WorkspaceRoutingError::DiscoveryFailed
+                | WorkspaceRoutingError::DiscoveryUnauthorized),
+            )) => {
+                tracing::debug!(%error, "background workspace routing unavailable");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn notify_workspace_routing_to_connection(&self, connection_id: ConnectionId) {
         let processor = self.clone();
         let auth_changes = self.auth_manager.auth_change_state_receiver();
@@ -236,7 +276,7 @@ impl AccountRequestProcessor {
                 return;
             }
             if let Ok(Some(response)) = processor
-                .read_account_for_background_workspace_routing()
+                .read_account_for_background_workspace_routing_or_none()
                 .await
                 && response.workspace_routing.is_some()
                 && auth_changes.borrow().owner_generation == owner_generation
@@ -260,13 +300,29 @@ impl AccountRequestProcessor {
         params: GetAccountParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.refresh_token_if_requested(params.refresh_token).await;
-        let read = self
-            .read_account(/*request*/ None)
-            .await
-            .map_err(|error| match error {
-                AccountReadError::InvalidAccount(error) => invalid_request(error.to_string()),
-                AccountReadError::Routing(error) => internal_error(error.to_string()),
-            })?;
+        let read = match self.read_account(/*request*/ None).await {
+            Ok(read) => read,
+            Err(AccountReadError::Routing(error)) => {
+                // Workspace routing discovery requires a reachable ChatGPT backend. Do
+                // not let it prevent account/read (and therefore TUI bootstrap) from
+                // completing; retry without routing and use the configured base URL.
+                tracing::warn!(
+                    %error,
+                    "workspace routing unavailable; continuing without workspace routing"
+                );
+                self.read_account_inner(/*request*/ None, /*discover_workspace_routing*/ false)
+                    .await
+                    .map_err(|error| match error {
+                        AccountReadError::InvalidAccount(error) => {
+                            invalid_request(error.to_string())
+                        }
+                        AccountReadError::Routing(error) => internal_error(error.to_string()),
+                    })?
+            }
+            Err(AccountReadError::InvalidAccount(error)) => {
+                return Err(invalid_request(error.to_string()));
+            }
+        };
         let mut account = read.account_state.account.map(Account::from);
         if let Some(Account::Chatgpt { workspace_name, .. }) = &mut account {
             *workspace_name = read.workspace_name;
@@ -296,6 +352,20 @@ impl AccountRequestProcessor {
         &self,
         request: Option<&WorkspaceRoutingRequest>,
     ) -> Result<AccountRead, AccountReadError> {
+        self.read_account_inner(request, /*discover_workspace_routing*/ true)
+            .await
+    }
+
+    /// Reads the account, optionally skipping workspace routing discovery.
+    ///
+    /// Discovery is a network call to the ChatGPT backend. Callers that must not
+    /// fail when that backend is unreachable (for example TUI bootstrap) retry
+    /// with discovery disabled and fall back to the configured base URL.
+    pub(super) async fn read_account_inner(
+        &self,
+        request: Option<&WorkspaceRoutingRequest>,
+        discover_workspace_routing: bool,
+    ) -> Result<AccountRead, AccountReadError> {
         let mut auth_changes = self.auth_manager.auth_change_state_receiver();
         let auth_state = *auth_changes.borrow_and_update();
         let current_auth_changes = auth_changes.clone();
@@ -317,11 +387,12 @@ impl AccountRequestProcessor {
             let config = match load_config().await {
                 Ok(config) => config,
                 Err(_)
-                    if !self
-                        .auth_manager
-                        .auth_cached()
-                        .as_ref()
-                        .is_some_and(CodexAuth::is_chatgpt_auth) =>
+                    if !discover_workspace_routing
+                        || !self
+                            .auth_manager
+                            .auth_cached()
+                            .as_ref()
+                            .is_some_and(CodexAuth::is_chatgpt_auth) =>
                 {
                     self.config.as_ref().clone()
                 }
@@ -340,7 +411,10 @@ impl AccountRequestProcessor {
             let account_state = provider
                 .account_state()
                 .map_err(AccountReadError::InvalidAccount)?;
-            let mut workspace_routing = if let Some((auth, account_id)) = auth
+            let mut workspace_routing = if !discover_workspace_routing {
+                *self.workspace_routing.lock().await = None;
+                None
+            } else if let Some((auth, account_id)) = auth
                 .as_ref()
                 .filter(|auth| {
                     auth.is_chatgpt_auth()
