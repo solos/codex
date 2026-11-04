@@ -71,12 +71,7 @@ impl ChatWidget {
         display: SessionConfiguredDisplay,
         fork_parent_title: Option<String>,
     ) {
-        self.windows_sandbox_host =
-            if !self.windows_sandbox_local_server && self.remote_connection.is_some() {
-                crate::app::WindowsSandboxHost::Remote
-            } else {
-                session.windows_sandbox_host
-            };
+        self.windows_sandbox_host = session.windows_sandbox_host;
         self.invalidate_permission_discovery();
         self.permission_discovery = None;
         self.permission_profiles_menu_opened = false;

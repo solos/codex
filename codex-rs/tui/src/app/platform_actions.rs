@@ -63,7 +63,7 @@ impl App {
         }
     }
 
-    /// A local app server owns setup for both embedded and daemon connections.
+    /// The embedded app server owns sandbox setup.
     pub(super) fn windows_sandbox_setup_is_local(&self) -> bool {
         self.chat_widget.windows_sandbox_local_server
             && self.windows_sandbox_host() == WindowsSandboxHost::Local

@@ -42,7 +42,6 @@ pub struct EmaRequestAuthority {
     revoked: CancellationToken,
     is_current: Arc<dyn Fn() -> bool + Send + Sync>,
     responses: Arc<RwLock<()>>,
-    policy: Option<codex_config::CloudConfigBundleBinding>,
 }
 
 impl Default for EmaRequestAuthority {
@@ -62,14 +61,7 @@ impl EmaRequestAuthority {
             revoked,
             is_current: Arc::new(is_current),
             responses: Arc::default(),
-            policy: None,
         }
-    }
-
-    /// Policy changes stop new dispatches without cancelling already admitted responses.
-    pub fn with_policy(mut self, policy: Option<codex_config::CloudConfigBundleBinding>) -> Self {
-        self.policy = policy;
-        self
     }
 
     /// Isolate one connection's credential failure while sharing the owner's response drain.
@@ -79,7 +71,6 @@ impl EmaRequestAuthority {
             revoked: self.revoked.child_token(),
             is_current: Arc::new(move || !owner.is_revoked()),
             responses: Arc::clone(&self.responses),
-            policy: self.policy.clone(),
         }
     }
 
@@ -103,14 +94,6 @@ impl EmaRequestAuthority {
 
     pub fn check_new_request(&self) -> Result<(), ExecServerError> {
         self.check()?;
-        if self.policy.as_ref().is_some_and(|binding| {
-            binding.read().status != codex_config::CloudConfigBundleBindingStatus::Current
-        }) {
-            return Err(ExecServerError::RequestNotSent(
-                "enterprise MCP policy is updating or unavailable; retry after it is applied"
-                    .into(),
-            ));
-        }
         Ok(())
     }
 

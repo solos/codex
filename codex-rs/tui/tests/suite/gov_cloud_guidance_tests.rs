@@ -6,11 +6,7 @@ use pretty_assertions::assert_eq;
 #[test]
 fn gov_cloud_startup_persists_only_acknowledgment() -> Result<()> {
     let cwd = codex_utils_cargo_bin::repo_root()?;
-    let args = [
-        "--no-daemon",
-        "-c",
-        "features.api_key_model_discovery=false",
-    ];
+    let args = ["-c", "features.api_key_model_discovery=false"];
     for action in ["quit", "acknowledge"] {
         let home = tempfile::tempdir()?;
         write_test_config(home.path(), &cwd)?;

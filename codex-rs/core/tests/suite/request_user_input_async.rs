@@ -1,5 +1,4 @@
 use anyhow::Result;
-use codex_core::RestrictRootCapabilities;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
@@ -34,22 +33,15 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
 
-enum ThreadKind {
-    Root,
-    NativeChild,
-    HostRestricted,
-}
-
-#[test_case(ThreadKind::Root, None, true, false; "root_without_capability")]
-#[test_case(ThreadKind::Root, Some("send_user_message_async"), true, true; "legacy_capability_enabled")]
-#[test_case(ThreadKind::Root, Some("send_user_message_async"), false, false; "legacy_capability_disabled")]
-#[test_case(ThreadKind::Root, Some("request_user_input_async"), true, true; "current_capability_enabled")]
-#[test_case(ThreadKind::Root, Some("request_user_input_async"), false, false; "current_capability_disabled")]
-#[test_case(ThreadKind::NativeChild, Some("request_user_input_async"), true, false; "subagent")]
-#[test_case(ThreadKind::HostRestricted, Some("request_user_input_async"), true, false; "host_restricted")]
+#[test_case(SessionSource::Exec, None, true, false; "root_without_capability")]
+#[test_case(SessionSource::Exec, Some("send_user_message_async"), true, true; "legacy_capability_enabled")]
+#[test_case(SessionSource::Exec, Some("send_user_message_async"), false, false; "legacy_capability_disabled")]
+#[test_case(SessionSource::Exec, Some("request_user_input_async"), true, true; "current_capability_enabled")]
+#[test_case(SessionSource::Exec, Some("request_user_input_async"), false, false; "current_capability_disabled")]
+#[test_case(SessionSource::SubAgent(SubAgentSource::Other("test".to_string())), Some("request_user_input_async"), true, false; "subagent")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_question_registration_respects_user_input_setting(
-    thread_kind: ThreadKind,
+    session_source: SessionSource,
     catalog_tool: Option<&'static str>,
     enabled: bool,
     expect_question_tool: bool,
@@ -76,21 +68,15 @@ async fn async_question_registration_respects_user_input_setting(
         })
         .build_with_auto_env(&server)
         .await?;
-    let session_source = match thread_kind {
-        ThreadKind::Root => SessionSource::Exec,
-        ThreadKind::NativeChild => SessionSource::SubAgent(SubAgentSource::Other("test".into())),
-        ThreadKind::HostRestricted => SessionSource::Custom("host".into()),
-    };
-    let mut options = StartThreadOptions {
-        session_source: Some(session_source),
-        ..StartThreadOptions::new(test.config.clone())
-    };
-    if matches!(thread_kind, ThreadKind::HostRestricted) {
-        options
-            .thread_extension_init
-            .insert(RestrictRootCapabilities);
-    }
-    let thread = test.thread_manager.start_thread(options).await?.thread;
+    let is_root = !session_source.is_non_root_agent();
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(session_source),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
     thread
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "Report progress.".to_string(),
@@ -113,7 +99,7 @@ async fn async_question_registration_respects_user_input_setting(
             .iter()
             .filter(|tool| tool["name"] == "send_message_to_user_async")
             .count(),
-        usize::from(matches!(thread_kind, ThreadKind::Root)),
+        usize::from(is_root),
     );
     Ok(())
 }

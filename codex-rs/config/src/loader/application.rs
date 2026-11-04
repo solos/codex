@@ -1,8 +1,6 @@
-//! Reads application requirements independently of user, project, and cloud configuration.
-//! Captured local layers retain their positions around cloud layers during composition.
+//! Reads application requirements independently of user and project configuration.
 
 use crate::ApplicationRequirementsToml;
-use crate::CloudRequirementsTomlBundle;
 use crate::LoaderOverrides;
 use crate::RequirementsLayerEntry;
 use crate::compose_requirements;
@@ -10,7 +8,7 @@ use codex_file_system::ExecutorFileSystem;
 use std::io;
 use toml::Value;
 
-/// Local application sources captured without waiting for a cloud request.
+/// Local application sources captured at startup.
 #[derive(Clone, Debug, Default)]
 pub struct LocalApplicationRequirements {
     system: Option<RequirementsLayerEntry>,
@@ -19,18 +17,12 @@ pub struct LocalApplicationRequirements {
 }
 
 impl LocalApplicationRequirements {
-    /// Composes system, cloud, and MDM application policy in the normal requirements order.
-    pub fn compose(
-        &self,
-        cloud: CloudRequirementsTomlBundle,
-    ) -> io::Result<Option<ApplicationRequirementsToml>> {
+    /// Composes system and MDM application policy in the normal requirements order.
+    pub fn compose(&self) -> io::Result<Option<ApplicationRequirementsToml>> {
         if self.ignore_managed {
             return Ok(None);
         }
         let mut layers = self.system.clone().into_iter().collect::<Vec<_>>();
-        for layer in cloud.into_layers() {
-            layers.extend(application_layer(layer)?);
-        }
         layers.extend(self.mdm.clone());
         Ok(compose_requirements(layers)?
             .and_then(|requirements| requirements.into_toml().application))
@@ -79,8 +71,7 @@ pub async fn load_local_application_requirements(
         mdm,
         ignore_managed: false,
     };
-    // Validate local requirements before cloud loading.
-    local.compose(CloudRequirementsTomlBundle::default())?;
+    local.compose()?;
     Ok(local)
 }
 

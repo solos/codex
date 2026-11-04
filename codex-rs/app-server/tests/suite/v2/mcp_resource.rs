@@ -61,7 +61,6 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigContext;
 use codex_config::ThreadConfigLoader;
@@ -120,9 +119,6 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-
-#[path = "mcp_resource/plugin_metadata_refresh.rs"]
-mod plugin_metadata_refresh;
 
 pub(super) const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_RESOURCE_URI: &str = "test://codex/resource";
@@ -290,77 +286,6 @@ async fn mcp_resource_read_preserves_protocol_errors(protocol: ProtocolVersion) 
             );
         }
     }
-
-    apps_server_handle.abort();
-    let _ = apps_server_handle.await;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_executor_does_not_expose_cloud_skills() -> Result<()> {
-    let responses_server = responses::start_mock_server().await;
-    let (apps_server_url, _apps_server_calls, apps_server_handle) =
-        start_resource_apps_mcp_server().await?;
-    let responses_server_uri = responses_server.uri();
-    let (_codex_home, mut mcp) = start_resource_test_app_server(
-        &apps_server_url,
-        &responses_server_uri,
-        // This test exercises the implicit local executor.
-        ResourceTestEnvironment::Local,
-    )
-    .await?;
-
-    let thread_start_id = mcp
-        .send_thread_start_request(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadStartResponse { thread, .. } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_start_id)).await??;
-
-    let response_mock = responses::mount_sse_once(
-        &responses_server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-no-orchestrator-skill"),
-            responses::ev_assistant_message("msg-no-orchestrator-skill", "Done"),
-            responses::ev_completed("resp-no-orchestrator-skill"),
-        ]),
-    )
-    .await;
-    let turn_start_id = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id,
-            input: vec![UserInput::Text {
-                text: format!("Use ${SKILL_NAME}"),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let _: TurnStartResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_start_id)).await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let request = response_mock.single_request();
-    assert!(request.tool_by_name("skills", "list").is_none());
-    assert!(request.tool_by_name("skills", "read").is_none());
-    assert!(
-        request
-            .message_input_texts("developer")
-            .iter()
-            .all(|text| !text.contains(SKILL_NAME))
-    );
-    assert!(
-        request
-            .message_input_texts("user")
-            .iter()
-            .all(|text| !text.contains(SKILL_MARKER))
-    );
 
     apps_server_handle.abort();
     let _ = apps_server_handle.await;
@@ -1277,7 +1202,6 @@ async fn start_resource_in_process_client(
         cli_overrides,
         loader_overrides,
         strict_config: false,
-        cloud_config_bundle: CloudConfigBundleLoader::default(),
         embedded_network_policy: Default::default(),
         thread_config_loader,
         feedback: CodexFeedback::new(),

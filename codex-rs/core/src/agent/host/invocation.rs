@@ -1,21 +1,25 @@
 //! Bind host child preparation and startup to a live tool invocation.
 
-use super::spawn::create_spawn;
+use super::spawn::SpawnDestination;
+use super::spawn::prepare_spawn;
+use super::spawn::start_prepared;
 use super::types::HostThreadSpawnReservation;
-use super::types::PreparedChildContext;
-use crate::agent::control::inherited_dynamic_tools;
+use super::types::PreparedThreadSpawn;
 use crate::codex_thread::CodexThread;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::thread_spawn::ChildSpawnSettings;
 use crate::thread_spawn::ThreadCreateRequest;
 use crate::thread_spawn::ThreadSpawnError;
 use crate::thread_spawn::ThreadSpawnResult;
 use crate::tools::context::ToolInvocation;
+use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::MultiAgentVersion;
+use futures::TryFutureExt;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::future::Future;
@@ -191,71 +195,50 @@ pub(crate) async fn create(
     request: ThreadCreateRequest,
     reservation: HostThreadSpawnReservation,
 ) -> Result<ThreadSpawnResult, ThreadSpawnError> {
-    with_live_invocation(thread, invocation, |step| async move {
-        let (settings, task_name) =
-            crate::thread_spawn::prepare(&thread.session, &step, &invocation.call_id, request)
-                .await?;
-        Box::pin(create_spawn(
-            thread,
-            invocation,
-            settings,
-            task_name,
-            reservation,
-        ))
-        .await
-    })
+    with_spawn_request(
+        thread,
+        invocation,
+        request,
+        |request, task_name| async move {
+            let prepared = Box::pin(prepare_spawn(
+                thread,
+                request,
+                task_name,
+                SpawnDestination::SameManager,
+            ))
+            .await?;
+            Box::pin(start_prepared(
+                &thread.session.services.local_agent_runtime,
+                prepared,
+                reservation,
+                Some(invocation),
+            ))
+            .await
+        },
+    )
     .await
 }
 
 pub(crate) async fn prepare(
     thread: &CodexThread,
     invocation: &ToolInvocationContext,
-) -> Result<PreparedChildContext, ThreadSpawnError> {
-    with_live_invocation(thread, invocation, |step| async move {
-        let turn = &step.turn;
-        let dynamic_tools =
-            inherited_dynamic_tools(thread, &turn.config, turn.multi_agent_version).await;
-        let state = thread.session.services.local_agent_runtime.upgrade()?;
-        if !std::ptr::eq(
-            state.get_thread(thread.session.thread_id).await?.as_ref(),
-            thread,
-        ) {
-            return Err(CodexErr::ThreadNotFound(thread.session.thread_id).into());
-        }
-        let instructions = step.loaded_agents_md.as_deref();
-        #[allow(deprecated)]
-        let cwd = turn.cwd.clone();
-        let (exec_policy, exec_policy_source_requirements) =
-            thread.session.services.exec_policy.snapshot();
-        Ok(PreparedChildContext {
-            originator: turn.originator.clone(),
-            user_instructions: instructions
-                .and_then(|md| md.user_instructions.as_ref())
-                .map(|entry| entry.text.clone()),
-            thread_instructions: instructions
-                .and_then(|md| md.thread_instructions.as_ref())
-                .map(|entry| entry.text.clone()),
-            cwd,
-            environments: step.inherited_environments.inheritable_requests(),
-            selected_capability_roots: step.inherited_environments.selected_capability_roots(),
-            resolved_permission_profile: turn.config.permissions.permission_profile().clone(),
-            approval_policy: step.settings.approval_policy(),
-            approvals_reviewer: step.settings.approvals_reviewer(),
-            exec_policy,
-            exec_policy_source_requirements,
-            dynamic_tools,
-            disabled_plugin_ids: turn.disabled_plugin_ids.clone(),
-        })
+    request: ThreadCreateRequest,
+) -> Result<PreparedThreadSpawn, ThreadSpawnError> {
+    with_spawn_request(thread, invocation, request, |request, task_name| {
+        prepare_spawn(thread, request, task_name, SpawnDestination::Detached)
+            .map_err(ThreadSpawnError::from)
     })
     .await
 }
 
-async fn with_live_invocation<T, Fut>(
+async fn with_spawn_request<T, F, Fut>(
     thread: &CodexThread,
     invocation: &ToolInvocationContext,
-    operation: impl FnOnce(Arc<StepContext>) -> Fut,
+    request: ThreadCreateRequest,
+    operation: F,
 ) -> Result<T, ThreadSpawnError>
 where
+    F: FnOnce(ChildSpawnSettings, AgentPath) -> Fut,
     Fut: Future<Output = Result<T, ThreadSpawnError>>,
 {
     let session = &thread.session;
@@ -278,7 +261,8 @@ where
             if !thread.is_running() {
                 return Err(CodexErr::ThreadNotFound(session.thread_id).into());
             }
-            operation(step).await
+            let (request, task_name) = crate::thread_spawn::prepare(session, &step, &invocation.call_id, request).await?;
+            operation(request, task_name).await
         } => result,
     }
 }

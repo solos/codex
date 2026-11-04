@@ -13,7 +13,6 @@ use super::system_config_toml_file_with_overrides;
 use super::system_requirements_toml_file_with_overrides;
 use crate::CONFIG_TOML_FILE;
 use crate::ConfigLayerSource;
-use crate::ConfigRequirements;
 use crate::LoaderOverrides;
 use crate::RequirementSource;
 use crate::RequirementsLayerEntry;
@@ -53,27 +52,20 @@ impl LocalConfigLayers {
 pub struct LocalTomlLayerStack<S> {
     /// Layers ordered from lowest to highest precedence.
     pub layers: Vec<LocalTomlLayer<S>>,
-    /// Position at which a caller should insert cloud-provided layers.
-    pub cloud_insertion_index: usize,
 }
 
 impl<S> LocalTomlLayerStack<S> {
     fn project(self, paths: &[Vec<String>]) -> Self {
         let selectors = SelectorNode::from_paths(paths);
         let mut projected_layers = Vec::new();
-        let mut cloud_insertion_index = 0;
-        for (index, layer) in self.layers.into_iter().enumerate() {
+        for layer in self.layers {
             let Some(toml) = project_toml(&layer.toml, &selectors) else {
                 continue;
             };
-            if index < self.cloud_insertion_index {
-                cloud_insertion_index += 1;
-            }
             projected_layers.push(LocalTomlLayer { toml, ..layer });
         }
         Self {
             layers: projected_layers,
-            cloud_insertion_index,
         }
     }
 }
@@ -90,7 +82,7 @@ pub struct LocalTomlLayer<S> {
 /// Loads the fixed executor-local configuration sources used by environment
 /// config reads.
 ///
-/// Cloud, selected profiles, session flags, and thread-provided layers are not
+/// Selected profiles, session flags, and thread-provided layers are not
 /// included. Project discovery uses the executor's system, base-user, and
 /// legacy managed configuration.
 pub async fn load_local_config_layers(
@@ -161,10 +153,8 @@ pub(super) async fn load_local_config_layers_with_overrides(
             "feature_requirements".to_string(),
             "credential_masking".to_string(),
         ],
-        // Keep the tables intact so discovery validates the same declarations as startup.
-        vec!["experimental_network".to_string()],
-        vec!["network_proxy".to_string()],
-        vec!["permissions".to_string(), "network".to_string()],
+        vec!["experimental_network".to_string(), "enabled".to_string()],
+        vec!["network_proxy".to_string(), "enabled".to_string()],
     ]);
     let effective_requirements =
         compose_requirements(broker_requirements.layers.into_iter().map(|layer| {
@@ -174,7 +164,7 @@ pub(super) async fn load_local_config_layers_with_overrides(
         .unwrap_or_default();
     apply_credential_broker_requirements(
         &mut trust_context,
-        &ConfigRequirements::try_from(effective_requirements)?,
+        &effective_requirements,
         &trusted_broker_config,
     );
     let project_layers = discover_project_layers(
@@ -222,7 +212,7 @@ pub(super) async fn load_local_config_layers_with_overrides(
             .as_table()
             .into_iter()
             .flatten()
-            .filter(|(name, _)| !matches!(name.as_str(), "filesystem" | "network"))
+            .filter(|(name, _)| name.as_str() != "filesystem")
             .map(|(name, profile)| {
                 (
                     name.clone(),
@@ -241,8 +231,6 @@ pub(super) async fn load_local_config_layers_with_overrides(
     Ok(LocalConfigLayers {
         config: LocalTomlLayerStack {
             layers: config_layers,
-            // Cloud config follows the required system layer.
-            cloud_insertion_index: 1,
         },
         requirements,
     })
@@ -333,7 +321,6 @@ async fn local_requirements_layers(
 ) -> io::Result<LocalTomlLayerStack<RequirementSource>> {
     let system_file = system_requirements_toml_file_with_overrides(overrides)?;
     let system = load_requirements_toml(fs, &system_file).await?;
-    let cloud_insertion_index = usize::from(system.is_some());
     let mut entries = Vec::new();
     entries.extend(system);
     entries.extend(requirements_layers_from_legacy_scheme(
@@ -359,10 +346,7 @@ async fn local_requirements_layers(
     for entry in entries {
         layers.push(local_requirements_layer(entry)?);
     }
-    Ok(LocalTomlLayerStack {
-        layers,
-        cloud_insertion_index,
-    })
+    Ok(LocalTomlLayerStack { layers })
 }
 
 fn local_requirements_layer(

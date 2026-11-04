@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::cloud_config;
+use crate::config_load;
 use crate::plugin_cmd::JsonMarketplaceSource;
 use crate::plugin_cmd::configured_marketplace_snapshot_issues;
 use crate::plugin_cmd::configured_marketplace_sources;
@@ -129,7 +129,7 @@ impl MarketplaceCli {
             subcommand,
         } = self;
 
-        let builder = cloud_config::config_builder(
+        let builder = config_load::config_builder(
             &config_overrides,
             LoaderOverrides::default(),
             ConfigOverrides::default(),

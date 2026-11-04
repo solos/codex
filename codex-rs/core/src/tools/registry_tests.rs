@@ -120,7 +120,11 @@ impl LifecycleTestHandler {
     }
 }
 
-impl CoreToolRuntime for LifecycleTestHandler {}
+impl CoreToolRuntime for LifecycleTestHandler {
+    fn requires_guardian_review(&self, _invocation: &ToolInvocation) -> bool {
+        self.tool_name.name == "reviewed_tool"
+    }
+}
 
 impl codex_extension_api::ApprovalReviewContributor for LifecycleTestHandler {
     fn decide<'a>(
@@ -774,12 +778,7 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
     });
     builder.approval_review_contributor(reviewed_handler.clone());
     session.services.extensions = Arc::new(builder.build());
-    let mut registry = ToolRegistry::from_tools([ok_handler, failing_handler]);
-    registry.register_trusted_with_native_review(
-        reviewed_handler,
-        super::ToolExposure::Direct,
-        super::NativeReview::Required,
-    );
+    let registry = ToolRegistry::from_tools([ok_handler, failing_handler, reviewed_handler]);
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -880,7 +879,6 @@ fn test_invocation(
         call_id: call_id.to_string(),
         tool_name,
         source: crate::tools::context::ToolCallSource::Direct,
-        native_call: None,
         environments: Default::default(),
         payload: ToolPayload::Function {
             arguments: "{}".to_string(),

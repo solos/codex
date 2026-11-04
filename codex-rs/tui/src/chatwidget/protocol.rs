@@ -214,19 +214,10 @@ impl ChatWidget {
             ServerNotification::Error(notification) => {
                 if notification.will_retry {
                     if !from_replay {
-                        let error = notification.error;
-                        let message =
-                            if let Some(AppServerCodexErrorInfo::ResponseStreamDisconnected {
-                                http_status_code: Some(429),
-                            }) = error.codex_error_info
-                                && let Some(attempt) =
-                                    error.message.strip_prefix("Reconnecting... ")
-                            {
-                                format!("Server is busy, reconnecting {attempt}")
-                            } else {
-                                error.message
-                            };
-                        self.on_stream_error(message, error.additional_details);
+                        self.on_stream_error(
+                            notification.error.message,
+                            notification.error.additional_details,
+                        );
                     }
                 } else if from_replay || !safety_recourse::defer_error(self, &notification) {
                     self.last_non_retry_error = Some((
@@ -388,7 +379,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadReadStateChanged(_)
-            | ServerNotification::ThreadSectionChanged(_)
             | ServerNotification::ThreadReverted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadPredictionUpdated(_)
@@ -407,7 +397,6 @@ impl ChatWidget {
             | ServerNotification::AppListUpdated(_)
             | ServerNotification::EnvironmentConnected(_)
             | ServerNotification::EnvironmentDisconnected(_)
-            | ServerNotification::RemoteControlStatusChanged(_)
             | ServerNotification::ExternalAgentConfigImportProgress(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::FsChanged(_)

@@ -28,21 +28,16 @@ async fn thread_color_preview_matches_footer() {
             let mut snapshot = Vec::new();
             let preview = chat.status_surface_preview_data();
             for use_colors in [true, false] {
-                let line = preview
-                    .status_line_for_items(items, use_colors)
-                    .unwrap()
-                    .into_hyperlink_line()
-                    .line;
+                let line = preview.status_line_for_items(items, use_colors).unwrap();
                 let footer = crate::bottom_pane::status_line_from_segments(
                     items
                         .into_iter()
                         .map(|item| (item, chat.status_line_value_for_item(item).unwrap())),
                     use_colors,
                     Some(id),
-                    /*pull_request_url*/ None,
                 )
                 .unwrap();
-                assert_eq!(line, footer.line);
+                assert_eq!(line, footer);
                 snapshot.push(format!("colors={use_colors}: {line:?}"));
             }
             insta::assert_snapshot!(snapshot.join("\n"));
@@ -54,7 +49,7 @@ fn status_preview_line_option(chat: &mut ChatWidget, items: &[StatusLineItem]) -
     let preview_data = chat.status_surface_preview_data();
     preview_data
         .status_line_for_items(items.iter().copied(), /*use_theme_colors*/ true)
-        .map(|content| line_text(content.into_hyperlink_line().line))
+        .map(line_text)
 }
 
 fn status_preview_line(chat: &mut ChatWidget, items: &[StatusLineItem]) -> String {

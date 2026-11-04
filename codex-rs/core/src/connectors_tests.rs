@@ -2,7 +2,6 @@ use super::*;
 use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
 use crate::plugins::plugins_manager_for_config;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::ApprovalsReviewer;
 use codex_connectors::merge::plugin_connector_to_app_info;
 use codex_connectors::metadata::connector_install_url;
@@ -427,86 +426,6 @@ approvals_reviewer = "{app}"
         );
     }
 }
-
-#[tokio::test]
-async fn default_app_approvals_reviewer_respects_global_reviewer_requirements() {
-    let codex_home = tempdir().expect("tempdir should succeed");
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
-approvals_reviewer = "auto_review"
-
-[apps._default]
-approvals_reviewer = "user"
-"#,
-    )
-    .expect("write config");
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["auto_review"]"#,
-            ),
-        )
-        .build()
-        .await
-        .expect("config should build");
-
-    assert_eq!(
-        mcp_approvals_reviewer_from_layers(
-            &config.config_layer_stack,
-            config.approvals_reviewer,
-            config.model.as_deref(),
-            CODEX_APPS_MCP_SERVER_NAME,
-            Some("calendar"),
-            /*link_id*/ None,
-        ),
-        ApprovalsReviewer::AutoReview
-    );
-}
-
-#[tokio::test]
-async fn app_approvals_reviewer_respects_global_reviewer_requirements() {
-    let codex_home = tempdir().expect("tempdir should succeed");
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
-approvals_reviewer = "auto_review"
-
-[apps.calendar]
-approvals_reviewer = "user"
-
-[apps.calendar.links.link_calendar]
-approvals_reviewer = "user"
-"#,
-    )
-    .expect("write config");
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["auto_review"]"#,
-            ),
-        )
-        .build()
-        .await
-        .expect("config should build");
-
-    for link_id in [None, Some("link_calendar")] {
-        assert_eq!(
-            mcp_approvals_reviewer_from_layers(
-                &config.config_layer_stack,
-                config.approvals_reviewer,
-                config.model.as_deref(),
-                CODEX_APPS_MCP_SERVER_NAME,
-                Some("calendar"),
-                link_id,
-            ),
-            ApprovalsReviewer::AutoReview
-        );
-    }
-}
-
 #[tokio::test]
 async fn tool_suggest_connector_ids_include_configured_tool_suggest_discoverables() {
     let codex_home = tempdir().expect("tempdir should succeed");

@@ -2,9 +2,7 @@
 //! Persisted sessions offer a direct UUID command and an optional named picker hint.
 
 use super::*;
-use crate::RemoteAppServerEndpoint;
 use crate::exec_command::escape_command;
-use crate::status::remote_connection::sanitized_websocket_url;
 
 /// A persisted thread that can be resumed after the TUI exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,40 +21,13 @@ pub struct DisconnectInfo {
 
 impl App {
     pub(super) fn exit_info(&self, exit_reason: ExitReason) -> AppExitInfo {
-        let thread_id = self.chat_widget.thread_id().or(self.primary_thread_id);
-        let disconnect_info = thread_id.and_then(|_| {
-            let command = match &self.app_server_target {
-                AppServerTarget::Embedded => return None,
-                AppServerTarget::LocalDaemon { .. } => vec!["codex".to_string()],
-                AppServerTarget::Remote { endpoint } => {
-                    let address = match endpoint {
-                        RemoteAppServerEndpoint::WebSocket { websocket_url, .. } => {
-                            sanitized_websocket_url(websocket_url)
-                                .and_then(|url| {
-                                    let host = url.host()?;
-                                    let port = url.port_or_known_default()?;
-                                    // The CLI requires an explicit port, including 80/443.
-                                    Some(format!("{}://{host}:{port}{}", url.scheme(), url.path()))
-                                })
-                                .unwrap_or_else(|| "<server-address>".to_string())
-                        }
-                        RemoteAppServerEndpoint::UnixSocket { socket_path } => {
-                            format!("unix://{}", socket_path.display())
-                        }
-                    };
-                    vec!["codex".to_string(), "--remote".to_string(), address]
-                }
-            };
-            let stop_hint = self
-                .keymap
-                .agents
-                .primary_hint("stop", &self.keymap.agents.stop)
-                .map_or_else(
-                    || "use the configured stop shortcut".to_string(),
-                    |key| format!("press {}", key.display_label()),
-                );
-            Some(DisconnectInfo { command, stop_hint })
-        });
+        let thread_id = match exit_reason {
+            ExitReason::Archived(_) | ExitReason::ThreadRemoved => None,
+            ExitReason::UserRequested | ExitReason::TurnInterrupted | ExitReason::Fatal(_) => {
+                self.chat_widget.thread_id().or(self.primary_thread_id)
+            }
+        };
+        let disconnect_info = None;
         AppExitInfo {
             token_usage: self.token_usage(),
             thread_id,
@@ -88,7 +59,7 @@ impl AppExitInfo {
         {
             let turn_interrupted = matches!(self.exit_reason, ExitReason::TurnInterrupted);
             let message = match self.exit_reason {
-                ExitReason::UserRequested => {
+                ExitReason::UserRequested | ExitReason::Archived(_) | ExitReason::ThreadRemoved => {
                     "Disconnected from this task. Any running work continues."
                 }
                 ExitReason::Fatal(_) => "Disconnected from this task. Work may still be running.",
@@ -127,7 +98,9 @@ impl AppExitInfo {
         if !self.token_usage.is_zero() {
             lines.push(self.token_usage.to_string());
         }
-        if let Some(thread) = self.resume_hint {
+        if let ExitReason::Archived(thread_id) = self.exit_reason {
+            lines.push(format!("Session archived: {thread_id}"));
+        } else if let Some(thread) = self.resume_hint {
             lines.push("To continue this session, run:".to_string());
             lines.push(format!(
                 "  {}",

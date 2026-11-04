@@ -68,24 +68,8 @@ impl super::ChatWidget {
         *self.rendered_selection.borrow_mut() = Default::default();
         self.empty_state_animation.borrow_mut().pause_clock();
         let entries = self.warning_display_state.visible_entries(cells);
-        let daemon_restart_hint_at = self
-            .remote_connection
-            .as_ref()
-            .filter(|connection| connection.is_managed_daemon)
-            .and_then(|_| {
-                entries.iter().position(|entry| match &entry.id {
-                    WarningId::Message(message) => self
-                        .warning_display_state
-                        .startup_config_warnings
-                        .contains(message),
-                    WarningId::McpServer(_) => false,
-                })
-            });
-        self.bottom_pane.show_warnings(
-            entries,
-            Arc::clone(&self.warning_display_state.transcript),
-            daemon_restart_hint_at,
-        );
+        self.bottom_pane
+            .show_warnings(entries, Arc::clone(&self.warning_display_state.transcript));
     }
 
     pub(crate) fn sync_warnings(&mut self, cells: &[Arc<dyn HistoryCell>]) {

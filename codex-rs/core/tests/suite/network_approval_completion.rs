@@ -7,7 +7,6 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::TurnInputRequest;
 use codex_core::config::NetworkProxySpec;
 use codex_exec_server::ExecParams;
@@ -183,11 +182,6 @@ async fn remote_local_binding_policy_and_review_cleanup(
     });
     let test = test_codex()
         .with_exec_server_url(exec_server_url)
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                "[experimental_network]\nenabled = true\n{local_binding}"
-            )),
-        )
         .with_pre_build_hook(move |home| {
             fs::write(
                 home.join("config.toml"),

@@ -1,28 +1,17 @@
 use anyhow::Result;
-use codex_config::ConfigRequirements;
-use codex_config::ConfigRequirementsWithSources;
-use codex_config::RequirementSource;
+use codex_config::ConfigRequirementsToml;
 use codex_windows_sandbox::WindowsSandboxProvisioningSettings;
 use codex_windows_sandbox::WindowsSandboxProxyListeners;
 use pretty_assertions::assert_eq;
 
 use crate::ipc::ProvisioningRequest;
 
-const NETWORK_TABLES: [&str; 3] = [
-    "network_proxy",
-    "experimental_network",
-    "permissions.network",
-];
-
 fn validate_requirements(
     settings: &WindowsSandboxProvisioningSettings,
     listeners: WindowsSandboxProxyListeners,
     contents: &str,
 ) -> Result<()> {
-    let mut requirements_with_sources = ConfigRequirementsWithSources::default();
-    requirements_with_sources
-        .merge_unset_fields(RequirementSource::Unknown, toml::from_str(contents)?);
-    let requirements = ConfigRequirements::try_from(requirements_with_sources)?;
+    let requirements: ConfigRequirementsToml = toml::from_str(contents)?;
     super::validate_requirements(settings, &listeners, &requirements)
 }
 
@@ -68,7 +57,7 @@ fn unmanaged_policy_allows_default_and_requested_network_settings() -> Result<()
             http_ports: vec![3128],
             socks_ports: vec![8080],
         },
-        "allowed_sandbox_modes = [\"read-only\", \"workspace-write\"]",
+        "allowed_sandbox_modes = [\"workspace-write\"]",
     )
 }
 
@@ -102,14 +91,14 @@ fn forbidden_local_binding_is_rejected() {
         proxy_ports: Vec::new(),
         allow_local_binding: true,
     };
-    for table in NETWORK_TABLES {
-        let policy = format!("[{table}]\nallow_local_binding = false");
-        let error =
-            validate_requirements(&settings, WindowsSandboxProxyListeners::default(), &policy)
-                .expect_err("local binding must be rejected");
-        assert_eq!(
-            error.to_string(),
-            "managed policy does not permit local network binding",
+    for table in ["network_proxy", "experimental_network"] {
+        assert!(
+            validate_requirements(
+                &settings,
+                WindowsSandboxProxyListeners::default(),
+                &format!("[{table}]\nallow_local_binding = false")
+            )
+            .is_err(),
             "{table}"
         );
     }
@@ -117,7 +106,7 @@ fn forbidden_local_binding_is_rejected() {
 
 #[test]
 fn disabled_network_rejects_proxy_ports_and_local_binding() -> Result<()> {
-    for table in NETWORK_TABLES {
+    for table in ["network_proxy", "experimental_network"] {
         let policy = format!("[{table}]\nenabled = false");
         validate_requirements(
             &WindowsSandboxProvisioningSettings::default(),
@@ -178,7 +167,7 @@ fn managed_proxy_ports_allow_only_configured_ports() -> Result<()> {
         proxy_ports: vec![1080, 3128, 8080],
         allow_local_binding: false,
     };
-    for table in NETWORK_TABLES {
+    for table in ["network_proxy", "experimental_network"] {
         let policy = format!("[{table}]\nhttp_port = 3128\nsocks_port = 1080");
         for listeners in [
             WindowsSandboxProxyListeners {
@@ -196,18 +185,11 @@ fn managed_proxy_ports_allow_only_configured_ports() -> Result<()> {
             },
             WindowsSandboxProxyListeners {
                 http_ports: vec![3128],
-                socks_ports: vec![1080, 8080],
-            },
-            WindowsSandboxProxyListeners {
-                http_ports: vec![3128],
                 socks_ports: vec![1080],
             },
             WindowsSandboxProxyListeners::default(),
         ] {
-            assert!(
-                validate_requirements(&prohibited, listeners, &policy).is_err(),
-                "{table}"
-            );
+            assert!(validate_requirements(&prohibited, listeners, &policy).is_err());
         }
         validate_requirements(
             &WindowsSandboxProvisioningSettings::default(),
@@ -301,28 +283,14 @@ fn managed_socks_port_does_not_require_a_disabled_socks_listener() -> Result<()>
 
 #[test]
 fn malformed_machine_policy_fails_closed() {
-    for table in NETWORK_TABLES {
-        let policy = format!("[{table}]\nhttp_port = \"invalid\"");
-        assert!(
-            validate_requirements(
-                &WindowsSandboxProvisioningSettings::default(),
-                WindowsSandboxProxyListeners::default(),
-                &policy,
-            )
-            .is_err(),
-            "{table}"
-        );
-    }
-    for table in ["network_proxy", "experimental_network"] {
-        assert!(
-            validate_requirements(
-                &WindowsSandboxProvisioningSettings::default(),
-                WindowsSandboxProxyListeners::default(),
-                &format!("[{table}]\nenabled = true\n[permissions.network]\nenabled = true")
-            )
-            .is_err()
-        );
-    }
+    assert!(
+        validate_requirements(
+            &WindowsSandboxProvisioningSettings::default(),
+            WindowsSandboxProxyListeners::default(),
+            "[experimental_network]\nhttp_port = \"invalid\""
+        )
+        .is_err()
+    );
     assert!(
         validate_requirements(
             &WindowsSandboxProvisioningSettings::default(),

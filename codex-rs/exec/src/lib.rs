@@ -62,8 +62,6 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_config::managed_config_bundle_loader_for_storage;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
@@ -74,7 +72,6 @@ use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigTomlLoadResult;
-use codex_core::config::bootstrap_auth_config;
 use codex_core::config::find_codex_home;
 use codex_core::config::load_config_toml_with_layer_stack;
 use codex_core::config::resolve_oss_provider;
@@ -409,16 +406,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             cli_kv_overrides.clone(),
             loader_overrides.clone(),
             strict_config,
-            CloudConfigBundleLoader::default(),
         )
         .await;
-        let gate_cloud_config = managed_config_bundle_loader_for_storage(
-            embedded_network_policy
-                .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &gate_bootstrap)?),
-            gate_bootstrap.config_layer_stack.requirements_toml(),
-            /*enable_codex_api_key_env*/ false,
-        )
-        .await?;
         let gate_config = ConfigBuilder::default()
             .codex_home(codex_home.to_path_buf())
             .cli_overrides(cli_kv_overrides.clone())
@@ -428,7 +417,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             })
             .fallback_cwd(Some(config_cwd.to_path_buf()))
             .strict_config(strict_config)
-            .cloud_config_bundle(gate_cloud_config.clone())
             .build()
             .await?;
         if let Some(ExecCommand::Fork(args)) = command.as_mut() {
@@ -439,7 +427,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
                 &cli_kv_overrides,
                 &loader_overrides,
                 worktree::ForkNetwork {
-                    cloud_config_bundle: gate_cloud_config.clone(),
                     policy: embedded_network_policy.clone(),
                 },
                 strict_config,
@@ -458,7 +445,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             })
             .fallback_cwd(Some(config_cwd.to_path_buf()))
             .strict_config(strict_config)
-            .cloud_config_bundle(gate_cloud_config)
             .build()
             .await?;
         if source_config.active_project.is_untrusted() {
@@ -476,7 +462,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             Vec::new(),
             LoaderOverrides::default(),
             strict_config,
-            CloudConfigBundleLoader::default(),
         )
         .await;
         let settings =
@@ -504,21 +489,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         cli_kv_overrides.clone(),
         loader_overrides.clone(),
         strict_config,
-        CloudConfigBundleLoader::default(),
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let bootstrap_auth_config = embedded_network_policy
-        .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &bootstrap_config)?);
-    // API keys cannot fetch workspace-managed configuration. Preserve the
-    // existing ChatGPT bootstrap identity even when model requests allow
-    // CODEX_API_KEY.
-    let cloud_config_bundle = managed_config_bundle_loader_for_storage(
-        bootstrap_auth_config,
-        bootstrap_config.config_layer_stack.requirements_toml(),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await?;
     if let Some(worktree) = managed_worktree.as_ref() {
         // Destination auth can fetch source policy that the host bootstrap could not.
         let source_config = ConfigBuilder::default()
@@ -530,7 +503,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             })
             .fallback_cwd(Some(worktree.source_cwd.clone()))
             .strict_config(strict_config)
-            .cloud_config_bundle(cloud_config_bundle.clone())
             .build()
             .await?;
         if source_config.active_project.is_untrusted() {
@@ -542,24 +514,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     }
     let run_cli_overrides = cli_kv_overrides.clone();
     let run_loader_overrides = loader_overrides.clone();
-    let run_cloud_config_bundle = cloud_config_bundle.clone();
-
     let model_provider = if oss {
-        let bootstrap_config_with_cloud_config;
         let config_toml_for_oss = if oss_provider.is_none() {
-            // The first load intentionally skips cloud config so we can read
-            // auth/base-url settings needed to fetch the bundle. If OSS mode
-            // needs a default provider from config, reload with the bundle.
-            bootstrap_config_with_cloud_config = load_bootstrap_config_or_exit(
-                &codex_home,
-                Some(&config_cwd),
-                cli_kv_overrides.clone(),
-                loader_overrides.clone(),
-                strict_config,
-                cloud_config_bundle.clone(),
-            )
-            .await;
-            &bootstrap_config_with_cloud_config.config_toml
+            bootstrap_config_toml
         } else {
             bootstrap_config_toml
         };
@@ -626,7 +583,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             .harness_overrides(overrides)
             .loader_overrides(loader_overrides.clone())
             .strict_config(strict_config)
-            .cloud_config_bundle(cloud_config_bundle.clone())
             .build()
     };
     let mut config = build_exec_config(
@@ -735,13 +691,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .await?
     };
     let in_process_start_args = InProcessClientStartArgs {
-        required_human_approval: false,
         arg0_paths,
         config: std::sync::Arc::new(config.clone()),
         cli_overrides: run_cli_overrides,
         loader_overrides: run_loader_overrides,
         strict_config,
-        cloud_config_bundle: run_cloud_config_bundle,
         embedded_network_policy,
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -825,7 +779,6 @@ async fn load_bootstrap_config_or_exit(
     cli_kv_overrides: Vec<(String, codex_config::TomlValue)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: CloudConfigBundleLoader,
 ) -> ConfigTomlLoadResult {
     match load_config_toml_with_layer_stack(
         codex_home,
@@ -834,7 +787,6 @@ async fn load_bootstrap_config_or_exit(
         ConfigLoadOptions {
             loader_overrides,
             strict_config,
-            cloud_config_bundle,
         },
     )
     .await
@@ -1025,16 +977,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Bind before starting the agent. Sandbox activity cannot redirect the final write.
-    let bound_output = last_message_file
-        .as_deref()
-        .map(|path| {
-            codex_exec_server::BoundOutput::open(path).map_err(|error| {
-                anyhow::anyhow!("Failed to open last message file {path:?}: {error}")
-            })
-        })
-        .transpose()?;
-
     let mut request_ids = RequestIdSequencer::new();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
         .await
@@ -1222,7 +1164,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 .shutdown()
                 .await
                 .map_err(|err| anyhow::anyhow!("in-process app-server shutdown failed: {err}"))?;
-            event_processor.print_final_output(bound_output)?;
+            event_processor.print_final_output();
             return Ok(());
         }
         InitialOperation::UserTurn {
@@ -1238,9 +1180,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         &mut request_ids,
                         &session_configured.model,
                         &session_configured.model_provider_id,
-                        config
-                            .model_providers
-                            .get(&session_configured.model_provider_id),
                         daybreak_enabled,
                     )
                     .await?
@@ -1422,7 +1361,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
-    event_processor.print_final_output(bound_output)?;
+    event_processor.print_final_output();
     if error_seen {
         std::process::exit(1);
     }
@@ -1939,7 +1878,6 @@ async fn resolve_resume_thread_id(
                 ClientRequest::ThreadList {
                     request_id: RequestId::Integer(0),
                     params: ThreadListParams {
-                        current_account_only: true,
                         excluded_thread_ids: None,
                         attached_to_thread_id: None,
                         originators: None,
@@ -2028,7 +1966,6 @@ async fn resolve_resume_thread_id(
             ClientRequest::ThreadList {
                 request_id: RequestId::Integer(0),
                 params: ThreadListParams {
-                    current_account_only: false,
                     excluded_thread_ids: None,
                     attached_to_thread_id: None,
                     originators: None,

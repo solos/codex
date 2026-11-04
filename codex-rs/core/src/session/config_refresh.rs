@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::config::Constrained;
 use crate::config::RuntimeConfigRefresh;
 use crate::session::Session;
-use codex_config::CloudConfigBundleBindingStatus;
 use codex_config::McpServerAuth;
 use codex_features::Feature;
 use tracing::warn;
@@ -128,31 +127,6 @@ impl Session {
                 &expected_config,
             ) {
                 return ConfigRefreshOutcome::Stale;
-            }
-            // User-only refreshes retain the current managed inputs and their
-            // admission binding. Only MCP refreshes can publish a new policy.
-            let policy_guard = matches!(scope, RuntimeConfigRefresh::Mcp)
-                .then(|| next_config.config_layer_stack.cloud_config_binding())
-                .flatten()
-                .map(|binding| binding.read());
-            let policy_status = policy_guard
-                .as_ref()
-                .map(|guard| guard.status)
-                .unwrap_or(CloudConfigBundleBindingStatus::Current);
-            match policy_status {
-                CloudConfigBundleBindingStatus::Current => {}
-                CloudConfigBundleBindingStatus::Stale => return ConfigRefreshOutcome::Stale,
-                CloudConfigBundleBindingStatus::Suspended => {
-                    // Publish ordinary changes under the last valid requirements,
-                    // but revoke enterprise authority until a valid policy is loaded.
-                    let config = Arc::make_mut(&mut config);
-                    config.disable_mcp_enterprise_auth();
-                    config.config_layer_stack = config
-                        .config_layer_stack
-                        .clone()
-                        .with_cloud_config_binding(/*binding*/ None);
-                    outcome = ConfigRefreshOutcome::Rejected;
-                }
             }
             if let Some(rejection_kind) = rejection_kind {
                 warn!(

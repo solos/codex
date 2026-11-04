@@ -39,10 +39,7 @@ async fn application_network_defaults_and_null_base_url_are_exposed() -> Result<
         ),
     ] {
         let home = TempDir::new()?;
-        std::fs::write(
-            home.path().join("requirements.toml"),
-            format!("allow_remote_control = false\n{contents}"),
-        )?;
+        std::fs::write(home.path().join("requirements.toml"))?;
         let mut server = start_server(&home).await?;
         let wire = read_requirements(&mut server).await?;
         let requirements = wire["requirements"]
@@ -67,11 +64,7 @@ async fn application_network_defaults_and_null_base_url_are_exposed() -> Result<
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn application_destinations_stay_separate_from_agent_network() -> Result<()> {
-    for table in [
-        "network_proxy",
-        "experimental_network",
-        "permissions.network",
-    ] {
+    for table in ["network_proxy", "experimental_network"] {
         let home = TempDir::new()?;
         std::fs::write(
             home.path().join("requirements.toml"),

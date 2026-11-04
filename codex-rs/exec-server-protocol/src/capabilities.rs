@@ -59,7 +59,6 @@ pub struct ExecutorPlugin {
     pub id: String,
     /// Manifest display name, falling back to its name or the installation directory.
     pub display_name: String,
-    pub remote_plugin_id: Option<String>,
     pub version: String,
     pub root: PathUri,
     pub files: DiscoveredPluginFiles,
@@ -97,7 +96,6 @@ impl fmt::Debug for ExecutorPlugin {
         formatter
             .debug_struct("ExecutorPlugin")
             .field("id", &self.id)
-            .field("remote_plugin_id", &self.remote_plugin_id)
             .field("version", &self.version)
             .field("root", &self.root)
             .field("manifest_path", &self.files.manifest.path)

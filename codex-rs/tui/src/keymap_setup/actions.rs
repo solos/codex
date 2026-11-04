@@ -35,15 +35,11 @@ pub(super) struct KeymapActionDescriptor {
 #[derive(Clone, Copy, Debug)]
 enum KeymapActionFeature {
     FastMode,
-    MultiBackend,
-    Workspace,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct KeymapActionFilter {
     pub(crate) fast_mode_enabled: bool,
-    pub(crate) multi_backend_enabled: bool,
-    pub(crate) workspace_enabled: bool,
 }
 
 impl KeymapActionDescriptor {
@@ -51,8 +47,6 @@ impl KeymapActionDescriptor {
         match self.required_feature {
             None => true,
             Some(KeymapActionFeature::FastMode) => filter.fast_mode_enabled,
-            Some(KeymapActionFeature::MultiBackend) => filter.multi_backend_enabled,
-            Some(KeymapActionFeature::Workspace) => filter.workspace_enabled,
         }
     }
 }
@@ -117,13 +111,7 @@ macro_rules! define_keymap_actions {
 
 define_keymap_actions! {
     global "Global" {
-        change_host [MultiBackend] => "Change where a new conversation runs.",
-        focus_main_composer [Workspace] => "Focus the main conversation composer.",
-        focus_sidebar_content [Workspace] => "Focus the side conversation, or hide it when already focused.",
-        hide_pane [Workspace] => "Hide the focused sidebar pane.",
-        focus_pane_left [Workspace] => "Focus the parent conversation.",
-        focus_pane_right [Workspace] => "Focus the open side conversation.",
-        open_agents => "Open the agent command center.",
+        open_agents => "Open the shared agent-session overview.",
         open_transcript => "Open the transcript overlay.",
         find_transcript => "Find text in the full transcript.",
         // Keep the new warnings action out of shared-config writes until older strict readers
@@ -310,9 +298,6 @@ define_keymap_actions! {
 /// parsed back into an action name, because underscores and casing are part of
 /// the stable config contract.
 pub(super) fn action_label(action: &str) -> String {
-    if action == "change_host" {
-        return "Change Where to Run".to_string();
-    }
     action
         .split('_')
         .map(|word| {

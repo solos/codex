@@ -10,10 +10,8 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_tui::Cli as TuiCli;
 use codex_utils_cli::CliConfigOverrides;
 
-use crate::InteractiveRemoteOptions;
 use crate::SessionArchiveConfigOverrides;
 use crate::finalize_session_archive_interactive;
-use crate::resolve_remote_endpoint;
 
 #[derive(Debug, Parser)]
 #[command(defer(configure_help))]
@@ -26,14 +24,6 @@ pub(crate) struct QueueCommand {
     #[arg(long, value_name = "TEXT", value_parser = NonEmptyStringValueParser::new())]
     message: String,
 
-    /// After queueing, try to resume the thread on the local daemon or selected --remote server.
-    /// A failed resume produces a warning and the command still succeeds.
-    #[arg(long)]
-    resume: bool,
-
-    #[clap(flatten)]
-    remote: InteractiveRemoteOptions,
-
     #[clap(flatten)]
     pub(crate) config_overrides: SessionArchiveConfigOverrides,
 }
@@ -43,15 +33,7 @@ fn restricted_options(command: &Command) -> impl Iterator<Item = &Arg> {
     command.get_arguments().filter(|arg| {
         !matches!(
             arg.get_long(),
-            Some(
-                "remote"
-                    | "remote-auth-token-env"
-                    | "config"
-                    | "enable"
-                    | "disable"
-                    | "profile"
-                    | "strict-config"
-            )
+            Some("config" | "enable" | "disable" | "profile" | "strict-config")
         )
     })
 }
@@ -63,8 +45,6 @@ fn configure_help(command: Command) -> Command {
             arg.long_help(None).help("Override a startup configuration value (key=value). Queued messages use the thread's model.")
         } else if !restricted_options(&interactive).any(|shared| shared.get_id() == arg.get_id()) {
             arg
-        } else if arg.get_long() == Some("cd") {
-            arg.help_heading("Local server options (without --remote)")
         } else {
             arg.hide(true)
         }
@@ -76,9 +56,6 @@ pub(super) fn validate_options(command: &Command, root: &ArgMatches) -> Result<(
     let Some(queue) = root.subcommand_matches("queue") else {
         return Ok(());
     };
-    let remote = root
-        .get_one::<String>("remote")
-        .or_else(|| queue.get_one::<String>("remote"));
     let supplied = [root, queue].into_iter().flat_map(|scope| {
         scope
             .ids()
@@ -89,10 +66,9 @@ pub(super) fn validate_options(command: &Command, root: &ArgMatches) -> Result<(
             continue;
         };
         let message = match arg.get_long() {
-            Some("cd") if remote.is_none() => continue,
-            Some("cd") => "`codex queue` does not support `--cd` with `--remote`".to_string(),
+            Some("cd") => continue,
             // These flags already have dedicated diagnostics in the CLI and session startup.
-            Some("worktree" | "no-daemon") => continue,
+            Some("worktree") => continue,
             Some("model") => {
                 "`codex queue` does not support `--model`; queued messages use the thread's model"
                     .to_string()
@@ -112,15 +88,11 @@ pub(crate) async fn run_queue_command(
     command: QueueCommand,
     interactive: TuiCli,
     root_config_overrides: CliConfigOverrides,
-    root_remote: Option<String>,
-    root_remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
 ) -> anyhow::Result<String> {
     let QueueCommand {
         thread,
         message,
-        resume,
-        remote,
         config_overrides,
     } = command;
     let cli =
@@ -134,19 +106,10 @@ pub(crate) async fn run_queue_command(
             "`codex queue` does not support a `model` config override; queued messages use the thread's model"
         );
     }
-    let explicit_remote_endpoint = resolve_remote_endpoint(
-        remote.remote.or(root_remote),
-        remote.remote_auth_token_env.or(root_remote_auth_token_env),
-    )?;
     codex_tui::run_session_queue_command(
         thread,
         message,
-        resume,
-        codex_tui::SessionArchiveCommandOptions {
-            cli,
-            arg0_paths,
-            explicit_remote_endpoint,
-        },
+        codex_tui::SessionArchiveCommandOptions { cli, arg0_paths },
     )
     .await
     .map_err(|error| anyhow::anyhow!("{error:#}"))

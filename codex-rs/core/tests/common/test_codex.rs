@@ -15,20 +15,18 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use codex_agent_graph_store::AgentGraphStore;
 use codex_analytics::AnalyticsEventsClient;
 use codex_attachment_store::AttachmentStore;
-use codex_config::CloudConfigBundleLoader;
 use codex_core::CodexThread;
 pub use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
-use codex_core::ThreadStoreBuilder;
 use codex_core::TimeProvider;
 pub use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_core::shell::Shell;
 use codex_core::shell::get_shell_by_model_provided_path;
+use codex_core::thread_store_from_config;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
@@ -44,7 +42,6 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
-use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -85,7 +82,6 @@ use wiremock::MockServer;
 use crate::TempDirExt;
 use crate::TestEnvironment;
 use crate::load_default_config_for_test;
-use crate::load_default_config_for_test_with_cloud_config_bundle;
 use crate::responses::WebSocketTestServer;
 use crate::responses::output_value_to_text;
 use crate::responses::start_mock_server;
@@ -415,7 +411,6 @@ pub struct TestCodexBuilder {
     pre_build_hooks: Vec<Box<PreBuildHook>>,
     workspace_setups: Vec<Box<WorkspaceSetup>>,
     home: Option<Arc<TempDir>>,
-    cloud_config_bundle: Option<CloudConfigBundleLoader>,
     user_shell_override: Option<Shell>,
     exec_server_url: Option<String>,
     extensions: Arc<ExtensionRegistry<Config>>,
@@ -425,9 +420,7 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
-    model_catalog_settings: Option<ModelCatalogSettings>,
     thread_store: Option<Arc<dyn ThreadStore>>,
-    agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
     image_store: Arc<dyn AttachmentStore>,
 }
 
@@ -439,11 +432,6 @@ impl TestCodexBuilder {
 
     pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
         self.thread_store = Some(thread_store);
-        self
-    }
-
-    pub fn with_agent_graph_store(mut self, agent_graph_store: Arc<dyn AgentGraphStore>) -> Self {
-        self.agent_graph_store = Some(agent_graph_store);
         self
     }
 
@@ -478,11 +466,6 @@ impl TestCodexBuilder {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         self.analytics_events_client = Some(analytics_events_client);
-        self
-    }
-
-    pub fn with_model_catalog_settings(mut self, settings: ModelCatalogSettings) -> Self {
-        self.model_catalog_settings = Some(settings);
         self
     }
 
@@ -562,14 +545,6 @@ impl TestCodexBuilder {
 
     pub fn with_home(mut self, home: Arc<TempDir>) -> Self {
         self.home = Some(home);
-        self
-    }
-
-    pub fn with_cloud_config_bundle(
-        mut self,
-        cloud_config_bundle: CloudConfigBundleLoader,
-    ) -> Self {
-        self.cloud_config_bundle = Some(cloud_config_bundle);
         self
     }
 
@@ -851,17 +826,10 @@ impl TestCodexBuilder {
         environment_manager: Arc<codex_exec_server::EnvironmentManager>,
     ) -> anyhow::Result<TestCodex> {
         let state_db = codex_core::init_state_db(&config).await;
-        let thread_store = self.thread_store.clone().unwrap_or_else(|| {
-            let sqlite = config.sqlite_config().clone();
-            ThreadStoreBuilder::from_config(&config, state_db.clone())
-                .with_additional_cleanup(move |thread_ids| {
-                    let sqlite = sqlite.clone();
-                    Box::pin(async move {
-                        codex_app_server::delete_agent_message_boards(&sqlite, &thread_ids).await
-                    })
-                })
-                .build()
-        });
+        let thread_store = self
+            .thread_store
+            .clone()
+            .unwrap_or_else(|| thread_store_from_config(&config, state_db.clone()));
         let installation_id = resolve_installation_id(&config.codex_home).await?;
         let user_instructions_provider =
             self.user_instructions_provider.clone().unwrap_or_else(|| {
@@ -870,26 +838,17 @@ impl TestCodexBuilder {
                 ))
             });
         let auth_manager = self.auth.manager_for_home(config.codex_home.as_path());
+        let models_manager = self
+            .models_manager
+            .clone()
+            .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
         let code_mode_host_program = self
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
-        let factory =
-            match &self.models_manager {
-                Some(models) => codex_core::test_support::fixed_model_catalog(Arc::clone(models)),
-                None => Arc::new(self.model_catalog_settings.clone().unwrap_or_else(|| {
-                    ModelCatalogSettings::disk(config.codex_home.to_path_buf())
-                })),
-            };
-        let startup = codex_core::build_startup_models(
-            &config,
-            Arc::clone(&auth_manager),
-            installation_id,
-            factory,
-        );
         let thread_manager = Arc::new_cyclic(|manager| {
             let mut extensions = self.extensions.to_builder();
-            codex_app_server::install_agent_message_board(&mut extensions, manager.clone());
+            codex_core::install_agent_message_board(&mut extensions, manager.clone());
             if config.features.enabled(Feature::GuardianV2) {
                 codex_guardian_v2::install(&mut extensions, auth_manager.clone(), manager.clone());
             } else {
@@ -897,7 +856,8 @@ impl TestCodexBuilder {
             }
             let thread_manager = ThreadManager::new(
                 &config,
-                startup,
+                auth_manager.clone(),
+                models_manager,
                 self.apps_tools_cache.clone(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
@@ -906,9 +866,8 @@ impl TestCodexBuilder {
                 self.analytics_events_client.clone(),
                 Arc::clone(&self.image_store),
                 Arc::clone(&thread_store),
-                self.agent_graph_store.clone().or_else(|| {
-                    codex_core::local_agent_graph_store_from_state_db(state_db.as_ref())
-                }),
+                codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
+                installation_id,
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ self.external_time_provider.clone(),
             );
@@ -1026,11 +985,7 @@ impl TestCodexBuilder {
         for hook in self.pre_build_hooks.drain(..) {
             hook(home.path());
         }
-        let mut config = if let Some(cloud_config_bundle) = self.cloud_config_bundle.take() {
-            load_default_config_for_test_with_cloud_config_bundle(home, cloud_config_bundle).await
-        } else {
-            load_default_config_for_test(home).await
-        };
+        let mut config = load_default_config_for_test(home).await;
         // Keep generic tests stable when the bundled catalog default changes. Tests that need a
         // specific model can still override this with a config mutator.
         config.model = Some("gpt-5.5".to_string());
@@ -1576,7 +1531,6 @@ pub fn test_codex() -> TestCodexBuilder {
         pre_build_hooks: vec![],
         workspace_setups: vec![],
         home: None,
-        cloud_config_bundle: None,
         user_shell_override: None,
         exec_server_url: None,
         extensions: empty_extension_registry(),
@@ -1587,9 +1541,7 @@ pub fn test_codex() -> TestCodexBuilder {
         // These fixtures exercise legacy-only resume/fork helpers; store-default tests opt out.
         history_mode: Some(ThreadHistoryMode::Legacy),
         models_manager: None,
-        model_catalog_settings: None,
         thread_store: None,
-        agent_graph_store: None,
         image_store: codex_core::passthrough_image_store(),
     }
 }

@@ -16,7 +16,7 @@ use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::InitializedConnectionSessionState;
 use crate::transport::ConnectionOrigin;
 
-const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "codex-backend"];
+const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex-backend"];
 
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
@@ -140,11 +140,6 @@ impl InitializeRequestProcessor {
             .is_err()
         {
             return Err(invalid_request("Already initialized"));
-        }
-        if experimental_api_enabled && capabilities.required_human_approval {
-            self.outgoing
-                .enable_human_approval_connection(connection_id)
-                .await;
         }
         if user_verification_enabled {
             self.outgoing

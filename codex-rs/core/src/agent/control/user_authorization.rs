@@ -47,10 +47,7 @@ struct CapturedRootConversation {
 }
 
 impl RootConversationSource for CapturedRootConversation {
-    fn prepare(
-        &self,
-        budgeting: codex_guardian_context::ContextBudgeting,
-    ) -> codex_guardian_context::PreparedRootContext {
+    fn prepare(&self) -> codex_guardian_context::PreparedRootContext {
         let root_history = &self.history;
         // Join calls to host-confirmed outputs in this snapshot. Older outputs without
         // captured text cannot establish what was sent, including after a hook rewrite.
@@ -248,7 +245,6 @@ impl RootConversationSource for CapturedRootConversation {
         codex_guardian_context::prepare_root_context(
             &request_candidates,
             root_history.original_legacy_user_messages(),
-            budgeting,
         )
     }
 }
@@ -302,7 +298,7 @@ impl LocalAgentControl {
             history: root_history,
             handoff_boundaries,
         });
-        let prepared = request_candidates.prepare(codex_guardian_context::ContextBudgeting::Fixed);
+        let prepared = request_candidates.prepare();
         let root_evidence = root_thread
             .session
             .services

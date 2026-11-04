@@ -4,7 +4,6 @@ use super::*;
 use anyhow::Context;
 use codex_protocol::models::PermissionProfile;
 use core_test_support::exec_server::ExecServerProcess;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_function_call;
 use core_test_support::skip_if_sandbox;
 use pretty_assertions::assert_eq;
@@ -57,7 +56,6 @@ async fn remote_credential_masking_request_history(
     let test = test_codex()
         .with_home(home)
         .with_exec_server_url(executor.websocket_url.clone())
-        .with_cloud_config_bundle(managed_network_requirements_loader())
         .with_pre_build_hook(move |home| {
             let provider_config = if configured_provider {
                 r#"[features.network_proxy.credentials.vendor]

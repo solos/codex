@@ -23,21 +23,6 @@ impl ImplicitSkillLookup for TestLookup {
     }
 }
 
-fn test_skill_metadata(skill_doc_path: AbsolutePathBuf) -> SkillMetadata {
-    SkillMetadata {
-        name: "test-skill".to_string(),
-        description: "test".to_string(),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: skill_doc_path.into(),
-        scope: codex_protocol::protocol::SkillScope::User,
-        plugin_id: None,
-        remote_plugin_id: None,
-    }
-}
-
 fn test_path_display(unix_path: &str) -> String {
     test_path_buf(unix_path).display().to_string()
 }

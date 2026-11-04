@@ -264,7 +264,6 @@ pub struct NodeReplReviewEvidenceSnapshot {
 impl NodeReplReviewEvidenceSnapshot {
     pub fn context(&self, mode: NodeReplReviewEvidenceMode) -> NodeReplContext<'_> {
         NodeReplContext {
-            budgeting: codex_guardian_context::ContextBudgeting::Fixed,
             responses: &self.responses,
             omitted_responses: self.omitted_responses,
             mode,

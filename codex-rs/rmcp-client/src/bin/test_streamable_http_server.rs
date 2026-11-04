@@ -165,15 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("starting rmcp streamable http test server on http://{actual_bind_addr}/mcp");
 
-    let mut transport_config = StreamableHttpServerConfig::default();
-    if !actual_bind_addr.ip().is_loopback() {
-        transport_config
-            .allowed_hosts
-            .push(actual_bind_addr.to_string());
-        transport_config =
-            transport_config.with_allowed_origins([format!("http://{actual_bind_addr}")]);
-    }
-
     let router = Router::new()
         .route(
             SESSION_POST_FAILURE_CONTROL_PATH,
@@ -229,7 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             StreamableHttpService::new(
                 || Ok(TestToolServer::new()),
                 Arc::new(LocalSessionManager::default()),
-                transport_config,
+                StreamableHttpServerConfig::default(),
             ),
         )
         .layer(middleware::from_fn_with_state(

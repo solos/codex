@@ -5,7 +5,6 @@ mod account_system_proxy;
 mod account_gcp;
 mod account_thread_usage;
 mod agent_message_board;
-mod analytics;
 mod app_installed;
 mod app_list;
 mod app_read;
@@ -38,8 +37,6 @@ mod config_requirements_exec;
 mod config_requirements_in_app_browser;
 mod config_requirements_login;
 mod config_rpc;
-#[path = "config_server_tests.rs"]
-mod config_server;
 #[cfg(unix)]
 #[path = "connection_handling_stdio_tests.rs"]
 mod connection_handling_stdio;
@@ -48,13 +45,10 @@ mod connection_handling_websocket;
 mod connection_handling_websocket_compression;
 #[cfg(unix)]
 mod connection_handling_websocket_unix;
-#[path = "critical_path_analytics_tests.rs"]
-mod critical_path_analytics;
 #[cfg(unix)]
 mod curated_mcp_sync;
 mod current_time;
 mod cyber_access_program;
-mod daemon_update_recovery;
 mod daybreak_access;
 mod dynamic_tools;
 mod environment_add;
@@ -72,7 +66,6 @@ mod external_agent_config;
 mod external_agent_import_sync;
 mod external_agent_memory_concurrency;
 mod feedback;
-mod frozen_cloud_skills;
 mod fs;
 #[path = "gateway_oauth_tests.rs"]
 mod gateway_oauth;
@@ -83,7 +76,6 @@ mod guardian_v2;
 mod history_notes_extension;
 mod hooks_list;
 mod host_skills;
-mod https_mock;
 mod imagegen_extension;
 mod initialize;
 mod luna_reserve;
@@ -105,23 +97,14 @@ mod model_auto_review;
 mod model_list;
 mod model_list_requirements_tests;
 mod model_provider_capabilities_read;
-mod model_provider_config_tests;
 #[path = "model_provider_enforcement_tests.rs"]
 mod model_provider_enforcement;
-mod model_provider_list_tests;
 mod multi_agent_v2_developer_instructions;
 mod otel;
 mod output_schema;
 mod permission_profile_list;
 mod plan_item;
-mod plugin_install;
-mod plugin_list;
 mod plugin_manifest_cache;
-mod plugin_read;
-mod plugin_reconcile;
-mod plugin_search;
-mod plugin_share;
-mod plugin_uninstall;
 mod process_exec;
 mod projects;
 mod rate_limit_reset_credits;
@@ -130,7 +113,6 @@ mod rate_limits;
 mod rate_limits_identity;
 mod realtime_conversation;
 mod recommended_plugins;
-mod remote_control;
 #[cfg(debug_assertions)]
 mod remote_thread_store;
 mod request_permissions;

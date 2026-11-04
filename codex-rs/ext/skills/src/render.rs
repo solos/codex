@@ -262,7 +262,6 @@ impl<'a> SkillLine<'a> {
             locator_kind: match &entry.authority.kind {
                 SkillSourceKind::Host => "file",
                 SkillSourceKind::Executor => "executor package",
-                SkillSourceKind::Cloud => "cloud package",
                 SkillSourceKind::Custom(_) => "custom resource",
             },
         }
@@ -530,7 +529,6 @@ pub(crate) struct AvailableSkillsRender {
 #[derive(Default)]
 pub(crate) struct RenderedSkillCatalogs {
     pub(crate) executor: Option<AvailableSkillsRender>,
-    pub(crate) cloud: Option<AvailableSkillsRender>,
     pub(crate) host: Option<AvailableSkillsRender>,
 }
 
@@ -593,72 +591,46 @@ pub(crate) fn render_available_skills(
 
 pub(crate) fn render_prepared_skill_catalogs(
     executor: &PreparedSkillCatalog<'_>,
-    cloud: &PreparedSkillCatalog<'_>,
     host: &PreparedSkillCatalog<'_>,
     budget: SkillMetadataBudget,
     include_skills_usage_instructions: bool,
 ) -> RenderedSkillCatalogs {
-    let nonempty_catalog_count = [
-        !executor.entries.is_empty(),
-        !cloud.entries.is_empty(),
-        !host.entries.is_empty(),
-    ]
-    .into_iter()
-    .filter(|nonempty| *nonempty)
-    .count();
+    let nonempty_catalog_count = [!executor.entries.is_empty(), !host.entries.is_empty()]
+        .into_iter()
+        .filter(|nonempty| *nonempty)
+        .count();
     if nonempty_catalog_count <= 1 {
         return RenderedSkillCatalogs {
             executor: executor.render(budget, include_skills_usage_instructions),
-            cloud: cloud.render(budget, include_skills_usage_instructions),
             host: host.render(budget, include_skills_usage_instructions),
         };
     }
 
-    let absolute = render_combined_lines(
-        executor.unaliased(),
-        cloud.unaliased(),
-        host.unaliased(),
-        budget,
-    );
+    let absolute = render_combined_lines(executor.unaliased(), host.unaliased(), budget);
 
     let mut selected = absolute;
     let host_only_aliases = build_aliased_combined_catalog(
         executor.unaliased(),
-        cloud.unaliased(),
         host.aliased(),
         budget,
         include_skills_usage_instructions,
     );
     let executor_only_aliases = build_aliased_combined_catalog(
         executor.aliased(),
-        cloud.unaliased(),
-        host.unaliased(),
-        budget,
-        include_skills_usage_instructions,
-    );
-    let cloud_only_aliases = build_aliased_combined_catalog(
-        executor.unaliased(),
-        cloud.aliased(),
         host.unaliased(),
         budget,
         include_skills_usage_instructions,
     );
     let all_source_aliases = build_aliased_combined_catalog(
         executor.aliased(),
-        cloud.aliased(),
         host.aliased(),
         budget,
         include_skills_usage_instructions,
     );
 
-    for candidate in [
-        host_only_aliases,
-        executor_only_aliases,
-        cloud_only_aliases,
-        all_source_aliases,
-    ]
-    .into_iter()
-    .flatten()
+    for candidate in [host_only_aliases, executor_only_aliases, all_source_aliases]
+        .into_iter()
+        .flatten()
     {
         if combined_render_is_better(
             &candidate,
@@ -672,14 +644,12 @@ pub(crate) fn render_prepared_skill_catalogs(
 
     RenderedSkillCatalogs {
         executor: Some(selected.executor),
-        cloud: Some(selected.cloud),
         host: Some(selected.host),
     }
 }
 
 struct CombinedAvailableSkillsRender {
     executor: AvailableSkillsRender,
-    cloud: AvailableSkillsRender,
     host: AvailableSkillsRender,
 }
 
@@ -748,23 +718,15 @@ impl<'a> CatalogLines<'a> {
 
 fn render_combined_lines(
     executor: CatalogLines<'_>,
-    cloud: CatalogLines<'_>,
     host: CatalogLines<'_>,
     budget: SkillMetadataBudget,
 ) -> CombinedAvailableSkillsRender {
     let executor_end = executor.skills.len();
-    let cloud_end = executor_end.saturating_add(cloud.skills.len());
     let mut lines = executor.skills;
-    lines.extend(cloud.skills);
     lines.extend(host.skills);
     let mut allocations = allocate_skill_lines(&lines, budget);
     let omission_marker =
-        reserve_non_host_omission_marker(&lines, executor_end, cloud_end, budget, &mut allocations);
-    let (executor_omission_marker, cloud_omission_marker) = if executor_end == cloud_end {
-        (omission_marker, None)
-    } else {
-        (None, omission_marker)
-    };
+        reserve_non_host_omission_marker(&lines, executor_end, budget, &mut allocations);
 
     CombinedAvailableSkillsRender {
         executor: render_combined_group(
@@ -772,18 +734,11 @@ fn render_combined_lines(
             &allocations[..executor_end],
             executor.prompt,
             executor.root_lines,
-            executor_omission_marker,
-        ),
-        cloud: render_combined_group(
-            &lines[executor_end..cloud_end],
-            &allocations[executor_end..cloud_end],
-            cloud.prompt,
-            cloud.root_lines,
-            cloud_omission_marker,
+            omission_marker,
         ),
         host: render_combined_group(
-            &lines[cloud_end..],
-            &allocations[cloud_end..],
+            &lines[executor_end..],
+            &allocations[executor_end..],
             host.prompt,
             host.root_lines,
             /*omission_marker*/ None,
@@ -827,19 +782,18 @@ fn render_combined_group(
 
 fn build_aliased_combined_catalog(
     executor: CatalogLines<'_>,
-    cloud: CatalogLines<'_>,
     host: CatalogLines<'_>,
     budget: SkillMetadataBudget,
     include_skills_usage_instructions: bool,
 ) -> Option<CombinedAvailableSkillsRender> {
-    if [&executor.root_lines, &cloud.root_lines, &host.root_lines]
+    if [&executor.root_lines, &host.root_lines]
         .into_iter()
         .all(Vec::is_empty)
     {
         return None;
     }
 
-    let table_cost = [&executor, &cloud, &host]
+    let table_cost = [&executor, &host]
         .into_iter()
         .filter(|catalog| !catalog.root_lines.is_empty())
         .map(|catalog| {
@@ -860,12 +814,7 @@ fn build_aliased_combined_catalog(
         SkillMetadataBudget::Tokens(_) => SkillMetadataBudget::Tokens(adjusted_limit),
         SkillMetadataBudget::Characters(_) => SkillMetadataBudget::Characters(adjusted_limit),
     };
-    Some(render_combined_lines(
-        executor,
-        cloud,
-        host,
-        adjusted_budget,
-    ))
+    Some(render_combined_lines(executor, host, adjusted_budget))
 }
 
 fn combined_render_is_better(
@@ -877,7 +826,6 @@ fn combined_render_is_better(
     let priority = |rendered: &CombinedAvailableSkillsRender| {
         (
             rendered.executor.report.included_count,
-            rendered.cloud.report.included_count,
             rendered.host.report.included_count,
         )
     };
@@ -886,7 +834,7 @@ fn combined_render_is_better(
     }
 
     let truncated_chars = |rendered: &CombinedAvailableSkillsRender| {
-        [&rendered.executor, &rendered.cloud, &rendered.host]
+        [&rendered.executor, &rendered.host]
             .into_iter()
             .fold(0usize, |total, catalog| {
                 total.saturating_add(catalog.report.truncated_description_chars)
@@ -905,7 +853,7 @@ fn combined_available_skills_cost(
     rendered: &CombinedAvailableSkillsRender,
     include_skills_usage_instructions: bool,
 ) -> usize {
-    [&rendered.executor, &rendered.cloud, &rendered.host]
+    [&rendered.executor, &rendered.host]
         .into_iter()
         .fold(0usize, |used, catalog| {
             used.saturating_add(catalog.metadata_cost(budget, include_skills_usage_instructions))
@@ -915,12 +863,11 @@ fn combined_available_skills_cost(
 fn reserve_non_host_omission_marker(
     skill_lines: &[SkillLine<'_>],
     executor_end: usize,
-    cloud_end: usize,
     budget: SkillMetadataBudget,
     allocations: &mut [SkillLineAllocation],
 ) -> Option<String> {
     loop {
-        let omitted_count = allocations[..cloud_end]
+        let omitted_count = allocations[..executor_end]
             .iter()
             .filter(|allocation| matches!(allocation, SkillLineAllocation::Omitted))
             .count();
@@ -934,9 +881,8 @@ fn reserve_non_host_omission_marker(
             return Some(marker);
         }
 
-        let index = (cloud_end..allocations.len())
+        let index = (executor_end..allocations.len())
             .rev()
-            .chain((executor_end..cloud_end).rev())
             .chain((0..executor_end).rev())
             .find(|index| {
                 matches!(
@@ -1078,7 +1024,7 @@ pub(crate) fn build_alias_plan(entries: &[&SkillCatalogEntry]) -> Option<AliasPl
     alias_ordered_entries.sort_by_key(|entry| entry.alias_root_order().unwrap_or(usize::MAX));
     let roots = match source {
         SkillSourceKind::Host => shared_host_alias_roots(&alias_ordered_entries),
-        SkillSourceKind::Executor | SkillSourceKind::Cloud => alias_ordered_entries
+        SkillSourceKind::Executor => alias_ordered_entries
             .iter()
             .filter_map(|entry| entry.alias_root())
             .map(str::to_string)

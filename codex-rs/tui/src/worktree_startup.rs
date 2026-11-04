@@ -27,7 +27,6 @@ impl ManagedTuiWorktree {
         cli_overrides: &[(String, toml::Value)],
         overrides: &ConfigOverrides,
         loader_overrides: &LoaderOverrides,
-        bundle: &CloudConfigBundleLoader,
         strict_config: bool,
     ) -> std::io::Result<()> {
         let mut source_overrides = overrides.clone();
@@ -39,7 +38,6 @@ impl ManagedTuiWorktree {
                 ignore_project_config: true,
                 ..loader_overrides.clone()
             })
-            .cloud_config_bundle(bundle.clone())
             .strict_config(strict_config)
             .build()
             .await
@@ -129,9 +127,8 @@ pub(super) async fn prepare(
     strict_config: bool,
     target: &AppServerTarget,
     arg0_paths: &Arg0DispatchPaths,
-    source_bundle: CloudConfigBundleLoader,
     embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
-) -> color_eyre::Result<(Config, CloudConfigBundleLoader, ManagedTuiWorktree)> {
+) -> color_eyre::Result<(Config, Option<ManagedTuiWorktree>)> {
     if let Some(id_or_name) = cli.fork_session_id.as_deref() {
         let prepared = if should_load_configured_environments(&loader_overrides, target) {
             EnvironmentManager::prepare_from_codex_home(&source.codex_home).await
@@ -159,7 +156,6 @@ pub(super) async fn prepare(
             cli_overrides.clone(),
             loader_overrides.clone(),
             strict_config,
-            source_bundle.clone(),
             codex_feedback::CodexFeedback::new(),
             /*log_db*/ None,
             state,
@@ -173,14 +169,9 @@ pub(super) async fn prepare(
             crate::app_server_session::ThreadParamsMode::Embedded,
         );
         let resolved = async {
-            let target = lookup_session_target_with_app_server(
-                crate::resume_picker::SessionPickerAction::Fork,
-                &mut lookup,
-                &source,
-                id_or_name,
-            )
-            .await?
-            .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
+            let target = lookup_session_target_with_app_server(&mut lookup, &source, id_or_name)
+                .await?
+                .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
             lookup
                 .thread_read(target.thread_id, /*include_turns*/ false)
                 .await
@@ -199,22 +190,13 @@ pub(super) async fn prepare(
                 cli_overrides.clone(),
                 loader_overrides.clone(),
                 strict_config,
-                CloudConfigBundleLoader::default(),
             )
             .await;
-            let source_bundle = cloud_config_bundle_for_app_server_target(
-                target,
-                &bootstrap,
-                &source.codex_home,
-                embedded_network_policy,
-            )
-            .await?;
             overrides.cwd = Some(cwd.into_path_buf());
             source = load_config_or_exit(
                 cli_overrides.clone(),
                 overrides.clone(),
                 loader_overrides.clone(),
-                source_bundle,
                 strict_config,
             )
             .await;
@@ -237,7 +219,6 @@ pub(super) async fn prepare(
         Vec::new(),
         LoaderOverrides::default(),
         strict_config,
-        CloudConfigBundleLoader::default(),
     )
     .await;
     let manager = codex_worktree::WorktreeManager::new(
@@ -270,37 +251,22 @@ pub(super) async fn prepare(
         codex_config::ConfigLoadOptions {
             loader_overrides: loader_overrides.clone(),
             strict_config,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
         },
     )
     .await?;
-    let bundle = cloud_config_bundle_for_app_server_target(
-        target,
-        &bootstrap,
-        &source.codex_home,
-        embedded_network_policy,
-    )
-    .await?;
     managed
-        .check_source_policy(
-            &cli_overrides,
-            overrides,
-            &loader_overrides,
-            &bundle,
-            strict_config,
-        )
+        .check_source_policy(&cli_overrides, overrides, &loader_overrides, strict_config)
         .await?;
     overrides.cwd = Some(managed.checkout.cwd.clone());
     let config = ConfigBuilder::default()
         .cli_overrides(cli_overrides)
         .harness_overrides(overrides.clone())
         .loader_overrides(loader_overrides)
-        .cloud_config_bundle(bundle.clone())
         .strict_config(strict_config)
         .build()
         .await?;
     cli.cwd = Some(managed.checkout.cwd.clone());
-    Ok((config, bundle, managed))
+    Ok((config, Some(managed)))
 }
 
 #[cfg(test)]

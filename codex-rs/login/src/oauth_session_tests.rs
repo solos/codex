@@ -57,7 +57,6 @@ fn config(server: &MockServer) -> OAuthSessionConfig {
         resource: Some("https://gateway.example.test/codex".to_string()),
         scopes: vec!["openid".to_string(), "gateway.inference".to_string()],
         redirect_port: None,
-        credentials_store: Default::default(),
     }
 }
 
@@ -70,7 +69,6 @@ fn loopback_config() -> OAuthSessionConfig {
         resource: None,
         scopes: Vec::new(),
         redirect_port: None,
-        credentials_store: Default::default(),
     }
 }
 

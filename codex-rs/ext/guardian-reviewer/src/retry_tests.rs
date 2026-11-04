@@ -1,8 +1,6 @@
 #[cfg(test)]
 use super::*;
 use crate::GuardianAssessment;
-use crate::GuardianReviewResponse;
-use crate::GuardianReviewSessionOutcome;
 use codex_analytics::GuardianReviewFailureReason;
 use codex_protocol::protocol::GuardianAssessmentOutcome;
 use codex_protocol::protocol::GuardianRiskLevel;
@@ -115,15 +113,8 @@ fn guardian_review_retry_only_retries_recoverable_errors() {
             false,
         ),
         (
-            GuardianReviewSessionOutcome::Completed(Ok(Some(GuardianReviewResponse::new(
-                "invalid assessment".to_owned(),
-            ))))
-            .into(),
+            GuardianReviewOutcome::Error(GuardianReviewError::parse(anyhow::anyhow!("parse"))),
             true,
-        ),
-        (
-            GuardianReviewSessionOutcome::Completed(Ok(None)).into(),
-            false,
         ),
         (
             GuardianReviewOutcome::Error(GuardianReviewError::Timeout),

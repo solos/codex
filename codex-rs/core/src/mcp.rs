@@ -9,7 +9,6 @@ use codex_config::McpServerConfig;
 use codex_config::types::PluginsConfigToml;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::PluginConnectorSource;
-use codex_core_plugins::PluginIdentity as CatalogPluginIdentity;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::ExecutorCapabilityDiscoveryV2Snapshot;
@@ -225,7 +224,6 @@ impl McpManager {
             ..Default::default()
         };
         let available_roots = available_plugin_roots(context);
-        // Check hosted plugins even when no executor roots are selected.
         for contributor in self.extensions.mcp_server_contributors() {
             for SelectedPlugin {
                 selected_root_id,
@@ -250,18 +248,6 @@ impl McpManager {
                         selected_root_id: Some(selected_root_id),
                         plugin_id: identity,
                     });
-                }
-            }
-            if context.config().features.enabled(Feature::Plugins) {
-                for plugin_id in contributor.hosted_plugin_ids(context) {
-                    if !disabled_plugin_ids.contains(&plugin_id) {
-                        selected.plugins.push(SelectedPluginIdentity {
-                            selected_root_id: None,
-                            plugin_id: CatalogPluginIdentity::Remote {
-                                remote_plugin_id: plugin_id,
-                            },
-                        });
-                    }
                 }
             }
         }
@@ -400,31 +386,6 @@ impl McpManager {
                             registration = registration.with_protocol_mode(protocol_mode);
                         }
                         overlays.push(OrderedMcpOverlay::Set(Box::new(registration)));
-                    }
-                    McpServerContribution::HostedPluginConnectors {
-                        plugin_id,
-                        plugin_display_name,
-                        connector_ids,
-                    } => {
-                        if config.features.enabled(Feature::Plugins) {
-                            if !disabled_plugin_ids.contains(&plugin_id) {
-                                selected_plugins.push(SelectedPluginIdentity {
-                                    selected_root_id: None,
-                                    plugin_id: CatalogPluginIdentity::Remote {
-                                        remote_plugin_id: plugin_id.clone(),
-                                    },
-                                });
-                            }
-                            if !connector_ids.is_empty() {
-                                selected_plugin_connector_sources.push(
-                                    PluginConnectorSource::from_connector_ids(
-                                        plugin_id,
-                                        plugin_display_name,
-                                        connector_ids.into_iter().map(AppConnectorId),
-                                    ),
-                                );
-                            }
-                        }
                     }
                     McpServerContribution::Remove { name } => {
                         overlays.push(OrderedMcpOverlay::Remove {

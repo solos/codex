@@ -1,4 +1,4 @@
-//! Install implicit backend, preset, selection, and side-pane shortcuts for free leader chords.
+//! Install implicit preset and selection shortcuts only for free leader chords.
 //! Explicit bindings, including an explicit unbind, always take priority.
 //! Implicit chords fit within the shared leader expansion limit.
 
@@ -13,11 +13,7 @@ use super::runtime_action_bindings;
 use codex_config::types::TuiKeymap;
 use crossterm::event::KeyCode;
 
-pub(in crate::keymap) fn register(
-    keymap: &TuiKeymap,
-    resolved: &mut RuntimeKeymap,
-    workspace: bool,
-) {
+pub(in crate::keymap) fn register(keymap: &TuiKeymap, resolved: &mut RuntimeKeymap) {
     let mut remaining = MAX_LEADER_CHORD_BINDINGS.saturating_sub(
         resolved
             .chords
@@ -26,44 +22,37 @@ pub(in crate::keymap) fn register(
             .filter(|binding| binding.is_leader())
             .count(),
     );
-    use KeyCode::Char;
-    use KeymapContext::Chat;
-    use KeymapContext::Global;
-    for (context, name, completion, spec) in [
-        (Global, "change_host", Char('b'), "b"),
-        (Global, "select_transcript", Char('['), "["),
-        (Chat, "open_presets", Char('p'), "p"),
-        (Global, "focus_main_composer", Char('c'), "c"),
-        (Global, "focus_sidebar_content", Char('s'), "s"),
-        (Global, "hide_pane", Char('-'), "-"),
-        (Global, "focus_pane_left", KeyCode::Left, "left"),
-        (Global, "focus_pane_left", Char('h'), "h"),
-        (Global, "focus_pane_right", KeyCode::Right, "right"),
-        (Global, "focus_pane_right", Char('l'), "l"),
+    for (configured, context, action, completion, spec) in [
+        (
+            keymap.global.select_transcript.as_ref(),
+            KeymapContext::Global,
+            "select_transcript",
+            '[',
+            "leader [",
+        ),
+        (
+            keymap.chat.open_presets.as_ref(),
+            KeymapContext::Chat,
+            "open_presets",
+            'p',
+            "leader p",
+        ),
     ] {
         if remaining == 0 {
             break;
         }
-        let action = KeymapActionId {
-            context,
-            action: name,
-        };
-        if (!workspace && action.is_side_pane())
-            || !matches!(
-                super::configured_binding_for_action(keymap, action),
-                Some(None)
-            )
-        {
+        if configured.is_some() {
             continue;
         }
+        let action = KeymapActionId { context, action };
         for prefix in resolved.chords.leader.clone() {
             let binding = RuntimeChordBinding {
                 action,
                 chord: KeyChord {
                     prefix,
-                    completion: crate::key_hint::plain(completion),
+                    completion: crate::key_hint::plain(KeyCode::Char(completion)),
                 },
-                spec: format!("leader {spec}"),
+                spec: spec.into(),
             };
             if !resolved.chords.bindings.iter().any(|existing| {
                 binding.overlaps(existing.action) && existing.chord == binding.chord

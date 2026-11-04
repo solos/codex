@@ -26,10 +26,6 @@ impl PluginMarketplaceContext {
             || self.scopes.iter().any(|scope| scope.config.plugins_enabled)
     }
 
-    pub fn remote_plugins_enabled(&self) -> bool {
-        self.global_config.plugins_enabled && self.global_config.remote_plugin_enabled
-    }
-
     pub(super) fn list_marketplaces(
         &self,
         manager: &PluginsManager,

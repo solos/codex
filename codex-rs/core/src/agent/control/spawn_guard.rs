@@ -1,5 +1,4 @@
 //! Owns a provisional child until the spawn result can be returned without yielding.
-//! Graph publication stays owned through cancellation and settles before cleanup closes its edge.
 
 use super::AgentTreeMembership;
 use crate::thread_manager::ThreadManagerState;
@@ -8,7 +7,6 @@ use codex_agent_graph_store::AgentGraphStoreError;
 use codex_agent_graph_store::ThreadSpawnEdgeStatus;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrKind;
-use codex_protocol::error::Result as CodexResult;
 use codex_thread_store::ThreadStoreError;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -22,8 +20,7 @@ pub(in crate::agent) enum SpawnOwner {
 pub(in crate::agent) struct PendingSpawn {
     state: Arc<ThreadManagerState>,
     pending: Option<(ThreadId, AgentTreeMembership)>,
-    edge_write: Option<JoinHandle<CodexResult<bool>>>,
-    close_spawn_edge: bool,
+    edge_write: Option<JoinHandle<()>>,
     owner: SpawnOwner,
 }
 
@@ -38,26 +35,22 @@ impl PendingSpawn {
             state,
             pending: Some((child, membership)),
             edge_write: None,
-            close_spawn_edge: false,
             owner,
         }
     }
 
-    pub(super) fn set_edge_write(&mut self, edge_write: JoinHandle<CodexResult<bool>>) {
+    pub(super) fn set_edge_write(&mut self, edge_write: JoinHandle<()>) {
         self.edge_write = Some(edge_write);
     }
 
-    pub(super) async fn wait_for_edge(&mut self) -> CodexResult<()> {
-        let Some(edge_write) = self.edge_write.as_mut() else {
-            return Ok(());
-        };
-        // Keep ownership while waiting, then clear the completed handle before returning errors.
-        let result = edge_write.await;
+    pub(super) async fn wait_for_edge(&mut self) {
+        if let Some(edge_write) = self.edge_write.as_mut() {
+            assert!(
+                edge_write.await.is_ok(),
+                "spawn edge write task should complete"
+            );
+        }
         self.edge_write = None;
-        // An error may follow a committed write; only an explicit skip rules it out.
-        self.close_spawn_edge = !matches!(&result, Ok(Ok(false)));
-        result??;
-        Ok(())
     }
 
     pub(in crate::agent) fn disarm(mut self) -> AgentTreeMembership {
@@ -76,7 +69,6 @@ impl Drop for PendingSpawn {
         let state = Arc::clone(&self.state);
         let teardown = membership.into_teardown_guard("child_spawn_cleanup", Some(child));
         let edge_write = self.edge_write.take();
-        let close_spawn_edge = self.close_spawn_edge;
         let local_owner = matches!(self.owner, SpawnOwner::Local);
         drop(tokio::spawn(async move {
             if let Some(thread) = state.remove_thread(&child).await {
@@ -99,12 +91,10 @@ impl Drop for PendingSpawn {
                 }
             }
             // A pending Open write must finish before cleanup writes Closed.
-            let close_spawn_edge = match edge_write {
-                Some(edge_write) => !matches!(edge_write.await, Ok(Ok(false))),
-                None => close_spawn_edge,
-            };
+            if let Some(edge_write) = edge_write {
+                let _ = edge_write.await;
+            }
             if local_owner
-                && close_spawn_edge
                 && let Some(store) = state.agent_graph_store()
                 && let Err(error) = store
                     .set_thread_spawn_edge_status(child, ThreadSpawnEdgeStatus::Closed)

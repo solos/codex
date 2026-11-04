@@ -41,7 +41,7 @@ async fn experimental_features_use_selected_server_profile_and_preserve_task_set
     let mut server = AppServerSession::new(
         crate::backend_id::BackendId::new(),
         AppServerClient::InProcess(client),
-        crate::app_server_session::ThreadParamsMode::Remote,
+        crate::app_server_session::ThreadParamsMode::Embedded,
     );
     let thread = server.start_thread(&config).await?.session.thread_id;
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;

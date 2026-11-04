@@ -1,11 +1,10 @@
 //! Installs application requirements at startup and explicit config/account reloads.
-//! Local policy limits cloud bootstrap; config construction rejects superseded policy snapshots.
+//! Local policy controls application network access.
 
 use super::ApplicationPolicyLoad;
 use super::ApplicationPolicySnapshot;
 use super::ConfigManager;
 use codex_config::ApplicationRequirementsToml;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::NetworkDomainPermissionToml;
 use codex_http_client::DestinationPolicy;
 use codex_http_client::NetworkPolicyDenied;
@@ -52,7 +51,7 @@ impl ConfigManager {
                 &self.loader_overrides,
             )
             .await?;
-            let application = sources.compose(Default::default())?;
+            let application = sources.compose()?;
             self.local_network_policy
                 .publish(local_revision, destination_policy(application.as_ref()));
             Ok(sources)
@@ -75,25 +74,13 @@ impl ConfigManager {
             .map_err(io::Error::other)?;
         let revision = self.network_policy.policy().revision();
         let local_sources = self.load_local_network_policy(revision).await?;
-        let cloud_config = self.current_managed_config_loader();
         let result = async {
-            let cloud_snapshot = cloud_config.get_snapshot().await;
-            let cloud = cloud_snapshot.bundle.clone().map_err(io::Error::other)?;
-            let application = local_sources.compose(
-                cloud
-                    .as_ref()
-                    .map(|bundle| bundle.requirements_toml.clone())
-                    .unwrap_or_default(),
-            )?;
-            Ok::<_, io::Error>((
-                destination_policy(application.as_ref()),
-                cloud,
-                cloud_snapshot,
-            ))
+            let application = local_sources.compose()?;
+            Ok::<_, io::Error>(destination_policy(application.as_ref()))
         }
         .await;
         match result {
-            Ok((policy, cloud, cloud_snapshot)) => {
+            Ok(policy) => {
                 let mut current = self.network_policy_snapshot.write().map_err(|_| {
                     io::Error::other("application network policy snapshot lock poisoned")
                 })?;
@@ -101,11 +88,7 @@ impl ConfigManager {
                     *current = None;
                     return Err(io::Error::other(NetworkPolicyDenied::Revoked));
                 }
-                let next = ApplicationPolicySnapshot {
-                    revision,
-                    policy,
-                    cloud,
-                };
+                let next = ApplicationPolicySnapshot { revision, policy };
                 // Concurrent config loads may finish together if their actual inputs are unchanged.
                 let snapshot = match current.as_ref() {
                     Some(snapshot) if snapshot.as_ref() == &next => Arc::clone(snapshot),
@@ -115,10 +98,7 @@ impl ConfigManager {
                         snapshot
                     }
                 };
-                Ok(ApplicationPolicyLoad {
-                    cloud_config: CloudConfigBundleLoader::from_snapshot(cloud_snapshot),
-                    snapshot,
-                })
+                Ok(ApplicationPolicyLoad { snapshot })
             }
             Err(error) => {
                 self.fail_application_policy(revision)?;

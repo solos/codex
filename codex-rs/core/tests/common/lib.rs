@@ -8,9 +8,7 @@ use ctor::ctor;
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::CodexThread;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -197,37 +195,13 @@ pub fn fetch_dotslash_file(
 /// temporary directory. Using a per-test directory keeps tests hermetic and
 /// avoids clobbering a developer’s real `~/.codex`.
 pub async fn load_default_config_for_test(codex_home: &TempDir) -> Config {
-    load_default_config_for_test_with_cloud_config_bundle(
-        codex_home,
-        CloudConfigBundleLoader::default(),
-    )
-    .await
-}
-
-/// Returns a default `Config` with test-provided cloud bundle requirements applied.
-/// during config construction.
-pub async fn load_default_config_for_test_with_cloud_config_bundle(
-    codex_home: &TempDir,
-    cloud_config_bundle: CloudConfigBundleLoader,
-) -> Config {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
-        .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
         .expect("defaults for test should always succeed")
-}
-
-pub fn managed_network_requirements_loader() -> CloudConfigBundleLoader {
-    CloudConfigBundleFixture::loader_with_enterprise_requirement(
-        r#"
-[experimental_network]
-enabled = true
-allow_local_binding = true
-"#,
-    )
 }
 
 #[cfg(target_os = "linux")]

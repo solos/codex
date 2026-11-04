@@ -51,7 +51,7 @@ pub(super) async fn lookup(
     name: &str,
     collections: &[SessionCollection],
     source_kind_filters: &[Vec<ThreadSourceKind>],
-    model_providers: Option<Vec<String>>,
+    model_provider: Option<&str>,
 ) -> Result<Option<Thread>> {
     if name.trim().is_empty() {
         return Ok(None);
@@ -64,7 +64,6 @@ pub(super) async fn lookup(
             loop {
                 let response = app_server
                     .thread_list(ThreadListParams {
-                        current_account_only: false,
                         excluded_thread_ids: None,
                         attached_to_thread_id: None,
                         originators: None,
@@ -73,7 +72,7 @@ pub(super) async fn lookup(
                         // Activity must not move an unread thread ahead of the cursor.
                         sort_key: Some(ThreadSortKey::CreatedAt),
                         sort_direction: None,
-                        model_providers: model_providers.clone(),
+                        model_providers: model_provider.map(|provider| vec![provider.to_string()]),
                         source_kinds: Some(source_kinds.clone()),
                         archived: Some(matches!(collection, SessionCollection::Archived)),
                         section_id: None,

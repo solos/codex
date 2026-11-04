@@ -212,7 +212,6 @@ pub(crate) struct SkillInvocationEventParams {
     pub(crate) product_client_id: Option<String>,
     pub(crate) skill_scope: Option<String>,
     pub(crate) plugin_id: Option<String>,
-    pub(crate) remote_plugin_id: Option<String>,
     pub(crate) thread_id: Option<String>,
     pub(crate) turn_id: Option<String>,
     pub(crate) voice_session_id: Option<String>,
@@ -1219,7 +1218,6 @@ pub(crate) struct CodexTurnSteerEventRequest {
 #[derive(Serialize)]
 pub(crate) struct CodexPluginMetadata {
     pub(crate) plugin_id: Option<String>,
-    pub(crate) remote_plugin_id: Option<String>,
     pub(crate) plugin_name: Option<String>,
     pub(crate) marketplace_name: Option<String>,
     pub(crate) has_skills: Option<bool>,
@@ -1241,7 +1239,6 @@ pub(crate) struct CodexPluginUsedMetadata {
 #[derive(Serialize)]
 pub(crate) struct CodexPluginInstallRequestedPluginMetadata {
     pub(crate) plugin_id: String,
-    pub(crate) remote_plugin_id: Option<String>,
     pub(crate) plugin_name: String,
     pub(crate) connector_ids: Vec<String>,
 }
@@ -1361,12 +1358,10 @@ fn codex_plugin_metadata_with_product_client_id(
 ) -> CodexPluginMetadata {
     let PluginTelemetryMetadata {
         plugin_id,
-        remote_plugin_id,
         capability_summary,
     } = plugin;
     CodexPluginMetadata {
         plugin_id: plugin_id.as_ref().map(PluginId::as_key),
-        remote_plugin_id,
         plugin_name: plugin_id
             .as_ref()
             .map(|plugin_id| plugin_id.plugin_name.clone()),
@@ -1399,7 +1394,6 @@ pub(crate) fn codex_plugin_install_requested_metadata(
             .into_iter()
             .map(|plugin| CodexPluginInstallRequestedPluginMetadata {
                 plugin_id: plugin.plugin_id,
-                remote_plugin_id: plugin.remote_plugin_id,
                 plugin_name: plugin.plugin_name,
                 connector_ids: plugin.connector_ids,
             })

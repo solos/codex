@@ -17,12 +17,10 @@ use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::McpEmaAuthScope;
 use codex_config::McpServerIdpOAuthConfig;
 use codex_config::NoopThreadConfigLoader;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
@@ -72,11 +70,7 @@ client_id = "enterprise-client""#
         Mock::given(method("GET"))
             .and(path("/backend-api/wham/config/bundle"))
             .and(header("chatgpt-account-id", workspace))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    CloudConfigBundleFixture::enterprise_config(contents).into_bundle(),
-                ),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json())
             .expect(1)
             .mount(&server)
             .await;
@@ -363,10 +357,7 @@ async fn enterprise_login_attempt_lifecycle() -> Result<()> {
         .await;
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/config/bundle"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(CloudConfigBundleFixture::default().into_bundle()),
-        )
+        .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
     let pending_discovery = Arc::new(Mutex::new(
@@ -474,7 +465,6 @@ oauth = {{ client_id = "mcp-client", client_secret = "resource-secret", token_en
         cli_overrides: Vec::new(),
         loader_overrides,
         strict_config: false,
-        cloud_config_bundle: CloudConfigBundleLoader::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -1635,10 +1625,7 @@ async fn enterprise_login_setup_is_cancelled_by_account_changes() -> Result<()> 
         let issuer = format!("{origin}/idp");
         Mock::given(method("GET"))
             .and(path("/backend-api/wham/config/bundle"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(CloudConfigBundleFixture::default().into_bundle()),
-            )
+            .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
         let discovery_started = Arc::new(tokio::sync::Notify::new());
@@ -1724,7 +1711,6 @@ oauth = {{ client_id = "mcp-client", authorization_server_issuer = "{origin}/as"
             cli_overrides: Vec::new(),
             loader_overrides,
             strict_config: false,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
             thread_config_loader: Arc::new(NoopThreadConfigLoader),
             feedback: CodexFeedback::new(),
             log_db: None,

@@ -282,17 +282,6 @@ fn render_debug_config_lines(
         ));
     }
 
-    if let Some(allow_remote_control) = requirements_toml.allow_remote_control {
-        requirement_lines.push(requirement_line(
-            "allow_remote_control",
-            allow_remote_control.to_string(),
-            requirements
-                .allow_remote_control
-                .as_ref()
-                .map(|sourced| &sourced.source),
-        ));
-    }
-
     if requirements_toml.guardian_policy_config.is_some() {
         requirement_lines.push(requirement_line(
             "guardian_policy_config",
@@ -358,18 +347,8 @@ fn render_debug_config_lines(
     }
 
     if let Some(network) = requirements.network.as_ref() {
-        let key = if requirements_toml
-            .permissions
-            .as_ref()
-            .and_then(|permissions| permissions.network.as_ref())
-            .is_some()
-        {
-            "permissions.network"
-        } else {
-            "network_proxy"
-        };
         requirement_lines.push(requirement_line(
-            key,
+            "network_proxy",
             format_network_constraints(&network.value),
             Some(&network.source),
         ));
@@ -680,7 +659,6 @@ mod tests {
     use codex_config::ConfigLayerStack;
     use codex_config::ConfigRequirements;
     use codex_config::ConfigRequirementsToml;
-    use codex_config::ConfigRequirementsWithSources;
     use codex_config::Constrained;
     use codex_config::ConstrainedWithSource;
     use codex_config::ConstraintError;
@@ -913,10 +891,6 @@ interrupt_message = false
                 /*value*/ false,
                 RequirementSource::LegacyManagedConfigTomlFromMdm,
             )),
-            allow_remote_control: Some(Sourced::new(
-                /*value*/ false,
-                RequirementSource::LegacyManagedConfigTomlFromMdm,
-            )),
             feature_requirements: Some(Sourced::new(
                 FeatureRequirementsToml {
                     entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
@@ -985,7 +959,6 @@ interrupt_message = false
             allowed_web_search_modes: Some(vec![WebSearchModeRequirement::Cached]),
             allow_managed_hooks_only: Some(true),
             allow_appshots: Some(false),
-            allow_remote_control: Some(false),
             allow_browser_and_computer_use: None,
             computer_use: None,
             browser_use: None,
@@ -1069,9 +1042,7 @@ interrupt_message = false
         assert!(rendered.contains(&format!(
             "allow_appshots: false (source: {requirements_source})"
         )));
-        assert!(rendered.contains(&format!(
-            "allow_remote_control: false (source: {requirements_source})"
-        )));
+        assert!(rendered.contains(&format!()));
         assert!(rendered.contains(&format!(
             "guardian_policy_config: configured (source: {requirements_source})"
         )));
@@ -1244,27 +1215,6 @@ interrupt_message = false
     }
 
     #[test]
-    fn debug_config_network_requirement_surfaces() {
-        let mut outputs = Vec::new();
-        for table in [
-            "network_proxy",
-            "experimental_network",
-            "permissions.network",
-        ] {
-            let toml: ConfigRequirementsToml =
-                toml::from_str(&format!("[{table}]\nenabled = true")).expect("requirements");
-            let mut sourced = ConfigRequirementsWithSources::default();
-            sourced.merge_unset_fields(RequirementSource::Unknown, toml.clone());
-            let requirements = ConfigRequirements::try_from(sourced).expect("valid requirements");
-            let stack =
-                ConfigLayerStack::new(Vec::new(), requirements, toml).expect("config layer stack");
-            outputs.push(format!("{table}:\n{}", render_stack_to_text(&stack)));
-        }
-
-        insta::assert_snapshot!(outputs.join("\n\n"));
-    }
-
-    #[test]
     fn debug_config_output_lists_session_flag_key_value_pairs() {
         let session_flags = toml::from_str::<TomlValue>(
             r#"
@@ -1386,7 +1336,6 @@ approval_policy = "never"
             allowed_web_search_modes: Some(Vec::new()),
             allow_managed_hooks_only: None,
             allow_appshots: None,
-            allow_remote_control: None,
             computer_use: None,
             windows: None,
             guardian_policy_config: None,

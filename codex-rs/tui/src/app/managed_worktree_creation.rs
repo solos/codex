@@ -12,22 +12,10 @@ use codex_app_server_protocol::ThreadBackgroundTerminalsListResponse as ListResp
 
 pub(super) fn background_terminals_blocker(
     result: Result<ListResponse, TypedRequestError>,
-    target: &AppServerTarget,
+    _target: &AppServerTarget,
 ) -> Option<&'static str> {
     match result {
         Ok(response) if response.data.is_empty() => None,
-        Err(TypedRequestError::Server { source, .. })
-            if matches!(target, AppServerTarget::LocalDaemon { .. })
-                && (source.code == -32601
-                    || source.code == -32600
-                        && source.message.contains("thread/backgroundTerminals/list")
-                        && (source.message.contains("unknown variant")
-                            || source.message.contains("unknown method"))) =>
-        {
-            Some(
-                "The local Codex service cannot check background terminals. Run `codex app-server daemon update`, then restart Codex.",
-            )
-        }
         _ => Some("Active background terminals block /cd."),
     }
 }

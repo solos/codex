@@ -70,19 +70,16 @@ async fn selected_runtime_transport_stays_revoked(mode: RuntimeAuthMode) {
     ));
     let mut client = test_model_client(SessionSource::Exec);
     client.http_client_factory = factory;
-    Arc::get_mut(&mut client.state).unwrap().provider = codex_model_provider::ProviderAuthContext {
-        credentials: manager,
-        runtime_auth: Some((runtime, mode)),
-    }
-    .model_provider(ModelProviderInfo::create_openai_provider(
-        /*base_url*/ None,
-    ));
-    let mut setup = client
+    Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri()))),
+        Some(manager),
+    );
+    let client = client.with_runtime_auth(runtime, mode).unwrap();
+    let setup = client
         .current_client_setup(ClientRouting::Workspace)
         .await
         .unwrap();
-    setup.api_provider.base_url = format!("{}/v1", server.uri());
-    let transport = setup.http_transport("/responses").unwrap();
+    let transport = setup.build_api_transport("/responses").unwrap();
     let request = setup
         .api_provider
         .build_request(http::Method::POST, "/responses");
@@ -121,7 +118,6 @@ async fn selected_runtime_transport_stays_revoked(mode: RuntimeAuthMode) {
             RequestRouteTelemetry::for_endpoint("/responses"),
             &http::HeaderMap::new(),
             /*parent_routing_affinity*/ None,
-            /*reauth*/ false,
         )
         .await;
     assert!(matches!(
@@ -133,10 +129,15 @@ async fn selected_runtime_transport_stays_revoked(mode: RuntimeAuthMode) {
     server.verify().await;
 }
 
-#[test_case::test_case(RuntimeAuthMode::DualHeader; "dual_header")]
-#[test_case::test_case(RuntimeAuthMode::AssertionOnly; "assertion_only")]
+#[test_case::test_case(RuntimeAuthMode::DualHeader, false; "dual_header")]
+#[test_case::test_case(RuntimeAuthMode::AssertionOnly, false; "assertion_only")]
+#[test_case::test_case(RuntimeAuthMode::DualHeader, true; "runtime_provider_dual_header")]
+#[test_case::test_case(RuntimeAuthMode::AssertionOnly, true; "runtime_provider_assertion_only")]
 #[tokio::test]
-async fn realtime_keeps_provider_auth_until_runtime_integration(mode: RuntimeAuthMode) {
+async fn realtime_keeps_provider_auth_until_runtime_integration(
+    mode: RuntimeAuthMode,
+    runtime_provider: bool,
+) {
     let (mut client, _) = model_client_with_counting_attestation(/*include_attestation*/ true);
     let registration = MockServer::start().await;
     let manager = client.auth_manager().unwrap();
@@ -156,13 +157,16 @@ async fn realtime_keeps_provider_auth_until_runtime_integration(mode: RuntimeAut
         },
         format!("{}/register", registration.uri()).parse().unwrap(),
     ));
-    let info = client.state.provider.info().clone();
-    Arc::get_mut(&mut client.state).unwrap().provider = codex_model_provider::ProviderAuthContext {
-        credentials: manager,
-        runtime_auth: Some((runtime, mode)),
+    if runtime_provider {
+        let info = client.state.provider.info().clone();
+        Arc::get_mut(&mut client.state).unwrap().provider =
+            codex_model_provider::ProviderAuthContext {
+                credentials: manager,
+                runtime_auth: Some((Arc::clone(&runtime), mode)),
+            }
+            .model_provider(info);
     }
-    .model_provider(info);
-    assert!(client.state.provider.runtime_auth().is_some());
+    let client = client.with_runtime_auth(runtime, mode).unwrap();
     let sideband = client
         .realtime_sideband_headers(http::HeaderMap::new())
         .await

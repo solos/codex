@@ -1,4 +1,4 @@
-use crate::session_runtime::OutputItem;
+use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use std::sync::Arc;
 
 use super::RuntimeEvent;
@@ -67,7 +67,7 @@ pub(super) fn tool_callback(
     state.next_tool_call_id = state.next_tool_call_id.saturating_add(1);
     let event_tx = state.event_tx.clone();
     state.pending_tool_calls.insert(id.clone(), resolver);
-    let _ = event_tx.blocking_send(RuntimeEvent::ToolCall {
+    let _ = event_tx.send(RuntimeEvent::ToolCall {
         id,
         name: tool_name,
         kind: tool_kind,
@@ -96,9 +96,9 @@ pub(super) fn text_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state
-            .event_tx
-            .blocking_send(RuntimeEvent::ContentItem(OutputItem::InputText { text }));
+        let _ = state.event_tx.send(RuntimeEvent::ContentItem(
+            FunctionCallOutputContentItem::InputText { text },
+        ));
     }
     retval.set(v8::undefined(scope).into());
 }
@@ -120,9 +120,7 @@ pub(super) fn audio_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state
-            .event_tx
-            .blocking_send(RuntimeEvent::ContentItem(audio_item));
+        let _ = state.event_tx.send(RuntimeEvent::ContentItem(audio_item));
     }
     retval.set(v8::undefined(scope).into());
 }
@@ -157,9 +155,7 @@ pub(super) fn image_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state
-            .event_tx
-            .blocking_send(RuntimeEvent::ContentItem(image_item));
+        let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
     }
     retval.set(v8::undefined(scope).into());
 }
@@ -188,13 +184,11 @@ pub(super) fn generated_image_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state
-            .event_tx
-            .blocking_send(RuntimeEvent::ContentItem(image_item));
+        let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
         if let Some(text) = output_hint {
-            let _ = state
-                .event_tx
-                .blocking_send(RuntimeEvent::ContentItem(OutputItem::InputText { text }));
+            let _ = state.event_tx.send(RuntimeEvent::ContentItem(
+                FunctionCallOutputContentItem::InputText { text },
+            ));
         }
     }
     retval.set(v8::undefined(scope).into());
@@ -309,7 +303,7 @@ pub(super) fn notify_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state.event_tx.blocking_send(RuntimeEvent::Notify {
+        let _ = state.event_tx.send(RuntimeEvent::Notify {
             call_id: state.tool_call_id.clone(),
             text,
         });
@@ -355,7 +349,7 @@ pub(super) fn yield_control_callback(
     if let Some(state) = scope.get_slot::<RuntimeState>()
         && !state.exit_requested
     {
-        let _ = state.event_tx.blocking_send(RuntimeEvent::YieldRequested);
+        let _ = state.event_tx.send(RuntimeEvent::YieldRequested);
     }
 }
 

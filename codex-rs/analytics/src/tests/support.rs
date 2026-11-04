@@ -592,7 +592,6 @@ pub(super) fn sample_initialize_fact(connection_id: u64) -> AnalyticsFact {
                 version: "1.0.0".to_string(),
             },
             capabilities: Some(InitializeCapabilities {
-                required_human_approval: false,
                 explicit_gateway_oauth: false,
                 experimental_api: false,
                 request_attestation: false,
@@ -683,24 +682,5 @@ pub(super) async fn ingest_code_mode_facts(
                 events,
             )
             .await;
-    }
-}
-
-pub(super) fn sample_plugin_metadata() -> PluginTelemetryMetadata {
-    PluginTelemetryMetadata {
-        plugin_id: Some(PluginId::parse("sample@test").expect("valid plugin id")),
-        remote_plugin_id: None,
-        capability_summary: Some(PluginCapabilitySummary {
-            config_name: "sample@test".to_string(),
-            display_name: "sample".to_string(),
-            plugin_namespace: None,
-            description: None,
-            has_skills: true,
-            mcp_server_names: vec!["mcp-1".to_string(), "mcp-2".to_string()],
-            app_connector_ids: vec![
-                AppConnectorId("calendar".to_string()),
-                AppConnectorId("drive".to_string()),
-            ],
-        }),
     }
 }

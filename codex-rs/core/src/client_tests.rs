@@ -125,9 +125,10 @@ fn test_model_client_with_thread_id(
 ) -> ModelClient {
     let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
     ModelClient::new(
-        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
+        /*auth_manager*/ None,
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
+        provider,
         session_source,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -226,14 +227,13 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header(
             format!("{}/register", registration.uri()).parse().unwrap(),
         ));
         let mut client = test_model_client(SessionSource::Exec);
-        Arc::get_mut(&mut client.state).unwrap().provider =
-            codex_model_provider::ProviderAuthContext {
-                credentials: manager,
-                runtime_auth: runtime_mode.map(|mode| (runtime, mode)),
-            }
-            .model_provider(ModelProviderInfo::create_openai_provider(
-                /*base_url*/ None,
-            ));
+        Arc::get_mut(&mut client.state).unwrap().provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(manager),
+        );
+        if let Some(mode) = runtime_mode {
+            client = client.with_runtime_auth(runtime, mode).unwrap();
+        }
         let mut setup = client
             .current_client_setup(super::ClientRouting::Workspace)
             .await
@@ -246,7 +246,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header(
         }
         // Exercise the resolved route's redirect policy against loopback HTTP servers.
         setup.api_provider.base_url = origin.uri();
-        let transport = setup.http_transport("/responses").unwrap();
+        let transport = setup.build_api_transport("/responses").unwrap();
         let request = setup
             .api_provider
             .build_request(http::Method::POST, "/responses")
@@ -554,7 +554,6 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
                 arguments: json!({"query": id}).to_string(),
             },
             encrypted_function_args: None,
-            native_call: None,
         };
         let (mut recorded, permit) = recorder
             .prepare_direct_call(&call, &ToolCallSource::Direct, &step)
@@ -1687,65 +1686,6 @@ async fn untraced_http_stream_releases_completed_output_before_response_ends() {
 }
 
 #[tokio::test]
-async fn incomplete_response_traces_attempted_call_without_streaming_it() -> anyhow::Result<()> {
-    let item = json!({
-        "type": "function_call",
-        "status": "incomplete",
-        "id": "fc_attempt",
-        "call_id": "attempt",
-        "name": "unknown_tool",
-        "arguments": "{}",
-    });
-    let unknown = json!({"type": "future_response_item", "status": "incomplete"});
-    for (partial_output, expected_call_ids) in [
-        (vec![item.clone()], vec![Some("attempt")]),
-        (vec![unknown.clone(), item], vec![Some("attempt")]),
-        (vec![unknown], vec![]),
-    ] {
-        let temp = TempDir::new()?;
-        let attempt = started_inference_attempt(&temp)?;
-        let api_stream = futures::stream::iter([Err(codex_api::ApiError::ResponseIncomplete(
-            Box::new(codex_protocol::error::ResponseIncompleteError {
-                reason: "invalid_recipient".to_string(),
-                response_id: Some("response".to_string()),
-                token_usage: None,
-                partial_output,
-            }),
-        ))]);
-        let mut stream = super::map_response_events(
-            /*upstream_request_id*/ None,
-            api_stream,
-            test_session_telemetry(),
-            attempt,
-            test_model_provider(),
-            /*last_response_tx*/ None,
-        );
-        assert!(matches!(stream.next().await, Some(Err(_))));
-        assert!(stream.next().await.is_none());
-
-        let rollout = replay_bundle(temp.path())?;
-        let inference = rollout.inference_calls.values().next().unwrap();
-        assert_eq!(inference.execution.status, ExecutionStatus::Failed);
-        let call_ids: Vec<_> = inference
-            .response_item_ids
-            .iter()
-            .map(|id| rollout.conversation_items[id].call_id.as_deref())
-            .collect();
-        assert_eq!(call_ids, expected_call_ids);
-        assert_eq!(
-            inference.raw_response_payload_id.is_some(),
-            !expected_call_ids.is_empty()
-        );
-        assert_eq!(
-            rollout.threads["thread-root"].conversation_item_ids,
-            inference.request_item_ids
-        );
-        assert!(rollout.tool_calls.is_empty());
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let attempt = started_inference_attempt(&temp)?;
@@ -2147,9 +2087,10 @@ fn model_client_with_counting_attestation(
         )
     };
     let model_client = ModelClient::new(
-        codex_model_provider::create_model_provider(provider, auth_manager),
+        auth_manager,
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
+        provider,
         SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,

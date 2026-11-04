@@ -145,9 +145,6 @@ async fn reload_mcp_config_with_policy(
 fn disabled_enterprise_config(current_config: &Config) -> Config {
     let mut config = current_config.clone();
     config.disable_mcp_enterprise_auth();
-    config.config_layer_stack = config
-        .config_layer_stack
-        .with_cloud_config_binding(/*binding*/ None);
     config
 }
 
@@ -169,7 +166,6 @@ mod tests {
     use crate::extensions::ThreadExtensionDependencies;
     use crate::extensions::thread_extensions;
     use codex_arg0::Arg0DispatchPaths;
-    use codex_config::CloudConfigBundleLoader;
     use codex_config::LoaderOverrides;
     use codex_config::ThreadConfigContext;
     use codex_config::ThreadConfigLoadError;
@@ -178,15 +174,14 @@ mod tests {
     use codex_config::ThreadConfigSource;
     use codex_config::types::AuthKeyringBackendKind;
     use codex_config::types::McpServerConfig;
-    use codex_core::ThreadStoreBuilder;
     use codex_core::config::ConfigOverrides;
     use codex_core::init_state_db;
+    use codex_core::thread_store_from_config;
     use codex_exec_server::EnvironmentManager;
     use codex_extension_api::NoopExtensionEventSink;
     use codex_home::CodexHomeUserInstructionsProvider;
     use codex_login::AuthManager;
     use codex_login::CodexAuth;
-    use codex_models_manager::manager::ModelCatalogSettings;
     use codex_protocol::protocol::SessionSource;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
@@ -523,25 +518,19 @@ enabled = false
         let state_db = init_state_db(&good_config)
             .await
             .expect("refresh tests require state db");
-        let thread_store =
-            ThreadStoreBuilder::from_config(&good_config, Some(state_db.clone())).build();
+        let thread_store = thread_store_from_config(&good_config, Some(state_db.clone()));
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
         let executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider> = Arc::new(
             codex_skills_extension::ExecutorSkillProvider::new_with_restriction_product(
+                Arc::clone(&environment_manager),
                 SessionSource::Exec.restriction_product(),
             ),
         );
         let thread_manager = Arc::new_cyclic(|thread_manager| {
             ThreadManager::new(
                 &good_config,
-                codex_core::build_startup_models(
-                    &good_config,
-                    auth_manager.clone(),
-                    "11111111-1111-4111-8111-111111111111".to_string(),
-                    Arc::new(ModelCatalogSettings::disk(
-                        good_config.codex_home.to_path_buf(),
-                    )),
-                ),
+                auth_manager.clone(),
+                codex_core::build_models_manager(&good_config, auth_manager.clone()),
                 codex_core::CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 Arc::clone(&environment_manager),
@@ -551,7 +540,6 @@ enabled = false
                         sample_responses: Arc::new(
                             crate::thread_sample::SampleResponseRegistry::default(),
                         ),
-                        cloud_skill_provider: None,
                         event_sink: Arc::new(NoopExtensionEventSink),
                         auth_manager: auth_manager.clone(),
                         state_db: Some(state_db.clone()),
@@ -573,6 +561,7 @@ enabled = false
                 codex_core::passthrough_image_store(),
                 Arc::clone(&thread_store),
                 codex_core::local_agent_graph_store_from_state_db(Some(&state_db)),
+                "11111111-1111-4111-8111-111111111111".to_string(),
                 /*attestation_provider*/ None,
                 /*external_time_provider*/ None,
             )
@@ -596,7 +585,6 @@ enabled = false
             Vec::new(),
             LoaderOverrides::without_managed_config_for_tests(),
             /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
             Arg0DispatchPaths::default(),
             loader.clone(),
         );

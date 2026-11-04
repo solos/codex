@@ -1,7 +1,5 @@
 //! Exercise the real helper protocol and bounded process I/O.
 
-mod common;
-
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -10,17 +8,18 @@ use anyhow::Result;
 use codex_realtime_webrtc::Message;
 use codex_realtime_webrtc::decode_frame;
 use codex_realtime_webrtc::encode_frame;
-use common::voice_host_command;
+use codex_utils_cargo_bin::cargo_bin;
 use pretty_assertions::assert_eq;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
+use tokio::process::Command;
 use tokio::time::timeout;
 
 const DEADLINE: Duration = Duration::from_secs(/*secs*/ 10);
 
 fn spawn() -> Result<Child> {
-    Ok(voice_host_command()?
+    Ok(Command::new(cargo_bin("codex-voice-host")?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -31,7 +30,7 @@ fn spawn() -> Result<Child> {
 async fn build_commit() -> Result<String> {
     let output = timeout(
         DEADLINE,
-        voice_host_command()?
+        Command::new(cargo_bin("codex-voice-host")?)
             .arg("--build-commit")
             .kill_on_drop(true)
             .output(),

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::io;
 
 use crate::LocalFileSystem;
-use crate::protocol::FsOpenMode;
 use codex_file_system::ExecutorFileSystem;
 use codex_file_system::WalkEntryKind;
 use codex_file_system::WalkOptions;
@@ -17,11 +16,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use codex_core_plugin_common::installed::PLUGINS_CACHE_DIR;
-use codex_core_plugin_common::installed::REMOTE_PLUGIN_INSTALL_METADATA_FILE;
 use codex_core_plugin_common::installed::active_plugin_version;
-use codex_core_plugin_common::installed::parse_remote_plugin_id;
 use codex_core_plugin_common::plugin_id::PluginId;
-use tokio::io::AsyncReadExt;
 
 /// Fixed paths are supplied by the executor, not read from the sandbox helper's sanitized env.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,8 +28,6 @@ pub(crate) struct CapabilityLocationRequest {
 }
 
 const MAX_LOCATIONS: usize = 512;
-const MAX_REMOTE_INSTALL_METADATA_BYTES: u64 = 16 * 1024;
-const MAX_REMOTE_PLUGIN_ID_BYTES: usize = 1024;
 const AGENTS_SKILLS_SUFFIX: &str = ".agents/skills";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +41,6 @@ pub(crate) struct CapabilityLocation {
 pub(crate) struct InstalledPlugin {
     pub id: String,
     pub version: String,
-    pub remote_plugin_id: Option<String>,
 }
 
 /// Selected locations; membership does not authorize capability reads.
@@ -156,62 +149,19 @@ async fn discover_cached_plugins(
     .await
     .map_err(io::Error::other)?;
     for (id, package_root, version) in installed {
-        // Avoid reading metadata for plugin locations the final assembly would discard.
         if locations.locations.len() == MAX_LOCATIONS {
             locations.warnings.push(format!(
                 "plugin cache reached its {MAX_LOCATIONS}-location limit"
             ));
             break;
         }
-        let metadata_path = package_root.join(REMOTE_PLUGIN_INSTALL_METADATA_FILE);
-        let remote_plugin_id = match read_remote_plugin_id(metadata_path.as_path()).await {
-            Ok(remote_plugin_id) => remote_plugin_id,
-            Err(error) => {
-                locations.warnings.push(format!(
-                    "could not read remote installation metadata for {id}: {error}"
-                ));
-                None
-            }
-        };
         locations.locations.push(CapabilityLocation {
             root: PathUri::from_abs_path(&package_root.join(&version)),
             standalone_root_id: None,
-            plugin: Some(InstalledPlugin {
-                id,
-                version,
-                remote_plugin_id,
-            }),
+            plugin: Some(InstalledPlugin { id, version }),
         });
     }
     Ok(locations)
-}
-
-async fn read_remote_plugin_id(path: &std::path::Path) -> io::Result<Option<String>> {
-    // Nonblocking open and handle validation reject FIFOs and other non-regular files.
-    let file = match crate::regular_file::open(path, FsOpenMode::Read).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut contents = Vec::new();
-    file.take(MAX_REMOTE_INSTALL_METADATA_BYTES + 1)
-        .read_to_end(&mut contents)
-        .await?;
-    if contents.len() as u64 > MAX_REMOTE_INSTALL_METADATA_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "remote installation metadata exceeds its byte limit",
-        ));
-    }
-    let contents = std::str::from_utf8(&contents).map_err(io::Error::other)?;
-    let id = parse_remote_plugin_id(contents).map_err(io::Error::other)?;
-    if id.len() > MAX_REMOTE_PLUGIN_ID_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "remote plugin ID exceeds its byte limit",
-        ));
-    }
-    Ok(Some(id))
 }
 
 #[cfg(test)]

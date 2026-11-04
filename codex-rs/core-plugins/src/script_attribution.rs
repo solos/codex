@@ -9,7 +9,6 @@ use crate::marketplace_policy::primary_runtime_marketplace_root;
 use crate::plugin_metrics::PluginMetricsOperation;
 use crate::plugin_metrics::ResolvedPluginMetricsOperation;
 use crate::plugin_metrics::load_plugin_metrics_operations;
-use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
 use crate::startup_sync::read_curated_plugins_sha;
@@ -59,8 +58,7 @@ impl PluginCommandAttribution {
 }
 
 /// Active first-party roots eligible for command attribution.
-/// Trusted means OpenAI-shipped synced or bundled runtime code, or a
-/// server-installed global remote plugin cache entry, not a local override.
+/// Trusted means OpenAI-shipped synced or bundled runtime code, not a local override.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrustedPluginRoots {
     roots: Vec<TrustedPluginRoot>,
@@ -75,8 +73,7 @@ pub struct PluginMeasurementTarget {
 }
 
 impl PluginMeasurementTarget {
-    /// Selects one remote plugin using the same command parser as attribution.
-    /// Skip paths outside the remote plugin cache before consulting the executor.
+    /// Selects a canonical executor plugin using the same command parser as attribution.
     pub async fn from_command(
         command: &[String],
         cwd: &PathUri,
@@ -93,63 +90,12 @@ impl PluginMeasurementTarget {
         Self::from_script_path(&script)
     }
 
-    fn from_script_path(script: &PathUri) -> Option<Self> {
-        let path_convention = script.infer_path_convention()?;
-        let native_path = script.inferred_native_path_string();
-        // Normalize only the hint so equivalent Windows paths share preparation.
-        // Store identities must retain the authenticated catalog's spelling.
-        let native_path = match path_convention {
-            PathConvention::Windows => native_path.to_ascii_lowercase(),
-            PathConvention::Posix => native_path,
-        };
-        let components = path_convention
-            .path_segments(&native_path)
-            .collect::<Vec<_>>();
-        let mut candidates = components.windows(6).filter_map(|parts| {
-            if parts[..3] != ["plugins", "cache", REMOTE_GLOBAL_MARKETPLACE_NAME]
-                || parts[4] == DEFAULT_PLUGIN_VERSION
-            {
-                return None;
-            }
-            validate_plugin_version_segment(parts[4]).ok()?;
-            Some(Self {
-                plugin_id: PluginId::new(parts[3].to_owned(), parts[2].to_owned()).ok()?,
-                version: parts[4].to_owned(),
-                path_convention,
-            })
-        });
-        let target = candidates.next()?;
-        candidates.next().is_none().then_some(target)
+    fn from_script_path(_script: &PathUri) -> Option<Self> {
+        None
     }
 }
 
 impl TrustedPluginRoots {
-    /// Called only after the authenticated remote bundle installer has prepared
-    /// an isolated store. Read declarations without loading plugin capabilities.
-    pub(crate) fn from_measurement_reference(
-        codex_home: &Path,
-        plugin_id: &PluginId,
-        version: &str,
-        remote_id: &str,
-    ) -> Option<Self> {
-        let store = PluginStore::try_new(codex_home.to_owned()).ok()?;
-        if store.active_plugin_version(plugin_id).as_deref() != Some(version)
-            || store.remote_plugin_id(plugin_id).ok()?.as_deref() != Some(remote_id)
-        {
-            return None;
-        }
-        let root = store.plugin_root(plugin_id, version).canonicalize().ok()?;
-        let metrics_operations_by_path = load_plugin_metrics_operations(&root).unwrap_or_default();
-        Some(Self {
-            roots: vec![TrustedPluginRoot {
-                plugin_id: plugin_id.clone(),
-                version: version.to_owned(),
-                root,
-                metrics_operations_by_path,
-            }],
-        })
-    }
-
     /// Adds already-trusted roots, preserving the existing root for each plugin and version.
     /// Distinct versions remain eligible for exact executor-version matching.
     pub fn extend(&mut self, other: &Self) {
@@ -210,15 +156,6 @@ impl TrustedPluginRoots {
         primary_runtime_marketplace_root: Option<&Path>,
     ) -> Option<AbsolutePathBuf> {
         match plugin_id.marketplace_name.as_str() {
-            REMOTE_GLOBAL_MARKETPLACE_NAME => {
-                let active_version = store.active_plugin_version(plugin_id)?;
-                if active_version == DEFAULT_PLUGIN_VERSION
-                    || store.remote_plugin_id(plugin_id).ok().flatten().is_none()
-                {
-                    return None;
-                }
-                Some(store.plugin_root(plugin_id, &active_version))
-            }
             OPENAI_CURATED_MARKETPLACE_NAME | OPENAI_API_CURATED_MARKETPLACE_NAME => {
                 let curated_sha = read_curated_plugins_sha(codex_home)?;
                 let expected_root =
@@ -328,7 +265,7 @@ impl TrustedPluginRoots {
 
     /// Resolves a trusted script on the selected executor filesystem.
     ///
-    /// Remote commands can use a path convention that the app-server host cannot
+    /// Executor commands can use a path convention that the app-server host cannot
     /// canonicalize. Resolve aliases on that executor first, then match the
     /// canonical target to a trusted local plugin script with the same contents.
     /// Generic attribution accepts matching script bytes across plugin versions.
@@ -694,7 +631,3 @@ fn windows_shell_script(command: &[String]) -> Option<&str> {
         })
         .then_some(script)
 }
-
-#[cfg(test)]
-#[path = "script_attribution_tests.rs"]
-mod tests;

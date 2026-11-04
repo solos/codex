@@ -1461,79 +1461,24 @@ pub(super) fn plugins_test_summary(
 ) -> PluginSummary {
     PluginSummary {
         id: id.to_string(),
-        remote_plugin_id: None,
-        version: None,
         local_version: None,
         name: name.to_string(),
-        share_context: None,
         source: PluginSource::Local {
             path: plugins_test_absolute_path(&format!("plugins/{name}")),
         },
         installed,
-        installed_at: None,
         enabled,
         install_policy,
         install_policy_source: None,
         must_show_installation_interstitial: None,
         auth_policy: PluginAuthPolicy::OnInstall,
         availability: PluginAvailability::Available,
-        disabled_reason: None,
-        eligible_plan_types: None,
         interface: Some(plugins_test_interface(
             display_name,
             description,
             /*long_description*/ None,
         )),
         keywords: Vec::new(),
-    }
-}
-
-pub(super) fn plugins_test_remote_summary(
-    remote_plugin_id: &str,
-    name: &str,
-    display_name: Option<&str>,
-    description: Option<&str>,
-    installed: bool,
-) -> PluginSummary {
-    PluginSummary {
-        id: remote_plugin_id.to_string(),
-        remote_plugin_id: Some(remote_plugin_id.to_string()),
-        version: None,
-        local_version: None,
-        name: name.to_string(),
-        share_context: None,
-        source: PluginSource::Remote,
-        installed,
-        installed_at: None,
-        enabled: true,
-        install_policy: PluginInstallPolicy::Available,
-        install_policy_source: None,
-        must_show_installation_interstitial: None,
-        auth_policy: PluginAuthPolicy::OnInstall,
-        availability: PluginAvailability::Available,
-        disabled_reason: None,
-        eligible_plan_types: None,
-        interface: Some(plugins_test_interface(
-            display_name,
-            description,
-            /*long_description*/ None,
-        )),
-        keywords: Vec::new(),
-    }
-}
-
-pub(super) fn plugins_test_remote_marketplace(
-    name: &str,
-    display_name: &str,
-    plugins: Vec<PluginSummary>,
-) -> PluginMarketplaceEntry {
-    PluginMarketplaceEntry {
-        name: name.to_string(),
-        path: None,
-        interface: Some(MarketplaceInterface {
-            display_name: Some(display_name.to_string()),
-        }),
-        plugins,
     }
 }
 
@@ -1569,28 +1514,6 @@ pub(super) fn plugins_test_response(
         marketplace_load_errors: Vec::new(),
         featured_plugin_ids: Vec::new(),
     }
-}
-
-pub(super) fn render_loaded_plugins_popup(
-    chat: &mut ChatWidget,
-    mut response: PluginListResponse,
-) -> String {
-    let cwd = chat.config.cwd.clone();
-    let remote_marketplaces = response
-        .marketplaces
-        .iter()
-        .filter(|marketplace| marketplace.path.is_none())
-        .cloned()
-        .collect();
-    response
-        .marketplaces
-        .retain(|marketplace| marketplace.path.is_some());
-    let response_for_refresh = response.clone();
-    chat.on_plugins_loaded(cwd.to_path_buf(), Ok(response));
-    chat.add_plugins_output();
-    chat.on_plugins_loaded(cwd.to_path_buf(), Ok(response_for_refresh));
-    chat.on_plugin_remote_sections_loaded(cwd.to_path_buf(), remote_marketplaces, Vec::new());
-    render_bottom_popup(chat, /*width*/ 100)
 }
 
 pub(super) fn plugins_test_detail(

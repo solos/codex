@@ -8,7 +8,6 @@
 use std::io;
 use std::path::Path;
 
-use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_config::TomlValue;
@@ -28,7 +27,7 @@ pub(super) struct StartupPresentation {
     pub(super) local_settings: crate::local_settings::LocalSettings,
 }
 
-/// Load client presentation settings without session setup or remote app-server connections.
+/// Load client presentation settings without starting a session or app-server connection.
 ///
 /// `loader_overrides` must already contain the selected profile and remote login-policy choice.
 /// `config_cwd` must come from the existing target/environment-aware cwd resolver. Reuse the
@@ -47,7 +46,6 @@ pub(super) async fn load(
         ConfigLoadOptions {
             loader_overrides,
             strict_config: cli.strict_config,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
         },
     )
     .await?;

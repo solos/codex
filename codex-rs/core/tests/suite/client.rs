@@ -1,4 +1,3 @@
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ModelClient;
 use codex_core::NewThread;
@@ -6,10 +5,10 @@ use codex_core::Prompt;
 use codex_core::ResponseEvent;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
-use codex_core::ThreadStoreBuilder;
 use codex_core::TurnInputRequest;
 use codex_core::X_CODEX_ROUTING_HINT_HEADER;
 use codex_core::resolve_installation_id;
+use codex_core::thread_store_from_config;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_history::RolloutItem;
@@ -26,7 +25,6 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
-use codex_models_manager::manager::ModelCatalogSettings;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ResponseItemId;
@@ -38,7 +36,6 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::error::CodexErr;
-use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -530,9 +527,7 @@ async fn sends_audio_urls_to_responses() {
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Audio {
-            audio: AudioReference::Inline {
-                audio_url: audio_url.to_string(),
-            },
+            audio_url: audio_url.to_string(),
         }]))
         .await
         .unwrap();
@@ -1824,14 +1819,12 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         SessionSource::Exec,
     );
     let client = ModelClient::new(
-        codex_model_provider::create_model_provider(
-            provider,
-            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
-                "unused-api-key",
-            ))),
-        ),
+        Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+            "unused-api-key",
+        ))),
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
+        provider,
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,
@@ -2077,12 +2070,8 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         .expect("resolve installation id");
     let thread_manager = ThreadManager::new(
         &config,
-        codex_core::build_startup_models(
-            &config,
-            auth_manager.clone(),
-            installation_id,
-            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
-        ),
+        auth_manager.clone(),
+        codex_core::build_models_manager(&config, auth_manager),
         codex_core::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -2090,8 +2079,9 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         Arc::new(codex_core::test_support::EmptyUserInstructionsProvider),
         /*analytics_events_client*/ None,
         codex_core::passthrough_image_store(),
-        ThreadStoreBuilder::from_config(&config, /*state_db*/ None).build(),
+        thread_store_from_config(&config, /*state_db*/ None),
         /*agent_graph_store*/ None,
+        installation_id,
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
@@ -3225,48 +3215,6 @@ async fn includes_developer_instructions_message_in_request() {
     );
 }
 
-#[tokio::test]
-async fn includes_managed_developer_instructions_once_per_request() -> anyhow::Result<()> {
-    const CLIENT_INSTRUCTIONS: &str = "client developer instructions";
-    const MANAGED_INSTRUCTIONS: &str = "managed requirements instructions";
-
-    let server = start_mock_server().await;
-    let mut builder = test_codex()
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                "additional_developer_instructions = {MANAGED_INSTRUCTIONS:?}"
-            )),
-        )
-        .with_config(|config| {
-            config.developer_instructions = Some(CLIENT_INSTRUCTIONS.to_string());
-        });
-    let test = builder.build_with_auto_env(&server).await?;
-    let managed_message = format!(
-        "<managed_developer_instructions>\n{MANAGED_INSTRUCTIONS}\n</managed_developer_instructions>"
-    );
-
-    for (response_id, prompt) in [("resp-1", "first turn"), ("resp-2", "second turn")] {
-        let response = mount_sse_once(&server, sse(vec![ev_completed(response_id)])).await;
-        test.submit_text_turn(prompt).await?;
-
-        let developer_messages = response.single_request().message_input_texts("developer");
-        assert!(
-            developer_messages
-                .iter()
-                .any(|message| message.contains(CLIENT_INSTRUCTIONS))
-        );
-        assert_eq!(
-            developer_messages
-                .iter()
-                .filter(|message| message.contains("<managed_developer_instructions>"))
-                .collect::<Vec<_>>(),
-            vec![&managed_message]
-        );
-    }
-
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids() {
     skip_if_no_network!();
@@ -3335,9 +3283,10 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
     );
 
     let client = ModelClient::new(
-        codex_model_provider::create_model_provider(provider.clone(), /*auth_manager*/ None),
+        /*auth_manager*/ None,
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
+        provider.clone(),
         SessionSource::Exec,
         "test_originator".to_string(),
         config.model_verbosity,

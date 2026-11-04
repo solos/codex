@@ -51,8 +51,6 @@ pub struct NodeReplContext<'a> {
     pub responses: &'a [Arc<NodeReplResponse>],
     pub omitted_responses: u64,
     pub mode: NodeReplReviewEvidenceMode,
-    /// Controls request selection only; host storage and delivery cursors stay unchanged.
-    pub budgeting: crate::ContextBudgeting,
 }
 
 /// Request-local snapshot, selected and rendered only during sync preparation.
@@ -68,7 +66,7 @@ pub(crate) enum NodeReplEvidenceContent {
         omitted_responses: u64,
         mode: NodeReplReviewEvidenceMode,
     },
-    Prepared(Vec<crate::Budgeted<UserInput>>),
+    Prepared(Vec<UserInput>),
 }
 
 impl std::fmt::Debug for RenderedNodeReplEvidence {
@@ -114,25 +112,21 @@ fn text_input(text: String) -> UserInput {
 
 impl NodeReplContext<'_> {
     /// Renders the existing text or multimodal layout without advancing host state.
-    pub fn render_inputs(&self) -> Vec<crate::Budgeted<UserInput>> {
-        if (self.budgeting == crate::ContextBudgeting::Fixed
-            || self.mode == NodeReplReviewEvidenceMode::Disabled)
-            && (self.mode != NodeReplReviewEvidenceMode::Multimodal
-                || !self.responses.iter().any(|response| {
-                    response.items.iter().any(|item| {
-                        matches!(
-                            item,
-                            Image {
-                                image: ImageReference::Inline { .. },
-                                ..
-                            }
-                        )
-                    })
-                }))
+    pub fn render_inputs(&self) -> Vec<UserInput> {
+        if self.mode != NodeReplReviewEvidenceMode::Multimodal
+            || !self.responses.iter().any(|response| {
+                response.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        Image {
+                            image: ImageReference::Inline { .. },
+                            ..
+                        }
+                    )
+                })
+            })
         {
-            return vec![crate::Budgeted::required(text_input(
-                self.render().into_text().unwrap_or_default(),
-            ))];
+            return vec![text_input(self.render().into_text().unwrap_or_default())];
         }
 
         let (opening, closing) = Self::type_markers();
@@ -159,51 +153,39 @@ impl NodeReplContext<'_> {
             intro.len().saturating_add(closing.len()),
             NodeReplLayout::Multimodal,
             self.omitted_responses,
-            self.budgeting,
         );
         let omitted_responses = selected.omitted_responses;
 
         let mut seen_images = HashSet::new();
-        let mut inputs = vec![crate::Budgeted::protected(text_input(intro))];
+        let mut inputs = vec![text_input(intro)];
 
         for response in &self.responses[selected.first..] {
             let header = format!(
                 "[REPL response {} {}]\n",
                 response.sequence, response.provenance
             );
-            inputs.push(crate::Budgeted::protected(text_input(header)));
+            inputs.push(text_input(header));
             if response.items.is_empty() {
-                inputs.push(crate::Budgeted::required(text_input(
-                    "<completed without visible text>\n".to_string(),
-                )));
+                inputs.push(text_input("<completed without visible text>\n".to_string()));
             }
             for item in &response.items {
                 match item {
-                    Text { text, .. } => {
-                        inputs.push(crate::Budgeted::required(text_input(format!("{text}\n"))))
-                    }
+                    Text { text, .. } => inputs.push(text_input(format!("{text}\n"))),
                     Image {
                         image: ImageReference::Inline { image_url },
                         ..
-                    } if self.mode == NodeReplReviewEvidenceMode::Multimodal
-                        && seen_images.insert(image_url) =>
-                    {
-                        inputs.push(crate::Budgeted::optional(
-                            item.clone(),
-                            crate::BudgetPriority::Image,
-                        ))
-                    }
+                    } if seen_images.insert(image_url) => inputs.push(item.clone()),
                     _ => {}
                 }
             }
         }
 
         if omitted_responses > 0 {
-            inputs.push(crate::Budgeted::protected(text_input(format!(
+            inputs.push(text_input(format!(
                 "<omitted node_repl_responses=\"{omitted_responses}\" reason=\"resource_bounds\" />\n"
-            ))));
+            )));
         }
-        inputs.push(crate::Budgeted::protected(text_input(closing.to_string())));
+        inputs.push(text_input(closing.to_string()));
         inputs
     }
 }
@@ -263,7 +245,6 @@ impl ContextualUserFragment for NodeReplContext<'_> {
                 .saturating_add(body.len()),
             NodeReplLayout::Text,
             self.omitted_responses,
-            self.budgeting,
         );
         let omitted_responses = selected.omitted_responses;
 
@@ -293,9 +274,7 @@ impl ContextualUserFragment for NodeReplContext<'_> {
                 body.push('\n');
             }
         }
-        debug_assert!(
-            self.budgeting == crate::ContextBudgeting::Elastic || body.len() <= max_body_bytes
-        );
+        debug_assert!(body.len() <= max_body_bytes);
         input_text(body)
     }
 }
@@ -319,14 +298,7 @@ fn select_node_repl_responses(
     framing_bytes: usize,
     layout: NodeReplLayout,
     mut omitted_responses: u64,
-    budgeting: crate::ContextBudgeting,
 ) -> NodeReplSelection {
-    if budgeting == crate::ContextBudgeting::Elastic {
-        return NodeReplSelection {
-            first: 0,
-            omitted_responses,
-        };
-    }
     let notice_bytes = match layout {
         NodeReplLayout::Text => 64,
         NodeReplLayout::Multimodal => 160,

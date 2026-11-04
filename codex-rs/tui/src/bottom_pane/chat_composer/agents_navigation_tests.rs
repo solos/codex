@@ -13,7 +13,6 @@ fn parent_owned_thread_allows_local_commands() {
         ("/side", SlashCommand::Side),
         ("/btw", SlashCommand::Btw),
         ("/diff ", SlashCommand::Diff),
-        ("/daemon", SlashCommand::Daemon),
         ("/warnings", SlashCommand::Warnings),
     ] {
         let (mut composer, _rx) = new_test_composer();
@@ -121,7 +120,7 @@ fn agents_navigation_hint_snapshots() {
                     }
                     "agents_navigation_status" => {
                         composer.set_status_line_enabled(/*enabled*/ true);
-                        composer.set_status_line(Some(Line::from("model · project").into()));
+                        composer.set_status_line(Some(Line::from("model · project")));
                     }
                     _ => {}
                 }

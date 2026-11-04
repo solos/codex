@@ -1,4 +1,4 @@
-//! Session listing preserves grouped filters while tolerating older single-CWD daemons.
+//! Session listing preserves grouped filters while tolerating older single-CWD servers.
 
 use super::*;
 use codex_app_server_protocol::ThreadListCwdFilter;
@@ -11,7 +11,7 @@ impl AppServerSession {
         loop {
             let request_id = self.next_request_id();
             let response = self
-                .request_handle
+                .client
                 .request_typed(ClientRequest::ThreadList {
                     request_id,
                     params: params.clone(),
@@ -35,7 +35,3 @@ impl AppServerSession {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "thread_list_tests.rs"]
-mod tests;

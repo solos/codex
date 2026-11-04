@@ -40,7 +40,7 @@ impl Config {
         incoming: &Self,
         scope: RuntimeConfigRefresh,
     ) -> std::io::Result<Self> {
-        let mut layers = match scope {
+        let layers = match scope {
             RuntimeConfigRefresh::User | RuntimeConfigRefresh::UserFiles => self
                 .config_layer_stack
                 .with_user_layer_from(&incoming.config_layer_stack),
@@ -50,25 +50,6 @@ impl Config {
             )?
             .with_user_layer_from(&self.config_layer_stack),
         };
-        if matches!(scope, RuntimeConfigRefresh::Mcp) {
-            let plugins = incoming
-                .config_layer_stack
-                .all_layers_low_to_high()
-                .filter(|layer| {
-                    layer.name == codex_config::ConfigLayerSource::SessionFlags
-                        && !layer.is_disabled()
-                })
-                .filter_map(|layer| layer.config.get("plugins").cloned())
-                .reduce(|mut plugins, overlay| {
-                    codex_config::merge_toml_values(&mut plugins, &overlay);
-                    plugins
-                });
-            if let Some(plugins) = plugins {
-                layers = layers.with_session_plugins(plugins)?;
-            }
-        }
-        // User refreshes retain the session's managed configuration.
-        layers.ensure_config_server_applied()?;
         let cfg: McpRefreshToml = layers
             .effective_config()
             .try_into()

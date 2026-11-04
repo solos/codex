@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::config::Constrained;
 use codex_extension_api::ApprovalReviewContributor;
 use codex_extension_api::ExtensionFuture;
@@ -379,9 +378,6 @@ async fn required_model_bypasses_extension_approval_when_guardian_v2_is_disabled
             )
             .expect("Guardian v2 configuration should be written");
         })
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
-        )
         .with_config(|config| {
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -645,6 +641,7 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -673,7 +670,6 @@ fn remote_model_with_auto_review_override(slug: &str, review_model: &str) -> Mod
         availability_nux: None,
         apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
         web_search_tool_type: Default::default(),
-        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),

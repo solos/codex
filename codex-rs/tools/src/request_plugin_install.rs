@@ -45,8 +45,6 @@ pub struct RequestPluginInstallMeta<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install_url: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_plugin_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub app_connector_ids: Option<&'a [String]>,
 }
 
@@ -95,12 +93,11 @@ fn build_request_plugin_install_meta<'a>(
     tool: &'a DiscoverableTool,
     suggestion_id: &'a str,
 ) -> RequestPluginInstallMeta<'a> {
-    let (tool_type, suggestion_id, remote_plugin_id, app_connector_ids) = match tool {
-        DiscoverableTool::Connector(_) => (DiscoverableToolType::Connector, None, None, None),
+    let (tool_type, suggestion_id, app_connector_ids) = match tool {
+        DiscoverableTool::Connector(_) => (DiscoverableToolType::Connector, None, None),
         DiscoverableTool::Plugin(plugin) => (
             DiscoverableToolType::Plugin,
             Some(suggestion_id),
-            plugin.remote_plugin_id.as_deref(),
             Some(plugin.app_connector_ids.as_slice()),
         ),
     };
@@ -114,7 +111,6 @@ fn build_request_plugin_install_meta<'a>(
         tool_name: tool.name(),
         suggestion_id,
         install_url: tool.install_url(),
-        remote_plugin_id,
         app_connector_ids,
     }
 }

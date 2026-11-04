@@ -282,19 +282,7 @@ fn policy_event_excludes_real_parser_values_but_retains_safe_codes() {
             contents,
         )])
         .unwrap_err();
-    let fragment = codex_config::cloud_config_layers_from_fragments(
-        [codex_config::CloudConfigFragment {
-            id: "synthetic-id".into(),
-            name: "private-name".into(),
-            contents: contents.into(),
-        }],
-        &Path::new(r"C:\CodexTest").try_into().unwrap(),
-    )
-    .unwrap_err();
-    for error in [
-        std::io::Error::from(requirements),
-        std::io::Error::from(fragment),
-    ] {
+    for error in [std::io::Error::from(requirements)] {
         let error = anyhow::Error::new(error).context("load managed configuration");
         assert!(format!("{error:#}").contains("synthetic-secret"));
         assert!(!is_config_parse_error(&error));
@@ -309,15 +297,6 @@ fn policy_event_excludes_real_parser_values_but_retains_safe_codes() {
             anyhow::Error::new(std::io::Error::from_raw_os_error(5))
                 .context("load bootstrap configuration"),
             "stage=bootstrap io=PermissionDenied win32=Some(5)",
-        ),
-        (
-            anyhow::Error::new(codex_config::CloudConfigBundleLoadError::new(
-                codex_config::CloudConfigBundleLoadErrorCode::RequestFailed,
-                Some(503),
-                contents,
-            ))
-            .context("load managed configuration"),
-            "stage=managed cloud=RequestFailed http=Some(503)",
         ),
         (
             anyhow::anyhow!("{contents}"),

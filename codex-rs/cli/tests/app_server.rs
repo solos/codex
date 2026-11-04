@@ -64,8 +64,6 @@ fn agents_accept_interactive_configuration_overrides() -> Result<()> {
         ["-c", "features.multi_agent_mode=true", "agents"].as_slice(),
         ["--enable", "multi_agent_mode", "agents"].as_slice(),
         ["--yolo", "agents"].as_slice(),
-        ["--no-daemon", "agents"].as_slice(),
-        ["agents", "--no-daemon"].as_slice(),
         ["--search", "agents"].as_slice(),
         ["--model", "gpt-5", "agents"].as_slice(),
         ["--approve-for-me", "agents"].as_slice(),
@@ -86,38 +84,10 @@ fn agents_accept_interactive_configuration_overrides() -> Result<()> {
 fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
     let codex_home = TempDir::new()?;
 
-    for (args, expected_error) in [
-        (
-            ["--image=image.png", "agents"].as_slice(),
-            "does not accept an initial prompt or images",
-        ),
-        (
-            ["--oss", "agents", "--remote", "ws://127.0.0.1:4512"].as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-        (
-            [
-                "--add-dir",
-                ".",
-                "agents",
-                "--remote",
-                "ws://127.0.0.1:4512",
-            ]
-            .as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-        (
-            [
-                "-c",
-                "sandbox_workspace_write.writable_roots=[\"../shared\"]",
-                "agents",
-                "--remote",
-                "ws://127.0.0.1:4512",
-            ]
-            .as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-    ] {
+    for (args, expected_error) in [(
+        ["--image=image.png", "agents"].as_slice(),
+        "does not accept an initial prompt or images",
+    )] {
         let mut cmd = codex_command(codex_home.path())?;
         cmd.args(args)
             .assert()

@@ -2,13 +2,13 @@
 
 use super::super::agent_control::TestAgentControl;
 use super::super::agents_md::RecordingThreadInstructionsProvider;
-use super::super::rollout_budget::HostAccounting;
 use super::*;
 use anyhow::Context;
 use codex_core::AgentControl;
 use codex_core::CodexThread;
 use codex_core::HostThreadSpawnReservation;
 use codex_core::HostToolInvocationLookup;
+use codex_core::PromptCacheKey;
 use codex_core::SpawnAgentForkMode;
 use codex_core::StartIfIdleSubmission;
 use codex_core::ThreadCreateRequest;
@@ -23,11 +23,14 @@ use codex_http_client::NetworkPolicy;
 use codex_http_client::NetworkPolicyController;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolCallRequest;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::input_text;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_thread_store::AddThreadAttachmentParams;
 use codex_thread_store::ListThreadAttachmentsParams;
+use codex_thread_store::LoadThreadHistoryParams;
 use core_test_support::responses;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodexBuilder;
@@ -40,6 +43,7 @@ async fn host_spawn_fixture(
     server: &MockServer,
     builder: TestCodexBuilder,
     application_network_policy: NetworkPolicy,
+    prompt_cache_key: PromptCacheKey,
     thread_instructions_provider: Option<Arc<dyn ThreadInstructionsProvider>>,
 ) -> Result<(TestCodex, Arc<CodexThread>, Arc<TestAgentControl>)> {
     let root_id = ThreadId::new();
@@ -85,6 +89,7 @@ async fn host_spawn_fixture(
         .thread_extension_init
         .insert(HostToolInvocationLookup);
     options.history_mode = Some(ThreadHistoryMode::Legacy);
+    options.prompt_cache_key = prompt_cache_key;
     options.thread_instructions_provider = thread_instructions_provider;
     options.reserved_thread_id = Some(root_id);
     options.disabled_plugin_ids = Some(vec!["captured-plugin@local".into()]);
@@ -165,6 +170,18 @@ fn create_request(name: &str, fork_history: bool) -> ThreadCreateRequest {
     }
 }
 
+async fn start_first_turn(child: &CodexThread, prompt: &str) -> Result<()> {
+    let submission = child
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![text(prompt)]))
+        .await?;
+    assert!(
+        matches!(submission, StartIfIdleSubmission::Started { .. }),
+        "expected the new child to be idle, got {submission:?}"
+    );
+    wait_for_successful_turn(child).await;
+    Ok(())
+}
+
 #[test_case::test_case(false; "fresh")]
 #[test_case::test_case(true; "forked")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -172,34 +189,26 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     fork_history: bool,
 ) -> Result<()> {
     const PR: &str = "openai/codex#123";
-    const INITIAL_RULE: &str = "Initial rules.";
     const UPDATED_RULE: &str = "Updated shared worker instructions.";
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let network_controller = NetworkPolicyController::default();
     let network_policy = network_controller.policy();
     assert!(network_controller.publish(network_policy.revision(), DestinationPolicy::Unrestricted));
-    let provider = Arc::new(RecordingThreadInstructionsProvider::with_text(INITIAL_RULE).shared());
+    let provider =
+        Arc::new(RecordingThreadInstructionsProvider::with_text("Initial rules.").shared());
     let (test, parent, controller) = host_spawn_fixture(
         &server,
-        test_codex()
-            .with_extensions({
-                let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
-                extensions.thread_lifecycle_contributor(Arc::new(
-                    super::super::agent_control::HostRuntime,
-                ));
-                Arc::new(extensions.build())
-            })
-            .with_config(|config| config.allow_persistent_dynamic_tool_updates = true),
+        test_codex(),
         network_policy.clone(),
+        PromptCacheKey::SessionDerived,
         Some(provider.clone()),
     )
     .await?;
     let root_id = test.session_configured.thread_id;
     let captured = parent.config_snapshot().await;
-    let parent_message = "Start the worker.";
     let invocation =
-        host_spawn_invocation(&server, &parent, "spawn-worker", parent_message).await?;
+        host_spawn_invocation(&server, &parent, "spawn-worker", "Start the worker.").await?;
     let context = parent.tool_invocation(&invocation.turn_id, &invocation.call_id)?;
     test.thread_store
         .add_thread_attachment(AddThreadAttachmentParams {
@@ -218,30 +227,20 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
         },
     )
     .await?;
-    provider.set_instructions(Some(Instructions {
-        text: UPDATED_RULE.into(),
-        source: None,
-    }));
-    // Tool inheritance reads the current catalog while invocation settings remain captured.
-    assert_eq!(parent.prepare_child(&context).await?.dynamic_tools.len(), 1);
-    parent.replace_dynamic_tools(Vec::new()).await?;
-    let prepared = parent.prepare_child(&context).await?;
-    assert!(prepared.dynamic_tools.is_empty());
-    assert_eq!(prepared.disabled_plugin_ids, captured.disabled_plugin_ids);
-    assert_eq!(prepared.thread_instructions.as_deref(), Some(INITIAL_RULE));
-    assert_eq!(
-        prepared.resolved_permission_profile,
-        PermissionProfile::read_only()
-    );
     let child_id = ThreadId::new();
     let request = || create_request("worker", fork_history);
-    let accounting = Arc::new(HostAccounting::default());
     let reservation = || HostThreadSpawnReservation {
         thread_id: child_id,
         control: controller.clone(),
-        turn_admission: None,
-        usage_accounting: Some(accounting.clone()),
     };
+    // A detached snapshot cannot carry the source's live application policy.
+    assert!(matches!(
+        parent
+            .prepare_child(&context, request())
+            .await,
+        Err(ThreadSpawnError::Backend(error))
+            if error.to_string().contains("host-managed application authority")
+    ));
     let mut mismatched = reservation();
     mismatched.control = Arc::new(TestAgentControl::new(ThreadId::new()));
     assert!(matches!(
@@ -250,6 +249,10 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     ));
     assert!(test.thread_manager.get_thread(child_id).await.is_err());
 
+    provider.set_instructions(Some(Instructions {
+        text: UPDATED_RULE.into(),
+        source: None,
+    }));
     let spawned = parent
         .create_child(&context, request(), reservation())
         .await?;
@@ -262,7 +265,7 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     let worker = test.thread_manager.get_thread(child_id).await?;
     // A handle cannot be used through a different source runtime.
     assert!(matches!(
-        worker.prepare_child(&context).await,
+        worker.prepare_child(&context, request()).await,
         Err(ThreadSpawnError::Backend(error))
             if error.to_string().contains("tool invocation belongs to a different runtime")
     ));
@@ -275,34 +278,13 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     );
     // Once creation returns, ending the spawning invocation leaves the idle child available.
     finish_spawn_tool(&server, &parent, &invocation).await?;
-    let child_request = responses::mount_sse_once(
-        &server,
-        sse(vec![ev_completed_with_tokens(
-            "worker-done",
-            /*total_tokens*/ 42,
-        )]),
-    )
-    .await;
-    let submission = worker
-        .start_turn_if_idle(TurnInputRequest::user_input(vec![text(
-            "Report your status.",
-        )]))
-        .await?;
-    let StartIfIdleSubmission::Started { turn_id, .. } = submission else {
-        panic!("expected the new child to be idle, got {submission:?}");
-    };
-    wait_for_successful_turn(&worker).await;
-    assert!(matches!(
-        accounting.reports.lock().expect("usage reports").as_slice(),
-        [report] if report.thread_id == child_id
-            && report.turn_id == turn_id
-            && report.usage.total_tokens == 42
-    ));
-    let child_request = child_request.single_request();
-    assert!(child_request.body_contains_text(UPDATED_RULE));
-    assert_eq!(
-        child_request.body_contains_text(parent_message),
-        fork_history
+    let child_request =
+        responses::mount_sse_once(&server, responses::sse_completed("worker-done")).await;
+    start_first_turn(&worker, "Report your status.").await?;
+    assert!(
+        child_request
+            .single_request()
+            .body_contains_text(UPDATED_RULE)
     );
     let page = test
         .thread_store
@@ -320,6 +302,63 @@ async fn same_manager_creation_preserves_live_bindings_and_attachments(
     );
 
     worker.shutdown_and_wait().await?;
+    parent.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[test_case::test_case(false, "inherited instruction providers"; "thread instructions")]
+#[test_case::test_case(true, "EMA-authenticated MCP servers"; "enterprise MCP")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_child_rejects_live_bindings(ema_enabled: bool, expected: &str) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            r#"features.use_xaa = true
+mcp_enterprise_managed_auth.idp = {{ issuer = "https://idp.example", client_id = "test" }}
+mcp_servers.enterprise = {{ url = "https://mcp.example/mcp", auth = "ema_auth", enabled = {ema_enabled} }}"#
+        ),
+    )?;
+    let (test, parent, controller) = host_spawn_fixture(
+        &server,
+        test_codex().with_home(home),
+        NetworkPolicy::unmanaged(),
+        PromptCacheKey::SessionDerived,
+        (!ema_enabled).then(|| {
+            Arc::new(RecordingThreadInstructionsProvider::with_text("Shared rules").shared())
+                as Arc<dyn ThreadInstructionsProvider>
+        }),
+    )
+    .await?;
+    let call = host_spawn_invocation(&server, &parent, "prepare-worker", "Start a worker.").await?;
+    let context = parent.tool_invocation(&call.turn_id, &call.call_id)?;
+    let request = || create_request("worker", /*fork_history*/ false);
+    let Err(ThreadSpawnError::Backend(error)) = parent.prepare_child(&context, request()).await
+    else {
+        anyhow::bail!("expected detached preparation to reject {expected}");
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message) if message.contains(expected)
+    ));
+    let child_id = ThreadId::new();
+    parent
+        .create_child(
+            &context,
+            request(),
+            HostThreadSpawnReservation {
+                thread_id: child_id,
+                control: controller,
+            },
+        )
+        .await?;
+    test.thread_manager
+        .get_thread(child_id)
+        .await?
+        .shutdown_and_wait()
+        .await?;
     parent.shutdown_and_wait().await?;
     Ok(())
 }
@@ -358,6 +397,7 @@ async fn cancelled_creation_cleans_registered_child() -> Result<()> {
         &server,
         test_codex().with_extensions(Arc::new(extensions.build())),
         NetworkPolicy::unmanaged(),
+        PromptCacheKey::SessionDerived,
         /*thread_instructions_provider*/ None,
     )
     .await?;
@@ -374,8 +414,6 @@ async fn cancelled_creation_cleans_registered_child() -> Result<()> {
                     HostThreadSpawnReservation {
                         thread_id: child_id,
                         control: controller,
-                        turn_admission: None,
-                        usage_accounting: None,
                     },
                 )
                 .await

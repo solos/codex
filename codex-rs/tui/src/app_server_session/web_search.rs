@@ -59,17 +59,16 @@ pub(super) fn apply_launch_override(
         .into_iter()
         .find(|(key, mode)| {
             features.get(*key).and_then(toml::Value::as_bool) == Some(true)
-                && (thread_params_mode == ThreadParamsMode::Remote
-                    || if *mode == "cached" {
-                        cached
-                    } else {
-                        live && !cached
-                    })
+                && if *mode == "cached" {
+                    cached
+                } else {
+                    live && !cached
+                }
         });
     let (key, mode) = match active {
         Some(choice) => choice,
         None => {
-            if thread_params_mode == ThreadParamsMode::Embedded && (cached || live) {
+            if cached || live {
                 return;
             }
             // Explicitly disabling all legacy search features falls back to cached search.

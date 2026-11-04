@@ -79,7 +79,6 @@ async fn required_environment_skill_gates_inference(availability: Availability) 
             omit_descriptions: false,
             max_context_tokens: None,
             bundled_skills_enabled: false,
-            cloud_skill_enabled: false,
             shadow_selection_enabled: false,
         },
     );

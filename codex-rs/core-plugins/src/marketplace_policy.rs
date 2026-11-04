@@ -9,8 +9,6 @@ use crate::is_openai_curated_marketplace_name;
 use crate::marketplace::marketplace_root_dir;
 use crate::marketplace_add::MarketplaceSource;
 use crate::marketplace_add::parse_marketplace_source;
-use crate::remote::RemotePluginScope;
-use crate::startup_sync::OPENAI_PLUGINS_GIT_URL;
 use crate::startup_sync::curated_plugins_api_marketplace_path;
 use crate::startup_sync::curated_plugins_repo_path;
 use codex_config::ConfigLayerStack;
@@ -114,7 +112,7 @@ impl MarketplacePolicy {
         let root = marketplace_root_dir(marketplace_path).map_err(|err| err.to_string())?;
         if let Some(expected_name) = managed_marketplace_name(codex_home, marketplace_path, &root) {
             if is_openai_curated_marketplace_name(expected_name) {
-                self.validate_git_source(OPENAI_PLUGINS_GIT_URL, /*ref_name*/ None)?;
+                self.validate_managed_curated_source(codex_home)?;
             }
             return validate_expected_marketplace_name(expected_name, marketplace_name);
         }
@@ -170,6 +168,12 @@ impl MarketplacePolicy {
         }
         self.validate_source(&source)?;
         Ok(Some(source))
+    }
+
+    fn validate_managed_curated_source(&self, codex_home: &Path) -> Result<(), String> {
+        self.validate_source(&MarketplaceSource::Local {
+            path: curated_plugins_repo_path(codex_home),
+        })
     }
 
     fn validate_configured_marketplace(
@@ -249,9 +253,7 @@ pub(crate) fn policy_filtered_plugin_config(
                 return allowed_marketplace_names.contains(marketplace_name);
             }
             if is_openai_curated_marketplace_name(marketplace_name) {
-                return policy
-                    .validate_git_source(OPENAI_PLUGINS_GIT_URL, /*ref_name*/ None)
-                    .is_ok();
+                return policy.validate_managed_curated_source(codex_home).is_ok();
             }
             !policy.is_restricted()
         });
@@ -466,7 +468,7 @@ fn is_reserved_marketplace_name(marketplace_name: &str) -> bool {
             | OPENAI_BUNDLED_MARKETPLACE_NAME
             | OPENAI_BUNDLED_ALPHA_MARKETPLACE_NAME
             | OPENAI_PRIMARY_RUNTIME_MARKETPLACE_NAME
-    ) || RemotePluginScope::from_marketplace_name(marketplace_name).is_some()
+    )
 }
 
 fn managed_marketplace_name(
@@ -606,7 +608,3 @@ fn git_hostname(url: &str) -> Option<String> {
     let (hostname, _) = host_and_path.split_once(':')?;
     (!hostname.is_empty()).then(|| hostname.to_ascii_lowercase())
 }
-
-#[cfg(test)]
-#[path = "marketplace_policy_tests.rs"]
-mod tests;

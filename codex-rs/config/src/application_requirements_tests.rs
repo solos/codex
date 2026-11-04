@@ -219,34 +219,3 @@ fn invalid_application_policy_is_rejected_before_layer_overrides() {
         );
     }
 }
-
-#[test]
-fn cloud_bundle_application_network_uses_managed_precedence() {
-    let base_dir =
-        crate::AbsolutePathBuf::try_from(std::env::temp_dir()).expect("absolute base directory");
-    let bundle = crate::CloudConfigBundle {
-        requirements_toml: crate::CloudRequirementsTomlBundle {
-            enterprise_managed: vec![crate::CloudRequirementsFragment {
-                id: "workspace".to_string(),
-                name: "Workspace".to_string(),
-                contents: WORKSPACE.to_string(),
-            }],
-        },
-        ..Default::default()
-    };
-    let mut layers = crate::CloudConfigBundleLayers::from_bundle(bundle, &base_dir)
-        .expect("load cloud bundle")
-        .enterprise_managed_requirements;
-    layers.push(RequirementsLayerEntry::from_toml(
-        managed_source(),
-        INSTALLATION,
-    ));
-    let composed = compose_requirements_for_hostname(layers, /*hostname*/ None)
-        .expect("compose cloud and installation requirements")
-        .expect("requirements");
-    let expected = MERGED.replace(
-        "\"blocked.example.com\" = \"allow\"",
-        "\"blocked.example.com\" = \"deny\"",
-    );
-    assert_eq!(composed.into_toml(), parse(&expected));
-}

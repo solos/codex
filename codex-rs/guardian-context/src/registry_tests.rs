@@ -235,7 +235,6 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
         items: repl_items.to_vec(),
     })];
     let repl = super::NodeReplContext {
-        budgeting: crate::ContextBudgeting::Fixed,
         responses: &repl_responses,
         omitted_responses: 0,
         mode: super::NodeReplReviewEvidenceMode::TextOnly,
@@ -280,12 +279,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                 "Host notice: some verified user answers are unavailable within the evidence budget. Do not treat the remaining answers as complete authorization for an action.\n".into(),
                 "Host notice: some root user instructions are unavailable. Do not treat the remaining root evidence as complete authorization for an action.\n".into(),
                 ">>> ROOT CONVERSATION END\n".into(),
-            ].into_iter().enumerate().map(|(index, text): (usize, String)| {
-                const EVIDENCE_INDICES: [usize; 3] = [3, 4, 5];
-                let content = codex_protocol::models::ContentItem::InputText { text };
-                if EVIDENCE_INDICES.contains(&index) { crate::Budgeted::required(content) }
-                else { crate::Budgeted::protected(content) }
-            }).collect())}, ContextSection::TrustedUserAnswers { items: vec![
+            ])}, ContextSection::TrustedUserAnswers { items: vec![
                 ">>> TRUSTED USER ANSWERS START\n".into(),
                 answers[0].clone().into(),
                 ">>> TRUSTED USER ANSWERS END\n".into(),
@@ -338,13 +332,7 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
             let actual_repl = prepared.into_iter().filter(|item| matches!(item,
                 codex_protocol::user_input::UserInput::Text { text, .. } if text.starts_with("<node_repl_review_evidence>")))
                 .collect::<Vec<_>>();
-            assert_eq!(
-                actual_repl,
-                repl.render_inputs()
-                    .into_iter()
-                    .map(|item| item.content)
-                    .collect::<Vec<_>>()
-            );
+            assert_eq!(actual_repl, repl.render_inputs());
         }
         expected.push(ContextSection::PermissionContext { items: vec![
                 "\n>>> PARENT TURN PERMISSION CONTEXT START\n".into(),
@@ -374,42 +362,14 @@ fn reused_registry_preserves_section_identity_and_source_roles() {
                 )),
                 ..action.clone()
             };
-            let collected = super::default_registry()
-                .prepare(&SectionInput {
+            assert_eq!(
+                super::default_registry().collect(&SectionInput {
                     planned_action: Some(&oversized),
                     ..input
-                })
-                .unwrap();
-            assert_eq!(
-                super::prepare_sync_context(
-                    collected.clone(),
-                    &super::ContextProfile::synchronous(),
-                    /*entry_number_offset*/ 0,
-                    super::ContextPresentation::SyncFull {
-                        session_id: "worker"
-                    },
-                    super::ContextBudgeting::Fixed,
-                )
-                .err(),
-                Some(SectionError::EvidenceLimitExceeded {
+                }),
+                Err(SectionError::EvidenceLimitExceeded {
                     section: "native_tool_call"
                 })
-            );
-            let elastic = super::prepare_sync_context(
-                collected,
-                &super::ContextProfile::synchronous(),
-                /*entry_number_offset*/ 0,
-                super::ContextPresentation::SyncFull {
-                    session_id: "worker",
-                },
-                super::ContextBudgeting::Elastic,
-            )
-            .unwrap();
-            let config = super::ElasticBudgetConfig::default();
-            let prepared = elastic.prepare_elastic_entries(&config).unwrap();
-            assert!(
-                matches!(&oversized.kind, super::PlannedActionKind::ToolCall(call)
-                if prepared.context.into_messages().contains(call))
             );
         }
         if target == ContextTarget::Async {

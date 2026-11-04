@@ -16,59 +16,6 @@ use crate::catalog::SkillResourceId;
 use super::*;
 
 #[test]
-fn host_interface_metadata_makes_unlisted_workflow_discoverable() {
-    let path = AbsolutePathBuf::try_from(std::env::temp_dir().join("routing-card/SKILL.md"))
-        .expect("temporary directory should be absolute");
-    let resource = path.to_string_lossy().to_string();
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills.push(SkillMetadata {
-        name: "content-tools".to_string(),
-        description: "Prepare visual content.".to_string(),
-        short_description: None,
-        interface: Some(SkillInterface {
-            display_name: Some("Visual Assets".to_string()),
-            short_description: Some("Create illustrated assets.".to_string()),
-            icon_small: None,
-            icon_large: None,
-            brand_color: None,
-            default_prompt: Some("Create an animated pet spritesheet.".to_string()),
-        }),
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: PathUri::from_abs_path(&path),
-        scope: SkillScope::User,
-        plugin_id: None,
-        remote_plugin_id: None,
-    });
-    let snapshot = HostSkillsSnapshot::new(std::sync::Arc::new(outcome));
-    let catalog = SkillCatalog {
-        is_partial: false,
-        entries: vec![SkillCatalogEntry::new(
-            SkillPackageId(resource.clone()),
-            SkillAuthority::new(SkillSourceKind::Host, "host"),
-            "content-tools",
-            "Prepare visual content.",
-            SkillResourceId::new(resource),
-        )],
-        ..Default::default()
-    };
-    let selector = CharacterRoutingCardSkillSelector::new(&catalog, Some(&snapshot));
-    let documents = [document(
-        /*id*/ 0,
-        "content-tools",
-        "Prepare visual content.",
-    )];
-
-    let selection = selector.select(
-        "make an animated pet spritesheet",
-        &documents,
-        /*limit*/ 20,
-    );
-
-    assert_eq!(vec![0], selection.candidate_ids);
-}
-
-#[test]
 fn connector_dependencies_make_generic_skills_discoverable() {
     let dependencies = SkillDependencies {
         tools: vec![SkillToolDependency {

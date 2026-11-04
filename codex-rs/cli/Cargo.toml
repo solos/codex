@@ -14,10 +14,6 @@ path = "src/main.rs"
 name = "logs_client"
 path = "src/bin/logs_client.rs"
 
-[[test]]
-name = "app_server_daemon_package"
-path = "tests/app_server_daemon/package.rs"
-
 [lib]
 name = "codex_cli"
 path = "src/lib.rs"
@@ -33,15 +29,12 @@ chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 codex-app-server = { workspace = true }
-codex-app-server-daemon = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-app-server-test-client = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-build-info = { workspace = true }
 codex-api = { workspace = true }
 codex-chatgpt = { workspace = true }
-codex-cloud-config = { workspace = true }
-codex-cloud-tasks = { path = "../cloud-tasks" }
 codex-utils-cli = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }

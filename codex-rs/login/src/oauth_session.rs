@@ -125,7 +125,7 @@ struct OAuthSessionCache {
 }
 
 impl OAuthSessionManager {
-    /// Creates an OAuth session using the configured credential store and the caller's HTTP policy.
+    /// Creates a configured OAuth session using the caller's encrypted store and HTTP policy.
     /// Token grants never follow redirects or include primary-provider credentials or request logs.
     pub fn new(
         config: OAuthSessionConfig,
@@ -146,13 +146,9 @@ impl OAuthSessionManager {
             control: OAuthLoginControl::for_host(&codex_home, http_client_factory),
             allow_interactive_login: true,
             state: Arc::new(OAuthSessionState {
-                storage: OAuthSessionStorage::new(
-                    codex_home.clone(),
-                    config.credentials_store,
-                    keyring,
-                ),
                 config,
                 status_tx: login::status_sender_for_host(&codex_home, http_client_factory),
+                storage: OAuthSessionStorage::new(codex_home.clone(), keyring),
                 codex_home,
                 http_client,
                 cached_token: Arc::new(Mutex::new(OAuthSessionCache::default())),
@@ -429,11 +425,20 @@ impl OAuthSessionManager {
     }
 
     fn load_token(&self) -> io::Result<Option<StoredToken>> {
-        self.state.storage.load(&self.credential_id())
+        self.state
+            .storage
+            .load(&self.credential_id())?
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|_| io::Error::other("stored provider OAuth credentials are invalid"))
+            })
+            .transpose()
     }
 
     fn save_token(&self, token: &StoredToken) -> io::Result<()> {
-        self.state.storage.save(&self.credential_id(), token)
+        let value = serde_json::to_string(token)
+            .map_err(|_| io::Error::other("failed to encode provider OAuth credentials"))?;
+        self.state.storage.save(&self.credential_id(), &value)
     }
 
     async fn authorize_with_browser(

@@ -85,7 +85,6 @@ async fn dispatch_revokes_access_and_holds_call_id_through_callbacks() -> anyhow
                     arguments: args.into(),
                 },
                 encrypted_function_args: None,
-                native_call: None,
             },
             source,
             token,

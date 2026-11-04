@@ -253,12 +253,11 @@ chatgpt_base_url = "https://managed.example/backend-api/"
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_requirements_read_includes_remote_control_and_managed_hooks() -> Result<()> {
+async fn config_requirements_read_includes_managed_hooks() -> Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join("requirements.toml"),
-        r#"allow_remote_control = false
-
+        r#"
 [hooks]
 
 [[hooks.SessionStart]]
@@ -289,7 +288,6 @@ statusMessage = "Scanning file"
     let requirements = response
         .requirements
         .expect("managed requirements should be returned");
-    assert_eq!(requirements.allow_remote_control, Some(false));
     assert_eq!(
         requirements
             .hooks
@@ -717,7 +715,6 @@ async fn config_requirements_read_redacts_otel_exporter_headers(
         r#"[otel]
 tool_result = { max_bytes = 1024 }
 log_user_prompt = false
-log_sse_deltas = false
 log_agent_responses = true
 log_guardian_assessments = false
 environment = "managed"
@@ -737,7 +734,6 @@ tracestate = { managed = { tenant = "enterprise" } }"#
         json!({
             "tool_result": { "max_bytes": 1024 },
             "log_user_prompt": false,
-            "log_sse_deltas": false,
             "log_agent_responses": true,
             "log_guardian_assessments": false,
             "environment": "managed",
@@ -1394,11 +1390,6 @@ enabled = true
 omit_tools_from = []
 
 [apps.app_with_empty_links.links]
-
-[plugins."sample@test".apps.app1]
-enabled = true
-[plugins."sample@test".apps.app1.tools.list]
-enabled = false
 "#,
     )?;
     let codex_home_path = codex_home.path().canonicalize()?;
@@ -1453,7 +1444,7 @@ enabled = false
                         open_world_enabled: None,
                         default_tools_approval_mode: Some(AppToolApproval::Prompt),
                         default_tools_enabled: None,
-                        tools: Some(serde_json::from_value(json!({"list": {"enabled": false}}))?),
+                        tools: None,
                         links: Some(AppLinksConfig {
                             links: std::collections::HashMap::from([
                                 (
@@ -1566,10 +1557,6 @@ enabled = false
     );
 
     let layers = layers.expect("layers present");
-    assert_eq!(
-        origins["apps.app1.tools.list.enabled"],
-        origins["plugins.sample@test.apps.app1.tools.list.enabled"],
-    );
     assert_layers_user_then_optional_system(&layers, user_file)?;
 
     Ok(())

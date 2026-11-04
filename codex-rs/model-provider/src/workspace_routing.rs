@@ -101,7 +101,3 @@ impl ResponsesConnectionKey {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "workspace_routing_tests.rs"]
-mod workspace_routing_tests;

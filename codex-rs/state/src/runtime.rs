@@ -52,7 +52,6 @@ mod projects;
 mod queued_items;
 pub(crate) mod reclamation;
 pub(crate) mod recovery;
-mod remote_control;
 mod rollout_migration;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -82,7 +81,6 @@ pub use recovery::collect_runtime_db_backups;
 pub use recovery::is_sqlite_corruption_error;
 pub use recovery::runtime_db_path_for_corruption_error;
 pub use recovery::sqlite_error_detail_is_lock;
-pub use remote_control::RemoteControlEnrollmentRecord;
 pub use thread_read_state::ReadStateOperation;
 pub use thread_read_state::ReadStateUpdate;
 pub use thread_read_state::ThreadReadState;

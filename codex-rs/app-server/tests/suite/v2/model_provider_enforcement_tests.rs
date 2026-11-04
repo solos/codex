@@ -20,7 +20,6 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_core::config::ConfigBuilder;
@@ -161,10 +160,6 @@ base_url = "{}/v1"
     };
     for (method, params) in [
         ("thread/resume", json!({"threadId": started.thread.id})),
-        (
-            "thread/guardianReview",
-            json!({ "threadId": started.thread.id }),
-        ),
         (
             "thread/goal/set",
             json!({"threadId": started.thread.id, "objective": "Blocked objective"}),
@@ -372,7 +367,6 @@ async fn malformed_system_defaults_reject_input_until_provider_can_be_resolved()
         cli_overrides: Vec::new(),
         loader_overrides: overrides,
         strict_config: false,
-        cloud_config_bundle: CloudConfigBundleLoader::default(),
         embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),

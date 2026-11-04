@@ -383,7 +383,7 @@ crate.from_cargo(
     ],
 )
 
-bazel_dep(name = "zstd", version = "1.5.7.bcr.2")
+bazel_dep(name = "zstd", version = "1.5.7")
 
 crate.annotation(
     # Keep Windows proxy authentication aligned with codex-rs/.cargo/config.toml.
@@ -391,7 +391,7 @@ crate.annotation(
     crate = "curl-sys",
 )
 crate.annotation(
-    # Daemon tests repeatedly hash large CLI binaries, even in fastbuild mode.
+    # Tests repeatedly hash large CLI binaries, even in fastbuild mode.
     # Optimize the native backends as well as the Rust implementation.
     build_script_env = {"OPT_LEVEL": "3"},
     # The Windows lint toolchain cannot reliably materialize blake3's native x86 assembly archives.
@@ -411,8 +411,11 @@ crate.annotation(
 )
 crate.annotation(
     crate = "zstd-sys",
-    gen_build_script = "off",
-    deps = ["@zstd"],
+    gen_build_script = "on",
+    patch_args = ["-p1"],
+    patches = [
+        "//patches:zstd-sys_windows_msvc_include_dirs.patch",
+    ],
 )
 crate.annotation(
     crate = "ring",
@@ -539,18 +542,6 @@ crate.annotation(
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-codex_release_archive = use_repo_rule("//bazel/extensions:codex_release_archive.bzl", "codex_release_archive")
-
-codex_release_archive(
-    name = "codex_release_latest_stable",
-    release = "latest",
-)
-
-codex_release_archive(
-    name = "codex_release_historical_stable",
-    release = "historical",
-)
-
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
 new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
@@ -676,7 +667,6 @@ crate.annotation(
 # The musl CLI's allocator needs declared native tools and consistent header flags.
 crate.annotation(
     build_script_env = {
-        "JEMALLOC_SYS_WITH_MALLOC_CONF": "narenas_ratio:0.25",
         "MAKE": "$${pwd}/$(MAKE)",
         "NM": "$${pwd}/$(execpath @llvm//tools:llvm-nm)",
         "RANLIB": "$${pwd}/$(execpath @llvm//tools:llvm-ranlib)",

@@ -1,7 +1,5 @@
 use codex_app_server_protocol::ModelProviderError;
 use codex_arg0::Arg0DispatchPaths;
-use codex_cloud_config::managed_config_bundle_loader;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStack;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigLoader;
@@ -47,7 +45,6 @@ pub(crate) struct ConfigManager {
     runtime_feature_enablement: Arc<RwLock<BTreeMap<String, bool>>>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: Arc<RwLock<CloudConfigBundleLoader>>,
     arg0_paths: Arg0DispatchPaths,
     thread_config_loader: Arc<dyn ThreadConfigLoader>,
     network_policy: codex_http_client::NetworkPolicyController,
@@ -70,15 +67,8 @@ pub(crate) struct StartupConfig {
     pub(crate) used_defaults: bool,
 }
 
-/// Local auth authority and the cloud-backed configuration loaded with it.
-pub(crate) struct CloudStartupConfig {
-    pub(crate) bootstrap: Config,
-    pub(crate) config: std::io::Result<Config>,
-}
-
-/// Configuration and policy must finish loading against the same account and cloud snapshot.
+/// Configuration and policy must finish loading against the same account.
 pub(crate) struct ApplicationPolicyLoad {
-    cloud_config: CloudConfigBundleLoader,
     snapshot: Arc<ApplicationPolicySnapshot>,
 }
 
@@ -86,7 +76,6 @@ pub(crate) struct ApplicationPolicyLoad {
 struct ApplicationPolicySnapshot {
     revision: codex_http_client::NetworkPolicyRevision,
     policy: codex_http_client::DestinationPolicy,
-    cloud: Option<codex_config::CloudConfigBundle>,
 }
 
 impl ConfigManager {
@@ -95,7 +84,6 @@ impl ConfigManager {
         cli_overrides: Vec<(String, TomlValue)>,
         loader_overrides: LoaderOverrides,
         strict_config: bool,
-        cloud_config_bundle: CloudConfigBundleLoader,
         arg0_paths: Arg0DispatchPaths,
         thread_config_loader: Arc<dyn ThreadConfigLoader>,
     ) -> Self {
@@ -106,7 +94,6 @@ impl ConfigManager {
             runtime_feature_enablement: Arc::new(RwLock::new(BTreeMap::new())),
             loader_overrides,
             strict_config,
-            cloud_config_bundle: Arc::new(RwLock::new(cloud_config_bundle)),
             arg0_paths,
             thread_config_loader,
             network_policy,
@@ -163,19 +150,8 @@ impl ConfigManager {
         self.loader_overrides.user_config_path(self.codex_home())
     }
 
-    pub(crate) fn loader_overrides(&self) -> &LoaderOverrides {
-        &self.loader_overrides
-    }
-
     pub(crate) fn current_cli_overrides(&self) -> Vec<(String, TomlValue)> {
         self.cli_overrides
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn current_managed_config_loader(&self) -> CloudConfigBundleLoader {
-        self.cloud_config_bundle
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default()
@@ -193,46 +169,13 @@ impl ConfigManager {
 
     pub(crate) fn update_managed_config_loader(
         &self,
-        auth_manager: Arc<AuthManager>,
-        config: &Config,
+        _auth_manager: Arc<AuthManager>,
+        _config: &Config,
     ) {
-        // Keep config-server settings and their refresh worker when only
-        // ChatGPT/API-key credentials change.
-        if self
-            .current_managed_config_loader()
-            .config_server()
-            .is_some()
-        {
-            self.revoke_mcp_ema();
-            return;
-        }
-        let loader = managed_config_bundle_loader(
-            auth_manager,
-            config.chatgpt_base_url.clone(),
-            self.codex_home.clone(),
-            config
-                .http_client_factory()
-                .with_network_policy(self.local_network_policy.policy()),
-            config.config_layer_stack.requirements_toml(),
-        );
-        if let Ok(mut guard) = self.cloud_config_bundle.write() {
-            guard.retire_ema_policy();
-            *guard = loader;
-        } else {
-            warn!("failed to update cloud config bundle loader");
-        }
         self.revoke_mcp_ema();
     }
 
     pub(crate) fn clear_chatgpt_config_loader(&self) {
-        if let Ok(mut guard) = self.cloud_config_bundle.write() {
-            if guard.config_server().is_none() {
-                guard.retire_ema_policy();
-                *guard = CloudConfigBundleLoader::default();
-            }
-        } else {
-            warn!("failed to clear cloud config bundle loader");
-        }
         self.revoke_mcp_ema();
     }
 
@@ -275,7 +218,6 @@ impl ConfigManager {
             .loader_overrides(self.loader_overrides.clone())
             .strict_config(self.strict_config)
             .fallback_cwd(Some(self.codex_home.clone()))
-            .cloud_config_bundle(policy_load.cloud_config.clone())
             .thread_config_loader(Arc::clone(&self.thread_config_loader))
             .without_project_context()
             .build()
@@ -359,7 +301,6 @@ impl ConfigManager {
             codex_config::ConfigLoadOptions {
                 loader_overrides: self.loader_overrides.clone(),
                 strict_config: self.strict_config,
-                cloud_config_bundle: policy_load.cloud_config.clone(),
             },
         )
         .await?;
@@ -418,22 +359,6 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// Load local policy before auth, then fetch the account's cloud configuration.
-    /// Callers choose their error/recovery policy before initializing any runtimes.
-    pub(crate) async fn load_managed_startup_config(
-        &self,
-        cwd: Option<PathBuf>,
-    ) -> std::io::Result<CloudStartupConfig> {
-        let bootstrap = self.load_startup_config(cwd.clone()).await?.config;
-        let auth =
-            AuthManager::shared_from_config(&bootstrap, /*enable_codex_api_key_env*/ false)
-                .await
-                .map_err(std::io::Error::other)?;
-        self.update_managed_config_loader(auth, &bootstrap);
-        let config = self.load_latest_config(cwd).await;
-        Ok(CloudStartupConfig { bootstrap, config })
-    }
-
     /// Admits resumed threads and input only on the currently selected provider.
     pub(crate) async fn check_thread_model_provider_for_input(
         &self,
@@ -455,7 +380,7 @@ impl ConfigManager {
         Ok(())
     }
 
-    /// Installs local policy before cloud access; failed policy loads block traffic while
+    /// Installs local policy before serving traffic; failed policy loads block traffic while
     /// non-strict startup remains available for configuration repair.
     pub(crate) async fn load_startup_config(
         &self,
@@ -494,7 +419,6 @@ impl ConfigManager {
             .cli_overrides(self.current_cli_overrides())
             .loader_overrides(loader_overrides)
             .fallback_cwd(Some(self.codex_home.clone()))
-            .cloud_config_bundle(CloudConfigBundleLoader::default())
             .build()
             .await?;
         self.apply_network_policy(&mut config);
@@ -721,7 +645,6 @@ impl ConfigManager {
             .strict_config(self.strict_config)
             .harness_overrides(typesafe_overrides)
             .fallback_cwd(fallback_cwd)
-            .cloud_config_bundle(policy_load.cloud_config.clone())
             .thread_config_loader(Arc::clone(&self.thread_config_loader))
             .build_with_validation(validate)
             .await;
@@ -754,9 +677,8 @@ impl ConfigManager {
             cwd,
             &self.current_cli_overrides(),
             codex_config::ConfigLoadOptions {
-                loader_overrides: self.loader_overrides().clone(),
+                loader_overrides: self.loader_overrides.clone(),
                 strict_config: self.strict_config,
-                cloud_config_bundle: policy_load.cloud_config.clone(),
             },
             self.thread_config_loader.as_ref(),
         )
@@ -803,14 +725,12 @@ impl ConfigManager {
         codex_home: PathBuf,
         cli_overrides: Vec<(String, TomlValue)>,
         loader_overrides: LoaderOverrides,
-        cloud_config_bundle: CloudConfigBundleLoader,
     ) -> Self {
         Self::new(
             codex_home,
             cli_overrides,
             loader_overrides,
             /*strict_config*/ false,
-            cloud_config_bundle,
             Arg0DispatchPaths::default(),
             Arc::new(codex_config::NoopThreadConfigLoader),
         )
@@ -822,15 +742,11 @@ impl ConfigManager {
             codex_home,
             Vec::new(),
             LoaderOverrides::without_managed_config_for_tests(),
-            CloudConfigBundleLoader::default(),
         )
     }
 }
 
 #[cfg(test)]
-#[path = "application_network_tests.rs"]
-mod application_network_tests;
-
 #[cfg(test)]
 #[path = "config_manager_provider_tests.rs"]
 mod provider_tests;

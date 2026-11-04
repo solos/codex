@@ -465,13 +465,7 @@ async fn sqlite_log_metrics_exports_do_not_create_log_cycles() -> Result<()> {
 
         let _app_server = TestAppServer::builder()
             .with_codex_home(codex_home.path())
-            .with_env_overrides(&[
-                ("OTEL_METRIC_EXPORT_INTERVAL", Some("200")),
-                (
-                    codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR,
-                    Some("1"),
-                ),
-            ])
+            .with_env_overrides(&[("OTEL_METRIC_EXPORT_INTERVAL", Some("200"))])
             .build_initialized_with_timeout(export_timeout)
             .await?;
 
@@ -699,13 +693,7 @@ async fn sqlite_log_metrics_grpc_exports_do_not_create_log_cycles(grpc_status: &
     )?;
     let _app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[
-            ("OTEL_METRIC_EXPORT_INTERVAL", Some("200")),
-            (
-                codex_app_server_transport::REMOTE_CONTROL_DISABLED_ENV_VAR,
-                Some("1"),
-            ),
-        ])
+        .with_env_overrides(&[("OTEL_METRIC_EXPORT_INTERVAL", Some("200"))])
         .build_initialized_with_timeout(export_timeout)
         .await?;
 

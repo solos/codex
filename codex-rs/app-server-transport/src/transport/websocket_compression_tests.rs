@@ -3,7 +3,6 @@
 use super::*;
 use crate::OutgoingError;
 use crate::OutgoingMessage;
-use crate::transport::DaemonShutdownAccess;
 use crate::transport::start_control_socket_acceptor;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -89,7 +88,6 @@ async fn local_socket_compression_negotiates_and_retains_history() -> Result<(),
             socket_path.clone(),
             transport_event_tx,
             shutdown.clone(),
-            DaemonShutdownAccess::Disabled,
             compression,
         )
         .await?;

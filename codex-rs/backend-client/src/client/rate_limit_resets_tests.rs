@@ -5,7 +5,6 @@ use crate::types::ConsumeRateLimitResetCreditCode;
 use crate::types::RateLimitResetCreditDetails;
 use crate::types::RateLimitResetCreditsDetails;
 use crate::types::RateLimitResetCreditsSummary;
-use codex_model_provider::ClientAuth;
 use pretty_assertions::assert_eq;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -179,11 +178,10 @@ fn test_client(base_url: &str, path_style: PathStyle) -> Client {
             ),
             codex_http_client::ClientRouteClass::Api,
         ),
-        auth: ClientAuth::new(codex_model_provider::unauthenticated_auth_provider()),
+        auth_provider: codex_model_provider::unauthenticated_auth_provider(),
         user_agent: None,
         chatgpt_account_id: None,
         chatgpt_account_is_fedramp: false,
         path_style,
-        config_server_base_url: None,
     }
 }

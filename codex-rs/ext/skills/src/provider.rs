@@ -3,15 +3,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 mod executor;
-mod frozen_cloud;
 mod host;
 
 use crate::HostSkillsSnapshot;
 use codex_exec_server::EnvironmentAccess;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::ExecutorCapabilityDiscoveryV2Snapshot;
-use codex_extension_api::AccessedSelectedCapabilityRoot;
+use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_mcp::McpResourceClient;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillCatalog;
@@ -23,20 +23,18 @@ use crate::catalog::SkillSearchResult;
 
 pub use executor::ExecutorSkillProvider;
 pub(crate) use executor::attribute_executor_plugins;
-pub use frozen_cloud::FrozenCloudSkillProvider;
 pub use host::HostSkillProvider;
 
 pub(crate) const MAX_SKILL_RESOURCE_CONTENT_BYTES: usize = 1024 * 1024;
 
-/// Catalog inputs with executor roots bound to filesystem access for this callback.
-#[derive(Clone)]
-pub struct SkillListQuery<'a> {
+#[derive(Clone, Debug)]
+pub struct SkillListQuery {
     pub turn_id: String,
-    pub executor_roots: Vec<AccessedSelectedCapabilityRoot<'a>>,
+    pub executor_roots: Vec<SelectedCapabilityRoot>,
+    pub resolved_executor_roots: Vec<ResolvedSelectedCapabilityRoot>,
     pub host_snapshot: Option<Arc<HostSkillsSnapshot>>,
     pub include_host_skills: bool,
     pub include_bundled_skills: bool,
-    pub include_cloud_skills: bool,
     pub mcp_resources: Option<Arc<McpResourceClient>>,
     /// Present only when the opt-in high-level executor discovery path is selected.
     pub executor_capability_discovery: Option<ExecutorCapabilityDiscoverySnapshot>,
@@ -53,18 +51,14 @@ pub struct SkillReadRequest<'a> {
     pub context: SkillReadContext<'a>,
 }
 
-/// Repository and executor reads require callback access; other sources retain provider context.
+/// Executor reads require callback access; other providers carry their own source context.
 #[derive(Clone)]
 pub enum SkillReadContext<'a> {
     Host {
         host_snapshot: Option<Arc<HostSkillsSnapshot>>,
-        accessors: Vec<&'a dyn EnvironmentAccess>,
     },
     Executor {
         fs: &'a dyn EnvironmentAccess,
-    },
-    Cloud {
-        mcp_resources: Option<Arc<McpResourceClient>>,
     },
     Custom {
         mcp_resources: Option<Arc<McpResourceClient>>,
@@ -87,14 +81,8 @@ pub type SkillProviderFuture<'a, T> =
 /// provider must be read or searched through the same provider/authority rather
 /// than converted into an ambient local path.
 pub trait SkillProvider: Send + Sync {
-    /// Whether Cloud catalog and read caches must follow the live MCP auth/resource scope.
-    /// When all configured Cloud providers opt out, their caches are independent of MCP.
-    fn uses_mcp_resources(&self) -> bool {
-        true
-    }
-
     /// Providers set `is_partial` when listing omits entries; warnings are diagnostic only.
-    fn list<'a>(&'a self, query: SkillListQuery<'a>) -> SkillProviderFuture<'a, SkillCatalog>;
+    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog>;
 
     fn read<'a>(
         &'a self,

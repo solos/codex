@@ -50,16 +50,16 @@ enum PluginMetricsOutput {
     },
     Remote {
         file_stream: tokio::sync::Mutex<FileSystemReadStream>,
-        _directory: RemotePluginMetricsDirectory,
+        _directory: ExecutorMetricsDirectory,
     },
 }
 
-struct RemotePluginMetricsDirectory {
+struct ExecutorMetricsDirectory {
     filesystem: Arc<dyn ExecutorFileSystem>,
     path: PathUri,
 }
 
-impl Drop for RemotePluginMetricsDirectory {
+impl Drop for ExecutorMetricsDirectory {
     fn drop(&mut self) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
@@ -155,7 +155,7 @@ impl PluginMetricsSidecar {
             )
             .await
             .ok()?;
-        let directory = RemotePluginMetricsDirectory {
+        let directory = ExecutorMetricsDirectory {
             filesystem,
             path: directory_path,
         };

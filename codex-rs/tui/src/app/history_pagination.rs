@@ -69,9 +69,7 @@ impl App {
         if !app_server.is_older_history_page_pending(thread_id, cursor) {
             return Ok(());
         }
-        // The widget can already belong to the destination while the transcript still replays.
         if self.chat_widget.thread_id() != Some(thread_id)
-            || self.awaiting_side_replay(tui)
             || (tui.is_owned_screen() && !self.scrollback_has_older_history)
         {
             app_server.cancel_older_history_page(thread_id, cursor);
@@ -246,9 +244,6 @@ impl App {
                 cells.push(Arc::new(completion));
             }
         }
-        for cell in cells.iter_mut().filter_map(Arc::get_mut) {
-            self.link_viewed_image(cell);
-        }
         cells
     }
 
@@ -297,7 +292,7 @@ impl App {
                     .complete_select_beginning(&self.transcript_cells);
             } else {
                 self.transcript_view
-                    .jump_to_beginning(&self.transcript_cells);
+                    .jump_to_entry(&self.transcript_cells, /*index*/ 0);
             }
         }
         if self.scrollback_has_older_history

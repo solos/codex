@@ -5,20 +5,17 @@ use crate::context::ContextualUserFragment;
 use crate::plugins::PluginCapabilitySummary;
 use codex_features::Feature;
 use codex_features::Features;
-use codex_prompts::ResolvedSelectedPluginMessages;
 #[cfg(test)]
 use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_string::take_bytes_at_char_boundary;
 
 const MAX_EXPLICIT_PLUGIN_INSTRUCTIONS_BYTES: usize = 4 * 1024;
+const TRUNCATED_PLUGIN_INSTRUCTIONS_SUFFIX: &str =
+    "\n- Additional plugin capabilities omitted to fit the context limit.";
 
 #[cfg(test)]
 pub(crate) fn render_plugins_section(plugins: &[PluginCapabilitySummary]) -> Option<String> {
-    (!plugins.is_empty()).then(|| {
-        AvailablePluginsInstructions::default()
-            .render()
-            .expect_text()
-    })
+    (!plugins.is_empty()).then(|| AvailablePluginsInstructions.render().expect_text())
 }
 
 pub(crate) fn render_explicit_plugin_instructions(
@@ -26,7 +23,6 @@ pub(crate) fn render_explicit_plugin_instructions(
     available_mcp_servers: &[String],
     available_apps: &[String],
     features: &Features,
-    messages: &ResolvedSelectedPluginMessages,
 ) -> Option<String> {
     if features.enabled(Feature::SimplifiedSelectionHints) {
         return (plugin.has_skills || !available_apps.is_empty() || !available_mcp_servers.is_empty())
@@ -41,14 +37,20 @@ pub(crate) fn render_explicit_plugin_instructions(
             });
     }
 
-    let mut lines = vec![
-        messages
-            .intro
-            .replace("{{ plugin_name }}", &plugin.display_name),
-    ];
+    let mut lines = vec![format!(
+        "Capabilities from the `{}` plugin:",
+        plugin.display_name
+    )];
 
     if !available_apps.is_empty() {
-        lines.push(messages.search_tools.clone());
+        lines.push(
+            concat!(
+                "- For the user request that explicitly selected this plugin, and only for that ",
+                "request, if `tool_search` is available and an app from this plugin may help, ",
+                "search for its tools before falling back to unrelated or built-in tools."
+            )
+            .to_string(),
+        );
     }
 
     if plugin.has_skills {
@@ -56,55 +58,42 @@ pub(crate) fn render_explicit_plugin_instructions(
             .plugin_namespace
             .as_deref()
             .unwrap_or(plugin.display_name.as_str());
-        lines.push(
-            messages
-                .skill_namespace
-                .replace("{{ skill_namespace }}", skill_namespace),
-        );
+        lines.push(format!(
+            "- Skills from this plugin are prefixed with `{skill_namespace}:`."
+        ));
     }
 
     if !available_apps.is_empty() {
-        lines.push(
-            messages.apps.replace(
-                "{{ apps }}",
-                &available_apps
-                    .iter()
-                    .map(|app| format!("`{app}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-        );
+        lines.push(format!(
+            "- Apps from this plugin available in this session: {}.",
+            available_apps
+                .iter()
+                .map(|app| format!("`{app}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     if !available_mcp_servers.is_empty() {
-        lines.push(
-            messages.mcp_servers.replace(
-                "{{ mcp_servers }}",
-                &available_mcp_servers
-                    .iter()
-                    .map(|server| format!("`{server}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
-        );
+        lines.push(format!(
+            "- MCP servers from this plugin available in this session: {}.",
+            available_mcp_servers
+                .iter()
+                .map(|server| format!("`{server}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     if lines.len() == 1 {
         return None;
     }
 
-    lines.push(messages.closing.clone());
-
-    // The separator belongs to the harness; preserve the catalog's exact bytes after it.
-    let omitted = if messages.omitted.starts_with('\n') || messages.omitted.starts_with("\r\n") {
-        messages.omitted.clone()
-    } else {
-        format!("\n{}", messages.omitted)
-    };
+    lines.push("Use these plugin-associated capabilities to help solve the task.".to_string());
 
     Some(bound_explicit_plugin_instructions(
         lines.join("\n"),
-        &omitted,
+        TRUNCATED_PLUGIN_INSTRUCTIONS_SUFFIX,
     ))
 }
 

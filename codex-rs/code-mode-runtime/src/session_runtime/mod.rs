@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-pub(crate) use codex_code_mode_protocol::FunctionCallOutputContentItem as OutputItem;
 use opentelemetry::context::FutureExt;
 use serde_json::Value as JsonValue;
 use tokio::sync::Mutex;
@@ -18,9 +17,11 @@ pub(crate) use self::types::CellEvent;
 pub(crate) use self::types::CellId;
 pub(crate) use self::types::CreateCellRequest;
 pub(crate) use self::types::Error;
+pub(crate) use self::types::ImageDetail;
 pub(crate) use self::types::NestedToolCall;
 pub(crate) use self::types::Observation;
 pub(crate) use self::types::ObserveMode;
+pub(crate) use self::types::OutputItem;
 pub(crate) use self::types::SessionRuntimeDelegate;
 pub(crate) use self::types::ToolDefinition;
 pub(crate) use self::types::ToolKind;
@@ -54,7 +55,6 @@ struct Inner {
 }
 
 impl SessionRuntime {
-    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_with_task_failure_handler(/*task_failure_handler*/ None)
     }
@@ -286,20 +286,19 @@ impl<D: SessionRuntimeDelegate> CellHost for RuntimeCellHost<D> {
     async fn commit_completion(
         &self,
         stored_value_writes: HashMap<String, Arc<JsonValue>>,
-        event: impl FnOnce() -> CellEvent + Send,
+        event: CellEvent,
         cell_state: Arc<CellState>,
     ) -> CompletionCommit {
         let cancellation_token = cell_state.cancellation_token();
         let mut stored_values = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
-                return CompletionCommit::Rejected;
+                return CompletionCommit::Rejected(event);
             }
             stored_values = self.inner.stored_values.lock() => stored_values,
         };
         cell_state.commit_completion(event, || {
             stored_values.extend(stored_value_writes);
-            drop(stored_values);
         })
     }
 

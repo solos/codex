@@ -221,7 +221,7 @@ pub(crate) async fn read_remote_project_trust(
                 .wrap_err("environment/info failed while resolving remote project trust")?;
             environment
                 .cwd
-                .ok_or_else(|| color_eyre::eyre::eyre!("remote app server did not provide a cwd"))?
+                .ok_or_else(|| color_eyre::eyre::eyre!("app server did not provide a cwd"))?
                 .join(&cwd_string)
                 .wrap_err("failed to resolve the remote project directory")?
         }

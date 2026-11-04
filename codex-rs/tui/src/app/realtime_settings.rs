@@ -65,7 +65,7 @@ impl App {
     }
 
     async fn persist_realtime_audio(&mut self, key: &str, value: Option<toml::Value>) {
-        // Audio runs on the TUI's machine, even when the app server is remote.
+        // Audio runs on the TUI's machine.
         let segments = vec!["audio".to_string(), key.to_string()];
         let mut edits = vec![match &value {
             Some(toml::Value::String(value)) => ConfigEdit::SetPath {
@@ -111,7 +111,6 @@ impl App {
             self.cli_kv_overrides.clone(),
             codex_config::ConfigLoadOptions {
                 loader_overrides: self.loader_overrides.clone(),
-                cloud_config_bundle: self.cloud_config_bundle.clone(),
                 ..Default::default()
             },
         )

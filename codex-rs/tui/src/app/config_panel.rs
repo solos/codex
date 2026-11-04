@@ -44,7 +44,6 @@ impl App {
                 self.cli_kv_overrides.clone(),
                 codex_config::ConfigLoadOptions {
                     loader_overrides: self.loader_overrides.clone(),
-                    cloud_config_bundle: self.cloud_config_bundle.clone(),
                     ..Default::default()
                 },
             )

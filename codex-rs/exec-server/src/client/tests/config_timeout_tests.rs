@@ -66,14 +66,8 @@ async fn config_read_timeout_keeps_stdio_connection_usable() {
         user_home_dir: None,
         codex_home_dir: cwd,
         hostname: Some("original".to_string()),
-        config: EnvironmentConfigLayerStack {
-            layers: Vec::new(),
-            cloud_insertion_index: 0,
-        },
-        requirements: EnvironmentConfigLayerStack {
-            layers: Vec::new(),
-            cloud_insertion_index: 0,
-        },
+        config: EnvironmentConfigLayerStack { layers: Vec::new() },
+        requirements: EnvironmentConfigLayerStack { layers: Vec::new() },
     };
 
     // Model inline dispatch by holding valid work while the timed read queues behind it.

@@ -5,7 +5,6 @@ use std::fs;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
@@ -870,54 +869,6 @@ enum CommandToolAvailability {
     ShellToolDisabled,
     ModelDisabled,
 }
-
-async fn collect_tools(availability: CommandToolAvailability) -> Result<Vec<String>> {
-    let server = start_mock_server().await;
-
-    let responses = vec![sse(vec![
-        ev_response_created("resp-1"),
-        ev_assistant_message("msg-1", "done"),
-        ev_completed("resp-1"),
-    ])];
-    let mock = mount_sse_sequence(&server, responses).await;
-
-    let mut builder = match availability {
-        CommandToolAvailability::Default => test_codex(),
-        CommandToolAvailability::ManagedUnifiedExecDisabled => test_codex()
-            .with_cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                    r#"
-[features]
-unified_exec = false
-shell_tool = true
-"#,
-                ),
-            ),
-        CommandToolAvailability::ShellToolDisabled => test_codex().with_config(|config| {
-            config
-                .features
-                .disable(Feature::ShellTool)
-                .expect("test config should allow feature update");
-        }),
-        CommandToolAvailability::ModelDisabled => {
-            test_codex().with_model_info_override("gpt-5.4", |model| {
-                model.shell_type = ConfigShellToolType::Disabled;
-            })
-        }
-    };
-    let test = builder.build(&server).await?;
-
-    test.submit_turn_with_approval_and_permission_profile(
-        "list tools",
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
-    )
-    .await?;
-
-    let first_body = mock.single_request().body_json();
-    Ok(tool_names(&first_body))
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
     skip_if_no_network!(Ok(()));

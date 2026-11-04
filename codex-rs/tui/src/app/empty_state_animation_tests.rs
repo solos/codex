@@ -114,15 +114,6 @@ async fn non_startup_history_dismisses_logo_until_a_new_thread() -> Result<()> {
     );
     app.insert_history_cell(
         &mut tui,
-        Box::new(history_cell::new_server_version_warning(
-            crate::status::remote_connection::ServerVersionNotice {
-                message: "Server version differs from the client".into(),
-                offer_update: false,
-            },
-        )),
-    );
-    app.insert_history_cell(
-        &mut tui,
         Box::new(history_cell::UpdateAvailableHistoryCell::new(
             "99.0.0".into(),
             /*update_action*/ None,

@@ -51,7 +51,7 @@ pub(super) async fn collect_shadow_observations(
 struct FailedReads(StaticSkillProvider);
 
 impl SkillProvider for FailedReads {
-    fn list<'a>(&'a self, query: SkillListQuery<'a>) -> SkillProviderFuture<'a, SkillCatalog> {
+    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
         self.0.list(query)
     }
 

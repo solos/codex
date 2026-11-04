@@ -32,7 +32,7 @@ pub struct StartupConfigArgs {
     pub startup_sign_out: bool,
 
     /// Validate configuration and print requirements as JSON without starting the app server.
-    #[arg(long, conflicts_with_all = ["listen", "stdio", "remote_control", "managed_daemon"])]
+    #[arg(long, conflicts_with_all = ["listen", "stdio"])]
     pub print_startup_config: bool,
 
     /// ClientInfo JSON used for configuration/auth request identity.
@@ -125,7 +125,7 @@ async fn read_startup_config(
         .map_err(startup_error)?;
     let config = match loaded.config {
         Ok(config) => config,
-        // Recovery retains local credential settings when cloud policy is unavailable.
+        // Recovery retains local credential settings when managed policy is unavailable.
         Err(_) if startup.startup_sign_out => loaded.bootstrap.clone(),
         Err(error) => return Err(startup_error(error)),
     };

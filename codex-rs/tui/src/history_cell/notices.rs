@@ -96,7 +96,6 @@ impl HistoryCell for UpdateAvailableHistoryCell {
 pub(crate) fn new_warning_event(message: String) -> WarningHistoryCell {
     let style = crate::style::status_style(crate::style::StatusTone::Attention);
     WarningHistoryCell {
-        server_version_notice: false,
         visible_in_transcript: false,
         key: message.clone(),
         diagnostic: message.clone(),
@@ -112,33 +111,6 @@ pub(crate) fn new_usage_warning_event(message: String) -> WarningHistoryCell {
     WarningHistoryCell {
         visible_in_transcript: true,
         ..new_warning_event(message)
-    }
-}
-
-pub(crate) fn new_server_version_warning(
-    notice: crate::status::remote_connection::ServerVersionNotice,
-) -> WarningHistoryCell {
-    let key = notice.message.clone();
-    let style = crate::style::status_style(crate::style::StatusTone::Attention);
-    let mut lines = vec![Line::from(notice.message.set_style(style))];
-    if notice.offer_update {
-        lines.push(Line::from(
-            "Use /daemon to manage the local background server.".fg(accent_color()),
-        ));
-        lines.push(Line::from(
-            "Updating may interrupt active or queued work.".set_style(style),
-        ));
-    }
-    WarningHistoryCell {
-        server_version_notice: true,
-        visible_in_transcript: false,
-        key,
-        diagnostic: lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-        details: PrefixedWrappedHistoryCell::new(Text::from(lines), "⚠ ".set_style(style), "  "),
     }
 }
 

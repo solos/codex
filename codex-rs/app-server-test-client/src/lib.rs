@@ -89,9 +89,6 @@ use url::Url;
 use uuid::Uuid;
 
 mod loopback_responses_server;
-mod plugin_analytics_capture;
-mod plugin_analytics_mutation_smoke;
-mod plugin_analytics_smoke;
 mod request_user_input;
 
 const NOTIFICATIONS_TO_OPT_OUT: &[&str] = &[
@@ -105,7 +102,6 @@ const NOTIFICATIONS_TO_OPT_OUT: &[&str] = &[
 ];
 const APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_SERVER_GRACEFUL_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const OTEL_SERVICE_NAME: &str = "codex-app-server-test-client";
 const TRACE_DISABLED_MESSAGE: &str =
     "Not enabled - enable tracing in $CODEX_HOME/config.toml to get a trace URL!";
@@ -278,39 +274,6 @@ enum CliCommand {
         #[arg(long, default_value_t = 15)]
         hold_seconds: u64,
     },
-    /// Exercise remote plugin analytics through production app-server RPC paths.
-    #[command(name = "plugin-analytics-smoke")]
-    PluginAnalyticsSmoke {
-        /// Installed local plugin id, such as `linear@openai-curated-remote`.
-        #[arg(long)]
-        plugin_id: String,
-        /// JSONL output path. Defaults to a PID-specific file under the system temp directory.
-        #[arg(long)]
-        capture_file: Option<PathBuf>,
-    },
-    /// Install and uninstall one remote plugin while validating analytics capture.
-    #[command(name = "plugin-analytics-mutation-smoke")]
-    PluginAnalyticsMutationSmoke {
-        /// Backend remote plugin id. The plugin must be initially uninstalled.
-        #[arg(long)]
-        remote_plugin_id: String,
-        /// Acknowledge that this command mutates the active account's plugin state.
-        #[arg(long)]
-        confirm_account_mutation: bool,
-        /// JSONL output path. Defaults to a PID-specific file under the system temp directory.
-        #[arg(long)]
-        capture_file: Option<PathBuf>,
-    },
-    /// Best-effort recovery command that uninstalls one remote plugin.
-    #[command(name = "plugin-remote-uninstall")]
-    PluginRemoteUninstall {
-        /// Backend remote plugin id to uninstall.
-        #[arg(long)]
-        remote_plugin_id: String,
-        /// Acknowledge that this command mutates the active account's plugin state.
-        #[arg(long)]
-        confirm_account_mutation: bool,
-    },
 }
 
 enum TestLoginMode {
@@ -469,58 +432,6 @@ pub async fn run() -> Result<()> {
                 workspace,
                 script,
                 hold_seconds,
-            )
-        }
-        CliCommand::PluginAnalyticsSmoke {
-            plugin_id,
-            capture_file,
-        } => {
-            ensure_dynamic_tools_unused(&dynamic_tools, "plugin-analytics-smoke")?;
-            if url.is_some() {
-                bail!("plugin-analytics-smoke requires --codex-bin and does not support --url");
-            }
-            let codex_bin = codex_bin.context("plugin-analytics-smoke requires --codex-bin")?;
-            plugin_analytics_smoke::run(&codex_bin, &config_overrides, &plugin_id, capture_file)
-        }
-        CliCommand::PluginAnalyticsMutationSmoke {
-            remote_plugin_id,
-            confirm_account_mutation,
-            capture_file,
-        } => {
-            ensure_dynamic_tools_unused(&dynamic_tools, "plugin-analytics-mutation-smoke")?;
-            if url.is_some() {
-                bail!(
-                    "plugin-analytics-mutation-smoke requires --codex-bin and does not support --url"
-                );
-            }
-            let codex_bin =
-                codex_bin.context("plugin-analytics-mutation-smoke requires --codex-bin")?;
-            plugin_analytics_mutation_smoke::run(
-                &codex_bin,
-                &config_overrides,
-                &remote_plugin_id,
-                plugin_analytics_mutation_smoke::AccountMutationConfirmation::from_flag(
-                    confirm_account_mutation,
-                ),
-                capture_file,
-            )
-        }
-        CliCommand::PluginRemoteUninstall {
-            remote_plugin_id,
-            confirm_account_mutation,
-        } => {
-            ensure_dynamic_tools_unused(&dynamic_tools, "plugin-remote-uninstall")?;
-            if url.is_some() {
-                bail!("plugin-remote-uninstall requires --codex-bin and does not support --url");
-            }
-            let codex_bin = codex_bin.context("plugin-remote-uninstall requires --codex-bin")?;
-            plugin_analytics_mutation_smoke::run_cleanup(
-                &codex_bin,
-                &config_overrides,
-                &remote_plugin_id,
-                plugin_analytics_mutation_smoke::AccountMutationConfirmation::from_flag(
-                    confirm_account_mutation,
-                ),
             )
         }
     }
@@ -1167,7 +1078,6 @@ async fn thread_list(endpoint: &Endpoint, config_overrides: &[String], limit: u3
         println!("< initialize response: {initialize:?}");
 
         let response = client.thread_list(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -1609,7 +1519,6 @@ impl CodexClient {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
                 capabilities: Some(InitializeCapabilities {
-                    required_human_approval: false,
                     explicit_gateway_oauth: false,
                     experimental_api,
                     request_attestation: false,
@@ -2224,7 +2133,7 @@ impl TestClientTracing {
             &config,
             env!("CARGO_PKG_VERSION"),
             Some(OTEL_SERVICE_NAME),
-            DEFAULT_ANALYTICS_ENABLED,
+            /*default_analytics_enabled*/ false,
         )
         .map_err(|e| anyhow::anyhow!("error loading otel config: {e}"))?;
         let traces_enabled = otel_provider

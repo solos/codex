@@ -30,25 +30,17 @@ pub struct PluginCatalogEntry {
 }
 
 impl PluginCatalogEntry {
-    /// Disabled entries never project. Otherwise Cloud membership supplies enablement;
-    /// executor-only entries require every installation's local plugin ID in the supplied
-    /// config, where omitted enablement retains the configured plugin's default.
-    /// A remote identity alone does not establish Cloud membership.
+    /// Disabled entries never project. Executor entries require every installation's local
+    /// plugin ID in the supplied config, where omitted enablement retains the default.
     pub fn is_enabled(&self, configured_plugins: &HashMap<String, PluginConfig>) -> bool {
         if !self.enabled {
             return false;
         }
-        let is_cloud_plugin = self
-            .locations
-            .iter()
-            .any(|location| matches!(location, PluginSourceLocation::Cloud { .. }));
-        is_cloud_plugin
-            || self.locations.iter().all(|location| match location {
-                PluginSourceLocation::Executor { plugin_id, .. } => configured_plugins
-                    .get(plugin_id)
-                    .is_some_and(|plugin| plugin.enabled.unwrap_or(true)),
-                PluginSourceLocation::Cloud { .. } => true,
-            })
+        self.locations.iter().all(|location| match location {
+            PluginSourceLocation::Executor { plugin_id, .. } => configured_plugins
+                .get(plugin_id)
+                .is_some_and(|plugin| plugin.enabled.unwrap_or(true)),
+        })
     }
 }
 
@@ -71,13 +63,9 @@ impl std::fmt::Debug for PluginCatalogEntry {
     }
 }
 
-/// A source that can supply a plugin; cloud URIs are opaque, not local paths.
+/// A source that can supply a plugin.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PluginSourceLocation {
-    Cloud {
-        resource_uri: String,
-        bundle_uri: Option<String>,
-    },
     Executor {
         /// Executor environment that owns `root`.
         environment_id: String,
@@ -87,55 +75,7 @@ pub enum PluginSourceLocation {
     },
 }
 
-/// Uses Cloud membership and metadata, retaining version-matched installations in order.
-/// Unavailable or partial Cloud data preserves unmatched executor entries. Complete Cloud
-/// catalogs disable unmatched remote entries; local entries retain their enablement.
-pub fn merge_catalogs(
-    executor: Option<&PluginCatalog>,
-    cloud: Option<&PluginCatalog>,
-) -> PluginCatalog {
-    let Some(executor) = executor else {
-        return cloud.cloned().unwrap_or_default();
-    };
-    let Some(cloud) = cloud else {
-        return executor.clone();
-    };
-    let mut merged = cloud.clone();
-    merged.is_partial |= executor.is_partial;
-    merged.warnings.extend(executor.warnings.iter().cloned());
-    for installation in &executor.entries {
-        if matches!(&installation.id, PluginIdentity::Local { .. }) {
-            merged.entries.push(installation.clone());
-            continue;
-        }
-        // Appended executor entries are not Cloud definitions and cannot authorize each other.
-        let Some(definition) = merged.entries[..cloud.entries.len()]
-            .iter_mut()
-            .find(|definition| definition.id == installation.id)
-        else {
-            let mut unmatched = installation.clone();
-            if !cloud.is_partial {
-                unmatched.enabled = false;
-            }
-            merged.entries.push(unmatched);
-            continue;
-        };
-        if definition.version != installation.version {
-            merged.warnings.push(format!(
-                "plugin `{}` has different cloud and executor versions; retaining the cloud definition",
-                definition.id.as_str(),
-            ));
-            continue;
-        }
-        for location in &installation.locations {
-            if !definition.locations.contains(location) {
-                definition.locations.push(location.clone());
-            }
-        }
-    }
-    merged
+/// Merges executor catalog snapshots without creating a second authority.
+pub fn merge_catalogs(executor: Option<&PluginCatalog>) -> PluginCatalog {
+    executor.cloned().unwrap_or_default()
 }
-
-#[cfg(test)]
-#[path = "catalog_tests.rs"]
-mod tests;

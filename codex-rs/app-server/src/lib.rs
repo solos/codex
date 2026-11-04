@@ -8,7 +8,6 @@ use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::config::UnsupportedUntrustedApprovalPolicyError;
-use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
 #[cfg(debug_assertions)]
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -36,16 +35,12 @@ use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::ConnectionOrigin;
 use crate::transport::ConnectionState;
-use crate::transport::DaemonShutdownAccess;
 use crate::transport::OutboundConnectionState;
-use crate::transport::RemoteControlPolicy;
-use crate::transport::RemoteControlStartConfig;
 use crate::transport::TransportEvent;
 use crate::transport::acquire_app_server_startup_lock;
 use crate::transport::app_server_startup_lock_path;
 use crate::transport::route_outgoing_envelope;
 use crate::transport::start_control_socket_acceptor;
-use crate::transport::start_remote_control;
 use crate::transport::start_stdio_connection;
 use crate::transport::start_websocket_acceptor;
 use codex_analytics::AppServerRpcTransport;
@@ -55,7 +50,6 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::TextPosition as AppTextPosition;
 use codex_app_server_protocol::TextRange as AppTextRange;
 use codex_app_server_transport::WebSocketCompression;
-use codex_app_server_transport::daemon_recovery_file_path;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
 use codex_config::TextRange as CoreTextRange;
@@ -95,10 +89,6 @@ fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool 
     )
 }
 
-mod agent_message_board;
-pub use agent_message_board::delete_agent_message_boards;
-pub use agent_message_board::install_agent_message_board;
-
 mod analytics_utils;
 mod app_info;
 mod app_server_tracing;
@@ -118,7 +108,6 @@ mod config_manager_service;
 mod connection_cleanup;
 mod connection_rpc_gate;
 mod current_time;
-mod daemon_thread_recovery;
 mod dynamic_tools;
 mod effective_plugin_change;
 mod error_code;
@@ -132,8 +121,6 @@ mod gateway_oauth_notifications;
 mod image_url;
 pub mod in_process;
 mod log_write_warning;
-#[cfg(unix)]
-mod managed_daemon;
 mod mcp_refresh;
 mod message_processor;
 mod model_catalog;
@@ -163,10 +150,7 @@ pub use crate::code_mode_host::CodeModeHostTransport;
 pub use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 pub use crate::error_code::INVALID_PARAMS_ERROR_CODE;
 pub use crate::transport::AppServerTransport;
-pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
-pub use crate::transport::take_remote_control_disabled_env;
-pub use crate::transport::verified_local_daemon_socket;
 
 const LOG_FORMAT_ENV_VAR: &str = "LOG_FORMAT";
 const OTEL_SERVICE_NAME: &str = "codex-app-server";
@@ -248,7 +232,7 @@ async fn shutdown_signal() -> IoResult<ShutdownSignal> {
     {
         let console_signal = async {
             if tokio::signal::ctrl_c().await.is_err() {
-                // A detached daemon has no console; keep its local control path active.
+                // Keep the local control path active when no console is attached.
                 std::future::pending::<()>().await;
             }
         };
@@ -471,7 +455,7 @@ pub async fn run_main(
     .map(|_| ())
 }
 
-/// Reports whether shutdown finished or the managed daemon must exit without waiting for I/O.
+/// Reports whether shutdown finished or the process must exit without waiting for I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppServerExit {
     Graceful,
@@ -487,24 +471,17 @@ pub enum PluginStartupTasks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
-    /// Optional host-owned frozen cloud skill catalog and resources, loaded once at startup.
-    pub cloud_skills_snapshot: Option<std::path::PathBuf>,
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
-    pub remote_control_startup_mode: RemoteControlStartupMode,
     pub install_shutdown_signal_handler: bool,
-    pub managed_daemon: bool,
 }
 
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
-            cloud_skills_snapshot: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
-            remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
             install_shutdown_signal_handler: true,
-            managed_daemon: false,
         }
     }
 }
@@ -521,24 +498,8 @@ pub async fn run_main_with_transport_options(
     auth: WebsocketAuthSettings,
     runtime_options: AppServerRuntimeOptions,
 ) -> IoResult<AppServerExit> {
-    let cloud_skill_provider = match runtime_options.cloud_skills_snapshot {
-        Some(path) => {
-            let provider = tokio::task::spawn_blocking(move || {
-                codex_skills_extension::FrozenCloudSkillProvider::from_file(&path)
-            })
-            .await
-            .map_err(std::io::Error::other)?
-            .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;
-            Some(Arc::new(provider) as Arc<dyn codex_skills_extension::SkillProvider>)
-        }
-        None => None,
-    };
     #[cfg(target_os = "windows")]
     let _registered_core = codex_windows_sandbox::registered_core_requested();
-    let managed_daemon = matches!(&transport, AppServerTransport::UnixSocket { .. })
-        && runtime_options.managed_daemon;
-    #[cfg(unix)]
-    let nofile_limit_result = managed_daemon.then(managed_daemon::raise_nofile_limit);
     let loader_overrides = loader_overrides_with_test_user_config_file(
         loader_overrides,
         test_user_config_file_from_env(),
@@ -677,7 +638,7 @@ pub async fn run_main_with_transport_options(
         Ok(state_db_init) => state_db_init,
         Err(err) => {
             return Err(std::io::Error::other(format!(
-                "failed to initialize sqlite state runtime under {}: {err:#}",
+                "failed to initialize sqlite state runtime under {}: {err}",
                 config.sqlite_config().home().display()
             )));
         }
@@ -736,12 +697,12 @@ pub async fn run_main_with_transport_options(
     let stderr_fmt: StderrLogLayer = match log_format_from_env() {
         LogFormat::Json => tracing_subscriber::fmt::layer()
             .json()
-            .with_writer(codex_app_server_daemon::stderr_writer)
+            .with_writer(std::io::stderr)
             .with_span_events(stderr_span_events())
             .with_filter(EnvFilter::from_default_env())
             .boxed(),
         LogFormat::Default => tracing_subscriber::fmt::layer()
-            .with_writer(codex_app_server_daemon::stderr_writer)
+            .with_writer(std::io::stderr)
             .with_span_events(stderr_span_events())
             .with_filter(EnvFilter::from_default_env())
             .boxed(),
@@ -768,42 +729,13 @@ pub async fn run_main_with_transport_options(
         .with(log_db_layer)
         .with(otel_layers)
         .try_init();
-    #[cfg(unix)]
-    if let Some(Err(err)) = nofile_limit_result {
-        warn!(%err, "failed to raise managed app-server file descriptor limit");
-    }
     for warning in &config_warnings {
         match &warning.details {
             Some(details) => error!("{} {}", warning.summary, details),
             None => error!("{}", warning.summary),
         }
     }
-    let remote_control_policy = if config
-        .config_layer_stack
-        .requirements()
-        .allow_remote_control
-        .as_ref()
-        .is_some_and(|requirement| !requirement.value)
-    {
-        RemoteControlPolicy::DisabledByRequirements
-    } else {
-        RemoteControlPolicy::Allowed
-    };
-    let remote_control_startup_mode = runtime_options.remote_control_startup_mode;
-    let remote_control_explicitly_requested =
-        remote_control_startup_mode == RemoteControlStartupMode::EnabledEphemeral;
-    if remote_control_explicitly_requested
-        && remote_control_policy == RemoteControlPolicy::DisabledByRequirements
-    {
-        return Err(std::io::Error::new(
-            ErrorKind::InvalidInput,
-            "remote control is disabled by managed requirements",
-        ));
-    }
-    let installation_id = resolve_installation_id(&config.codex_home).await?;
     let transport_shutdown_token = CancellationToken::new();
-    // Remote enrollment must cancel before RPC drain without shutting down telemetry.
-    let remote_control_shutdown_token = transport_shutdown_token.child_token();
     let mut transport_accept_handles = Vec::<JoinHandle<()>>::new();
 
     let websocket_compression = if config
@@ -817,12 +749,9 @@ pub async fn run_main_with_transport_options(
     let single_client_mode = matches!(&transport, AppServerTransport::Stdio);
     let graceful_signal_restart_enabled =
         runtime_options.install_shutdown_signal_handler && !single_client_mode;
-    let mut app_server_client_name_rx = None;
-
     match &transport {
         AppServerTransport::Stdio => {
-            let (stdio_client_name_tx, stdio_client_name_rx) = oneshot::channel::<String>();
-            app_server_client_name_rx = Some(stdio_client_name_rx);
+            let (stdio_client_name_tx, _stdio_client_name_rx) = oneshot::channel::<String>();
             let handle = start_stdio_connection(
                 transport_event_tx.clone(),
                 stdio_client_name_tx,
@@ -836,14 +765,6 @@ pub async fn run_main_with_transport_options(
                 socket_path.clone(),
                 transport_event_tx.clone(),
                 transport_shutdown_token.clone(),
-                if cfg!(windows)
-                    && std::env::var_os(codex_app_server_transport::DAEMON_SHUTDOWN_SOCKET_ENV)
-                        .is_some()
-                {
-                    DaemonShutdownAccess::Managed
-                } else {
-                    DaemonShutdownAccess::Disabled
-                },
                 websocket_compression,
             )
             .await?;
@@ -864,70 +785,13 @@ pub async fn run_main_with_transport_options(
     }
     drop(unix_socket_startup_lock);
 
-    let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
-        && remote_control_explicitly_requested
-        && state_db.is_some();
-    if remote_control_explicitly_requested && state_db.is_none() {
-        error!("remote control disabled because sqlite state db is unavailable");
-    }
     let no_local_transport = transport_accept_handles.is_empty();
-    if no_local_transport
-        && remote_control_startup_mode != RemoteControlStartupMode::ResolvePersisted
-        && !remote_control_enabled
-    {
+    if no_local_transport {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
-            if remote_control_policy == RemoteControlPolicy::DisabledByRequirements {
-                "no transport configured; remote control disabled by managed requirements"
-            } else if remote_control_explicitly_requested && state_db.is_none() {
-                "no transport configured; remote control disabled because sqlite state db is unavailable"
-            } else {
-                "no transport configured; use --listen or enable remote control"
-            },
+            "no transport configured; use --listen",
         ));
     }
-
-    let (remote_control_accept_handle, remote_control_handle) = start_remote_control(
-        RemoteControlStartConfig {
-            remote_control_url: config.chatgpt_base_url.clone(),
-            installation_id: installation_id.clone(),
-            policy: remote_control_policy,
-        },
-        state_db.clone(),
-        auth_manager.clone(),
-        transport_event_tx.clone(),
-        remote_control_shutdown_token.clone(),
-        app_server_client_name_rx,
-        remote_control_startup_mode,
-    )
-    .await?;
-    if no_local_transport
-        && remote_control_startup_mode == RemoteControlStartupMode::ResolvePersisted
-    {
-        let persisted_enabled = match remote_control_handle
-            .resolve_persisted_preference(/*app_server_client_name*/ None)
-            .await
-        {
-            Ok(persisted_enabled) => persisted_enabled,
-            Err(err) => {
-                warn!("failed to resolve persisted remote control preference: {err}");
-                false
-            }
-        };
-        if !persisted_enabled {
-            transport_shutdown_token.cancel();
-            let _ = remote_control_accept_handle.await;
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                if remote_control_policy == RemoteControlPolicy::DisabledByRequirements {
-                    "no transport configured; remote control disabled by managed requirements"
-                } else {
-                    "no transport configured; use --listen or enable remote control"
-                },
-            ));
-        }
-    }
-    transport_accept_handles.push(remote_control_accept_handle);
 
     // Only the standalone server measures its local home, not embedded/cloud runtimes.
     if let Some(metrics) = otel.as_ref().and_then(codex_otel::OtelProvider::metrics) {
@@ -998,20 +862,12 @@ pub async fn run_main_with_transport_options(
         info!("outbound router task exited (channel closed)");
     });
 
-    let recovery_file = daemon_recovery_file_path(&config.codex_home);
-    let daemon_settings_file = managed_daemon.then(|| {
-        config
-            .codex_home
-            .as_path()
-            .join("app-server-daemon/settings.json")
-    });
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
         let initialize_notification_sender = outgoing_message_sender.clone();
         let outbound_control_tx = outbound_control_tx;
         let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
         let mut processor = MessageProcessor::new(MessageProcessorArgs {
-            cloud_skill_provider,
             outgoing: outgoing_message_sender,
             analytics_events_client,
             arg0_paths,
@@ -1029,17 +885,14 @@ pub async fn run_main_with_transport_options(
                 &auth_manager,
             ))),
             auth_manager,
-            installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
-            remote_control_handle: Some(remote_control_handle.clone()),
             plugin_startup_tasks: matches!(
                 runtime_options.plugin_startup_tasks,
                 PluginStartupTasks::Start
             )
             .then_some(plugin_startup_config),
         });
-        processor.remote_control_processor.daemon_settings_file = daemon_settings_file;
         let processor = Arc::new(processor);
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();
@@ -1047,41 +900,9 @@ pub async fn run_main_with_transport_options(
         let mut connections = HashMap::<ConnectionId, ConnectionState>::new();
         let mut connection_cleanup_tasks = ConnectionCleanupTasks::new();
         let mut thread_listener_tasks = tokio::task::JoinSet::new();
-        let mut remote_control_status_rx = remote_control_handle.status_receiver();
-        let mut remote_control_status = remote_control_status_rx.borrow().clone();
         let transport_shutdown_token = transport_shutdown_token.clone();
         async move {
-            let recovery_task = if managed_daemon {
-                match daemon_thread_recovery::start_recovery(
-                    recovery_file.clone(),
-                    Arc::clone(&processor),
-                )
-                .await
-                {
-                    Ok(task) => Some(task),
-                    Err(err) => {
-                        warn!("failed to consume daemon recovery snapshot: {err}");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
             let mut listen_for_threads = true;
-            // Keep force signals and daemon control events responsive while saving.
-            let mut snapshot = Box::pin(async {
-                let processor = Arc::clone(&processor);
-                let recovery_file = recovery_file.clone();
-                // Run independently: snapshot locks can require the event loop to make progress.
-                let task = tokio::spawn(async move {
-                    let saved = processor.daemon_recovery_snapshot().await;
-                    if let Err(err) = daemon_thread_recovery::snapshot(recovery_file, saved).await {
-                        warn!("failed to save threads during daemon shutdown: {err}");
-                    }
-                });
-                let _ = tokio_util::task::AbortOnDropHandle::new(task).await;
-            });
-            let mut snapshot_finished = !managed_daemon;
             let mut clients_disconnected = false;
             let mut shutdown_state = ShutdownState::default();
             let mut shutdown_signal_future = Box::pin(shutdown_signal());
@@ -1095,14 +916,11 @@ pub async fn run_main_with_transport_options(
                     ShutdownAction::Finish
                 );
                 if ready_to_exit {
-                    if let Some(task) = &recovery_task {
-                        task.abort();
-                    }
-                    let finished = snapshot_finished || shutdown_state.forced();
+                    let finished = shutdown_state.forced();
                     if finished {
                         transport_shutdown_token.cancel();
                     }
-                    if managed_daemon && shutdown_state.forced() {
+                    if shutdown_state.forced() {
                         break "forced_shutdown_requested";
                     }
                     if !clients_disconnected {
@@ -1117,9 +935,6 @@ pub async fn run_main_with_transport_options(
                 }
 
                 tokio::select! {
-                    _ = &mut snapshot, if shutdown_state.requested() && active_admissions == 0 && !snapshot_finished => {
-                        snapshot_finished = true;
-                    }
                     shutdown_signal_result = &mut shutdown_signal_future, if graceful_signal_restart_enabled && !shutdown_state.forced() => {
                         shutdown_signal_future.set(shutdown_signal());
                         let signal = match shutdown_signal_result {
@@ -1146,16 +961,13 @@ pub async fn run_main_with_transport_options(
                         let Some(event) = event else {
                             break "transport_channel_closed";
                         };
-                        if ready_to_exit && !matches!(event, TransportEvent::DaemonShutdown) {
+                        if ready_to_exit {
                             if let TransportEvent::ConnectionOpened { disconnect_sender: Some(token), .. } = event {
                                 token.cancel();
                             }
                             continue;
                         }
                         match event {
-                            TransportEvent::DaemonShutdown => {
-                                shutdown_state.on_signal(ShutdownSignal::Forceable, connections.len(), *running_turn_count_rx.borrow(), &processor.turn_admission);
-                            }
                             TransportEvent::ConnectionOpened {
                                 connection_id,
                                 origin,
@@ -1217,8 +1029,7 @@ pub async fn run_main_with_transport_options(
                                     break "outbound_router_closed";
                                 }
                                 if single_client_mode && stdio_closed {
-                                    // Pending remote enrollment must stop before RPCs drain.
-                                    remote_control_shutdown_token.cancel();
+                                    transport_shutdown_token.cancel();
                                     break "stdio_connection_closed";
                                 }
                             }
@@ -1271,14 +1082,6 @@ pub async fn run_main_with_transport_options(
                                                     connection_id,
                                                 )
                                                 .await;
-                                            initialize_notification_sender
-                                                .send_server_notification_to_connections(
-                                                    &[connection_id],
-                                                    ServerNotification::RemoteControlStatusChanged(
-                                                        remote_control_status.clone(),
-                                                    ),
-                                                )
-                                                .await;
                                             processor
                                                 .connection_initialized(
                                                     connection_id,
@@ -1313,20 +1116,6 @@ pub async fn run_main_with_transport_options(
                         if let Some(Err(err)) = result {
                             warn!("thread listener attachment failed: {err}");
                         }
-                    }
-                    changed = remote_control_status_rx.changed() => {
-                        if changed.is_err() {
-                            continue;
-                        }
-                        let status = remote_control_status_rx.borrow().clone();
-                        if remote_control_status == status {
-                            continue;
-                        }
-                        remote_control_status = status.clone();
-                        let notification = ServerNotification::RemoteControlStatusChanged(status);
-                        initialize_notification_sender
-                            .send_server_notification(notification)
-                            .await;
                     }
                     created = thread_created_rx.recv(), if listen_for_threads && !ready_to_exit => {
                         match created {
@@ -1363,10 +1152,6 @@ pub async fn run_main_with_transport_options(
                 }
             };
 
-            if let Some(task) = recovery_task {
-                task.abort();
-            }
-            drop(snapshot);
             drop(thread_listener_tasks);
             if !shutdown_state.forced() {
                 futures::future::join_all(connections.iter().map(
@@ -1387,7 +1172,7 @@ pub async fn run_main_with_transport_options(
                 shutdown_forced = shutdown_state.forced(),
                 "processor task exited"
             );
-            if managed_daemon && shutdown_state.forced() {
+            if shutdown_state.forced() {
                 AppServerExit::Forced
             } else {
                 AppServerExit::Graceful
@@ -1529,8 +1314,7 @@ fn sqlite_recovery_notice(
 fn emit_state_db_backup_warning(message: &str) {
     warn!("{message}");
     if !tracing::dispatcher::has_been_set() {
-        let _ =
-            codex_app_server_daemon::stderr_writer().write_all(format!("{message}\n").as_bytes());
+        let _ = std::io::stderr().write_all(format!("{message}\n").as_bytes());
     }
 }
 

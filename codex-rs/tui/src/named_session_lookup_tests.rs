@@ -1,10 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use codex_app_server_client::RemoteAppServerClient;
-use codex_app_server_client::RemoteAppServerConnectArgs;
-use codex_app_server_client::RemoteAppServerEndpoint;
-use codex_app_server_protocol::JSONRPCMessage;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -12,12 +8,9 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_state::ThreadMetadataBuilder;
 use codex_utils_absolute_path::test_support::PathExt;
-use futures::SinkExt;
-use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::SessionCollection;
 use super::lookup;
@@ -54,7 +47,7 @@ async fn lookup_name(
     name: &str,
     collections: &[SessionCollection],
     mode: ThreadParamsMode,
-    model_provider: Option<Vec<String>>,
+    model_provider: Option<&str>,
 ) -> color_eyre::Result<Option<codex_app_server_protocol::Thread>> {
     let mut app_server = AppServerSession::new(
         crate::backend_id::BackendId::new(),
@@ -230,7 +223,7 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
         "saved-session",
         &[SessionCollection::Active],
         ThreadParamsMode::Embedded,
-        Some(vec![config.model_provider_id.clone()]),
+        Some(&config.model_provider_id),
     )
     .await?;
     let preview = lookup_name(
@@ -238,7 +231,7 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
         "preview text",
         &[SessionCollection::Active],
         ThreadParamsMode::Embedded,
-        Some(vec![config.model_provider_id.clone()]),
+        Some(&config.model_provider_id),
     )
     .await?;
     let switched_provider = lookup_name(
@@ -246,15 +239,7 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
         "saved-session",
         &[SessionCollection::Active],
         ThreadParamsMode::Embedded,
-        Some(vec![other_config.model_provider_id.clone()]),
-    )
-    .await?;
-    let remote = lookup_name(
-        &other_config,
-        "saved-session",
-        &[SessionCollection::Active],
-        ThreadParamsMode::Remote,
-        /*model_provider*/ None,
+        Some(&other_config.model_provider_id),
     )
     .await?;
     assert_eq!(
@@ -262,12 +247,10 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
             named.map(|thread| thread.id),
             preview.map(|thread| thread.id),
             switched_provider.map(|thread| thread.id),
-            remote.map(|thread| thread.id),
         ),
         (
             Some(named_id.to_string()),
             Some(preview_id.to_string()),
-            Some(other_id.to_string()),
             Some(other_id.to_string()),
         ),
     );
@@ -317,7 +300,7 @@ async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()
         "same-label",
         &[SessionCollection::Active],
         &[resume_source_kinds(/*include_non_interactive*/ false)],
-        Some(vec![config.model_provider_id.clone()]),
+        Some(&config.model_provider_id),
     )
     .await
     .expect_err("duplicate labels should require an ID");
@@ -327,7 +310,7 @@ async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()
         "other-1",
         &[SessionCollection::Active],
         &[resume_source_kinds(/*include_non_interactive*/ false)],
-        Some(vec![config.model_provider_id.clone()]),
+        Some(&config.model_provider_id),
     )
     .await?;
     app_server.shutdown().await?;
@@ -408,166 +391,9 @@ async fn skips_stale_listed_thread_before_valid_label() -> color_eyre::Result<()
         "same-label",
         &[SessionCollection::Active],
         ThreadParamsMode::Embedded,
-        Some(vec![config.model_provider_id.clone()]),
+        Some(&config.model_provider_id),
     )
     .await?;
     assert_eq!(found.map(|thread| thread.id), Some(valid_id.to_string()));
-    Ok(())
-}
-
-#[tokio::test]
-async fn verifies_name_uniqueness_across_server_pages() -> color_eyre::Result<()> {
-    let temp_dir = TempDir::new()?;
-    let config = build_config(&temp_dir).await?;
-    let runtime = state_runtime(&config).await?;
-    let thread_id = ThreadId::new();
-    let path = write_rollout(
-        &config,
-        thread_id,
-        "2025-02-01T10:00:00Z",
-        "preview text",
-        SessionSource::Cli,
-        ThreadHistoryMode::Legacy,
-    )?;
-    upsert_thread(
-        &runtime,
-        thread_metadata(&config, thread_id, path, "saved-session"),
-    )
-    .await?;
-    let mut embedded = AppServerSession::new(
-        crate::backend_id::BackendId::new(),
-        codex_app_server_client::AppServerClient::InProcess(
-            start_test_embedded_app_server(config.clone()).await?,
-        ),
-        ThreadParamsMode::Embedded,
-    );
-    let listed = embedded
-        .thread_read(thread_id, /*include_turns*/ false)
-        .await?;
-    embedded.shutdown().await?;
-
-    for (mode, next_cursor) in [
-        (ThreadParamsMode::Remote, None),
-        (ThreadParamsMode::Embedded, None),
-        (
-            ThreadParamsMode::Remote,
-            Some("2025-02-01T10:00:00Z".to_string()),
-        ),
-        (
-            ThreadParamsMode::Remote,
-            Some(format!("2025-02-01T10:00:00Z|{thread_id}")),
-        ),
-    ] {
-        let unverified_pagination = next_cursor
-            .as_ref()
-            .is_some_and(|cursor| !cursor.contains('|'));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let url = format!("ws://{}", listener.local_addr()?);
-        let listed_for_server = listed.clone();
-        let mut unreadable = listed.clone();
-        let unreadable_id = ThreadId::new();
-        unreadable.id = unreadable_id.to_string();
-        let paginated = next_cursor.is_some();
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-            while let Some(Ok(Message::Text(text))) = socket.next().await {
-                let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap() else {
-                    continue;
-                };
-                let last_page = request.method == "thread/list"
-                    && request
-                        .params
-                        .as_ref()
-                        .is_some_and(|params| params["cursor"].is_string());
-                let response = match request.method.as_str() {
-                    "initialize" => {
-                        json!({"id": request.id, "result": {"userAgent": "lookup-test"}})
-                    }
-                    "thread/list" => {
-                        assert_eq!(
-                            request.params.as_ref().unwrap()["sortKey"],
-                            json!(codex_app_server_protocol::ThreadSortKey::CreatedAt)
-                        );
-                        assert_eq!(
-                            request.params.as_ref().unwrap()["useStateDbOnly"],
-                            json!(true)
-                        );
-                        let data = if last_page {
-                            Vec::new()
-                        } else {
-                            vec![unreadable.clone(), listed_for_server.clone()]
-                        };
-                        let cursor = if last_page { None } else { next_cursor.clone() };
-                        json!({"id": request.id, "result": {"data": data, "nextCursor": cursor}})
-                    }
-                    "thread/read"
-                        if request.params.as_ref().unwrap()["threadId"] == unreadable.id =>
-                    {
-                        json!({"id": request.id, "error": {
-                            "code": -32603,
-                            "message": format!("thread not loaded: {unreadable_id}")
-                        }})
-                    }
-                    "thread/read" => {
-                        json!({"id": request.id, "result": {"thread": listed_for_server}})
-                    }
-                    other => panic!("unexpected request: {other}"),
-                };
-                socket
-                    .send(Message::Text(response.to_string().into()))
-                    .await
-                    .unwrap();
-                if last_page
-                    || (!paginated
-                        && request.method == "thread/read"
-                        && request.params.as_ref().unwrap()["threadId"] == listed_for_server.id)
-                {
-                    break;
-                }
-            }
-        });
-        let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            required_human_approval: true,
-            endpoint: RemoteAppServerEndpoint::WebSocket {
-                websocket_url: url,
-                auth_token: None,
-            },
-            client_name: "lookup-test".to_string(),
-            client_version: "0.0.0".to_string(),
-            experimental_api: true,
-            mcp_server_openai_form_elicitation: false,
-            opt_out_notification_methods: Vec::new(),
-            channel_capacity: 8,
-        })
-        .await?;
-        let mut remote = AppServerSession::new(
-            crate::backend_id::BackendId::new(),
-            codex_app_server_client::AppServerClient::Remote(client),
-            mode,
-        );
-        let found = lookup(
-            &mut remote,
-            config.codex_home.as_path(),
-            "saved-session",
-            &[SessionCollection::Active],
-            &[resume_source_kinds(/*include_non_interactive*/ false)],
-            /*model_providers*/ None,
-        )
-        .await;
-        if unverified_pagination {
-            assert_eq!(
-                found
-                    .expect_err("timestamp-only cursors cannot prove uniqueness")
-                    .to_string(),
-                format!(
-                    "Cannot verify a unique session label across server pages; matching session UUID: {thread_id}. Use it only if this is the session you want."
-                )
-            );
-        } else {
-            assert_eq!(found?, Some(listed.clone()));
-        }
-        server.await?;
-    }
     Ok(())
 }

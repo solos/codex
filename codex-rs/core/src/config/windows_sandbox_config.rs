@@ -21,7 +21,7 @@ use codex_sandboxing::SandboxType;
 
 impl Config {
     /// Reject a non-MXC selection without changing the final configuration.
-    /// Call after cloud configuration loads and outside config-recovery fallbacks.
+    /// Call after configuration loads and outside config-recovery fallbacks.
     pub fn validate_windows_mxc_requirement(&self) -> std::io::Result<()> {
         self.validate_windows_mxc_requirement_from(self)
     }

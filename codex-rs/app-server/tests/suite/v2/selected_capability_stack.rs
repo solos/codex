@@ -43,8 +43,6 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::analytics::mount_analytics_capture;
-use super::analytics::wait_for_matching_analytics_event;
 use super::app_list::connector_tool;
 use super::app_list::start_apps_server_with_delays;
 
@@ -86,7 +84,6 @@ async fn selected_plugin_mcp_startup_respects_explicit_mentions(
     let explicitly_mentioned = !matches!(mention, PluginMention::Unmentioned);
     let responses_server = responses::start_mock_server().await;
     let fixture = selected_capability_fixture(&responses_server.uri(), &responses_server.uri())?;
-    mount_analytics_capture(&responses_server, fixture.codex_home.path()).await?;
     let config_path = fixture.codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?.replace(
         "executor_capability_discovery = true",
@@ -179,17 +176,6 @@ async fn selected_plugin_mcp_startup_respects_explicit_mentions(
             .tool_by_name(&format!("mcp__{MCP_SERVER_NAME}"), "echo")
             .is_some(),
         explicitly_mentioned,
-    );
-
-    let event = wait_for_matching_analytics_event(&responses_server, READ_TIMEOUT, |event| {
-        event["event_type"] == "codex_turn_event"
-            && event["event_params"]["thread_id"] == thread_id
-            && event["event_params"]["turn_id"] == turn.id
-    })
-    .await?;
-    assert_eq!(
-        event["event_params"]["active_plugin_ids_at_turn_start"],
-        json!([PLUGIN_ID])
     );
 
     exec_server.kill().await?;

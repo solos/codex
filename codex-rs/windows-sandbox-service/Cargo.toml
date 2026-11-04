@@ -18,7 +18,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-codex-cloud-config = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-windows-sandbox = { workspace = true }

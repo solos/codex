@@ -126,7 +126,7 @@ async fn sender_context_follows_its_delivery_through_checkpoint_and_rollback() {
     let (session, turn_context) = make_session_and_context().await;
 
     let mut live = ContextManager::for_session(
-        /*root_capabilities_restricted*/ false,
+        &SessionSource::default(),
         &crate::config::ManagedFeatures::from(codex_features::Features::with_defaults()),
     );
     let mut items = Vec::new();
@@ -1622,7 +1622,6 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions(
                     compaction_response_id: None,
                     latest_token_usage_record: None,
                     resume_metadata: current.then(|| codex_history::CompactionResumeMetadata {
-                        rejected_audio_file_ids: Default::default(),
                         dynamic_tools: None,
                         multi_agent_version: None,
                         last_started_turn_id: Some(format!("wake-{window_number}")),

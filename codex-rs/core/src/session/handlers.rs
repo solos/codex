@@ -27,7 +27,6 @@ use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
 use crate::thread_manager::AgentTreeShutdownFailure;
 use crate::thread_manager::thread_store_error_kind;
-use codex_protocol::approvals::ExecApprovalKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
@@ -176,51 +175,36 @@ pub async fn resolve_elicitation(
     }
 }
 
-impl Session {
-    /// Claim the prompt before applying a decision that can outlive the requesting execution.
-    pub(crate) async fn resolve_exec_approval(
-        self: &Arc<Self>,
-        approval_id: String,
-        turn_id: Option<String>,
-        decision: ReviewDecision,
-    ) {
-        let Some((pending, active_turn_id)) = self
-            .take_pending_approval(&approval_id, turn_id.as_deref())
+/// Propagate a user's exec approval decision to the session.
+/// Also optionally applies an execpolicy amendment.
+pub async fn exec_approval(
+    sess: &Arc<Session>,
+    approval_id: String,
+    turn_id: Option<String>,
+    decision: ReviewDecision,
+) {
+    let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
+    if let ReviewDecision::ApprovedExecpolicyAmendment {
+        proposed_execpolicy_amendment,
+    } = &decision
+        && let Err(err) = sess
+            .persist_execpolicy_amendment(proposed_execpolicy_amendment)
             .await
-        else {
-            return;
-        };
-        let decision = pending.validate(decision);
-        if decision == ReviewDecision::Abort {
-            let turn_id = if pending.kind == ExecApprovalKind::HumanCommand {
-                Some(&pending.turn_id)
-            } else {
-                active_turn_id.as_ref()
-            };
-            if let Some(turn_id) = turn_id {
-                self.abort_turn_if_active(
-                    turn_id,
-                    TurnAbortReason::Interrupted,
-                    /*error*/ None,
-                )
-                .await;
-            }
-        } else if let ReviewDecision::ApprovedExecpolicyAmendment {
-            proposed_execpolicy_amendment,
-        } = &decision
-            && let Err(err) = self
-                .persist_execpolicy_amendment(proposed_execpolicy_amendment)
-                .await
-        {
-            let message = format!("Failed to apply execpolicy amendment: {err}");
-            tracing::warn!("{message}");
-            self.send_event_raw(Event {
-                id: turn_id.unwrap_or(approval_id),
-                msg: EventMsg::Warning(WarningEvent { message }),
-            })
-            .await;
+    {
+        let message = format!("Failed to apply execpolicy amendment: {err}");
+        tracing::warn!("{message}");
+        let warning = EventMsg::Warning(WarningEvent { message });
+        sess.send_event_raw(Event {
+            id: event_turn_id.clone(),
+            msg: warning,
+        })
+        .await;
+    }
+    match decision {
+        ReviewDecision::Abort => {
+            sess.interrupt_task().await;
         }
-        let _ = pending.sender.send(decision);
+        other => sess.notify_approval(&approval_id, other).await,
     }
 }
 
@@ -300,7 +284,6 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
                 misalignment: None,
                 message: err.to_string(),
                 codex_error_info: Some(CodexErrorInfo::Other),
-                rejected_audio_file_ids: Vec::new(),
             }),
         };
         sess.send_event_raw(event).await;
@@ -401,7 +384,6 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
                 misalignment: None,
                 message: "Failed to shutdown thread persistence".to_string(),
                 codex_error_info: Some(CodexErrorInfo::Other),
-                rejected_audio_file_ids: Vec::new(),
             }),
         };
         sess.send_event_raw(event).await;
@@ -414,10 +396,10 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     sess.services
         .rollout_thread_trace
         .record_protocol_event(&event.msg);
+    sess.deliver_event_raw(event).await;
     sess.services
         .rollout_thread_trace
         .record_ended(codex_rollout_trace::RolloutStatus::Completed);
-    sess.deliver_event_raw(event).await;
     true
 }
 
@@ -451,7 +433,6 @@ pub async fn review(
                     misalignment: None,
                     message: err.to_string(),
                     codex_error_info: Some(CodexErrorInfo::Other),
-                    rejected_audio_file_ids: Vec::new(),
                 }),
             };
             sess.send_event(&turn_context, event.msg).await;
@@ -466,11 +447,6 @@ pub(super) async fn submission_loop(
 ) {
     // Session shutdown and tree shutdown both use the existing teardown handler.
     let mut shutdown_received = false;
-    let mut catalog_updates = sess.services.models_manager.model_catalog_updates();
-    if let Some(updates) = &mut catalog_updates {
-        // A resumed chat must also consume a catalog fetched before it was opened.
-        updates.mark_changed();
-    }
     let mut mailbox = sess.input_queue.mailbox_updates();
     if let Some(updates) = &mut mailbox {
         updates.mark_changed();
@@ -481,19 +457,6 @@ pub(super) async fn submission_loop(
             _ = sess.services.local_agent_runtime.shutdown.cancelled() => {
                 shutdown_received = shutdown(&sess, super::new_submission_id()).await;
                 break;
-            }
-            update = async {
-                match &mut catalog_updates {
-                    Some(updates) => updates.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if update.is_err() {
-                    catalog_updates = None;
-                } else {
-                    super::model_catalog_settings::apply(&sess).await;
-                }
-                continue;
             }
             sub = rx_sub.recv() => match sub {
                 Ok(sub) => sub,
@@ -555,7 +518,6 @@ pub(super) async fn submission_loop(
                                 misalignment: None,
                                 message: err.to_string(),
                                 codex_error_info: Some(CodexErrorInfo::Other),
-                                rejected_audio_file_ids: Vec::new(),
                             }),
                         })
                         .await;
@@ -565,18 +527,6 @@ pub(super) async fn submission_loop(
                 Op::RealtimeConversationAttach { params, reply } => {
                     let result =
                         crate::realtime_conversation::handle_attach(&sess, sub.id, params).await;
-                    let _ = reply.send(result);
-                    false
-                }
-                Op::RealtimeConversationAttachStream {
-                    params,
-                    transport,
-                    reply,
-                } => {
-                    let result = crate::realtime_conversation::handle_attach_stream(
-                        &sess, sub.id, params, transport,
-                    )
-                    .await;
                     let _ = reply.send(result);
                     false
                 }
@@ -685,7 +635,6 @@ pub(super) async fn submission_loop(
                                         misalignment: None,
                                         message,
                                         codex_error_info: Some(CodexErrorInfo::BadRequest),
-                                        rejected_audio_file_ids: Vec::new(),
                                     }),
                                 })
                                 .await;
@@ -722,8 +671,7 @@ pub(super) async fn submission_loop(
                     turn_id,
                     decision,
                 } => {
-                    sess.resolve_exec_approval(approval_id, turn_id, decision)
-                        .await;
+                    exec_approval(&sess, approval_id, turn_id, decision).await;
                     false
                 }
                 Op::PatchApproval { id, decision } => {
@@ -813,9 +761,6 @@ pub(super) async fn submission_loop(
             );
             warn!("failed to shutdown thread persistence after submission channel closed: {err}");
         }
-        sess.services
-            .rollout_thread_trace
-            .record_ended(codex_rollout_trace::RolloutStatus::Aborted);
     }
     debug!("Agent loop exited");
 }

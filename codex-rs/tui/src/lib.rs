@@ -35,9 +35,6 @@ use codex_app_server_client::AppServerClient;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
-use codex_app_server_client::RemoteAppServerClient;
-use codex_app_server_client::RemoteAppServerConnectArgs;
-pub use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigWarningNotification;
@@ -47,15 +44,12 @@ use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
-use codex_cloud_config::managed_config_bundle_loader_for_storage;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::LoaderOverrides;
 use codex_config::format_config_error_with_source;
 use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimeOptions;
-use codex_features::Feature;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -64,7 +58,6 @@ use codex_login::is_workload_identity_selected;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
-use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::SandboxMode;
 use codex_rollout::StateDbHandle;
 use codex_rollout::state_db;
@@ -77,7 +70,6 @@ use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::WrapErr;
 use crossterm::SynchronizedUpdate;
 use cwd_prompt::CwdPromptAction;
-pub use daemon_startup::uses_wsl_drvfs;
 pub use session_archive_commands::DeleteConfirmation;
 pub use session_archive_commands::SessionArchiveAction;
 pub use session_archive_commands::SessionArchiveCommandOptions;
@@ -96,7 +88,6 @@ use tracing::warn;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
-use url::Url;
 use uuid::Uuid;
 
 pub(crate) use codex_app_server_client::legacy_core;
@@ -113,7 +104,6 @@ mod app_event;
 mod app_event_sender;
 mod app_info;
 mod app_server_approval_conversions;
-mod app_server_connection;
 mod app_server_session;
 mod approval_events;
 mod async_question_reply;
@@ -216,7 +206,7 @@ mod startup_draft;
 mod startup_error;
 mod startup_hooks_review;
 mod startup_orchestration;
-mod startup_preflight;
+#[cfg(test)]
 mod startup_presentation;
 mod startup_recovery;
 mod status;
@@ -248,11 +238,9 @@ mod transcript_view;
 mod tui;
 mod turn_tip;
 mod ui_consts;
-mod ui_tree;
 mod unarchive_prompt;
 pub(crate) mod update_action;
 mod worktree_startup;
-pub use update_action::DaemonUpdateSource;
 pub use update_action::UpdateAction;
 #[cfg(not(debug_assertions))]
 pub use update_action::get_update_action;
@@ -290,9 +278,6 @@ pub use public_widgets::composer_input::ComposerInput;
 const TUI_LOG_FILE_NAME: &str = "codex-tui.log";
 const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 500);
 
-const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(50);
-
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
@@ -300,7 +285,6 @@ async fn start_embedded_app_server(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
@@ -314,7 +298,6 @@ async fn start_embedded_app_server(
         cli_kv_overrides,
         loader_overrides,
         strict_config,
-        cloud_config_bundle,
         feedback,
         log_db,
         state_db,
@@ -328,42 +311,19 @@ async fn start_embedded_app_server(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AppServerTarget {
     Embedded,
-    LocalDaemon {
-        endpoint: RemoteAppServerEndpoint,
-        allow_embedded_fallback: bool,
-    },
-    Remote {
-        endpoint: RemoteAppServerEndpoint,
-    },
 }
 
 impl AppServerTarget {
-    fn preserve_selected_backend(&mut self, selection: &resume_picker::SessionSelection) {
-        if matches!(
-            selection,
-            resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_)
-        ) && let Self::LocalDaemon {
-            allow_embedded_fallback,
-            ..
-        } = self
-        {
-            *allow_embedded_fallback = false;
-        }
+    fn supports_command_center(&self) -> bool {
+        false
     }
 
     pub(crate) fn uses_remote_workspace(&self) -> bool {
-        matches!(self, Self::Remote { .. })
+        false
     }
 
     fn uses_embedded_network_policy(&self) -> bool {
-        matches!(
-            self,
-            Self::Embedded
-                | Self::LocalDaemon {
-                    allow_embedded_fallback: true,
-                    ..
-                }
-        )
+        true
     }
 
     fn environment_http_client_factory(
@@ -372,37 +332,15 @@ impl AppServerTarget {
         policy: &codex_app_server_client::EmbeddedNetworkPolicy,
     ) -> codex_http_client::HttpClientFactory {
         let factory = config.http_client_factory();
-        match self {
-            Self::Embedded
-            | Self::LocalDaemon {
-                allow_embedded_fallback: true,
-                ..
-            } => policy.bind(factory),
-            Self::LocalDaemon {
-                allow_embedded_fallback: false,
-                ..
-            }
-            | Self::Remote { .. } => factory,
-        }
+        policy.bind(factory)
     }
 
     fn auth_config_for_cloud_loader(&self, mut auth_config: AuthConfig) -> AuthConfig {
-        if self.uses_remote_workspace() {
-            // Remove local auth restrictions before loading credentials for a remote
-            // workspace; the remote app server enforces its own authentication policy.
-            auth_config.forced_login_method = None;
-            auth_config.forced_chatgpt_workspace_id = None;
-            auth_config.managed_auth_policy = Default::default();
-        }
         auth_config
     }
 
     fn thread_params_mode(&self) -> ThreadParamsMode {
-        if self.uses_remote_workspace() {
-            ThreadParamsMode::Remote
-        } else {
-            ThreadParamsMode::Embedded
-        }
+        ThreadParamsMode::Embedded
     }
 }
 
@@ -416,9 +354,6 @@ async fn init_state_db_for_app_server_target(
                 .unwrap_or_else(|| config.sqlite_config().state_db_path());
             std::io::Error::other(LocalStateDbStartupError::new(database_path, err))
         }),
-        AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
-            Ok(state_db::get_state_db(config).await)
-        }
     }
 }
 
@@ -429,200 +364,26 @@ fn remove_legacy_tui_log_file(codex_home: &Path) {
     let _ = std::fs::remove_file(codex_home.join("log").join(TUI_LOG_FILE_NAME));
 }
 
-fn remote_addr_has_explicit_port(addr: &str, parsed: &Url) -> bool {
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    if parsed.port().is_some() {
-        return true;
-    }
-
-    let Some((_, rest)) = addr.split_once("://") else {
-        return false;
-    };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let host_and_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host_and_port)| host_and_port);
-    let explicit_default_port = match parsed.scheme() {
-        "ws" => 80,
-        "wss" => 443,
-        _ => return false,
-    };
-    let expected_host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    host_and_port == format!("{expected_host}:{explicit_default_port}")
-}
-
-fn websocket_url_supports_auth_token(parsed: &Url) -> bool {
-    match (parsed.scheme(), parsed.host()) {
-        ("wss", Some(_)) => true,
-        ("ws", Some(url::Host::Domain(domain))) => domain.eq_ignore_ascii_case("localhost"),
-        ("ws", Some(url::Host::Ipv4(addr))) => addr.is_loopback(),
-        ("ws", Some(url::Host::Ipv6(addr))) => addr.is_loopback(),
-        _ => false,
-    }
-}
-
-pub fn resolve_remote_addr(addr: &str) -> color_eyre::Result<RemoteAppServerEndpoint> {
-    if let Some(socket_path) = addr.strip_prefix("unix://") {
-        let socket_path = if socket_path.is_empty() {
-            let codex_home = find_codex_home().wrap_err("failed to resolve CODEX_HOME")?;
-            codex_app_server_client::app_server_control_socket_path(&codex_home)
-                .map_err(color_eyre::Report::new)?
-        } else {
-            AbsolutePathBuf::relative_to_current_dir(socket_path)
-                .map_err(color_eyre::Report::new)?
-        };
-        return Ok(RemoteAppServerEndpoint::UnixSocket { socket_path });
-    }
-
-    let parsed = match Url::parse(addr) {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            color_eyre::eyre::bail!(
-                "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
-            );
-        }
-    };
-    if matches!(parsed.scheme(), "ws" | "wss")
-        && parsed.host_str().is_some()
-        && remote_addr_has_explicit_port(addr, &parsed)
-        && parsed.path() == "/"
-        && parsed.query().is_none()
-        && parsed.fragment().is_none()
-    {
-        return Ok(RemoteAppServerEndpoint::WebSocket {
-            websocket_url: parsed.to_string(),
-            auth_token: None,
-        });
-    }
-
-    color_eyre::eyre::bail!(
-        "invalid remote address `{addr}`; expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
-    );
-}
-
-pub fn remote_addr_supports_auth_token(endpoint: &RemoteAppServerEndpoint) -> bool {
-    match endpoint {
-        RemoteAppServerEndpoint::WebSocket { websocket_url, .. } => {
-            Url::parse(websocket_url).is_ok_and(|parsed| websocket_url_supports_auth_token(&parsed))
-        }
-        RemoteAppServerEndpoint::UnixSocket { .. } => false,
-    }
-}
-
-async fn connect_remote_app_server(
-    endpoint: RemoteAppServerEndpoint,
-) -> color_eyre::Result<AppServerClient> {
-    let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-        required_human_approval: true,
-        endpoint,
-        client_name: "codex-tui".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-        experimental_api: true,
-        mcp_server_openai_form_elicitation: false,
-        opt_out_notification_methods: Vec::new(),
-        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
-    })
-    .await
-    .wrap_err("failed to connect to remote app server")?;
-    Ok(AppServerClient::Remote(app_server))
-}
-
-async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<AbsolutePathBuf> {
-    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home).ok()?;
-    #[cfg(windows)]
-    let (validated_path, _directory) =
-        codex_uds::validate_private_socket_path(socket_path.as_path()).ok()?;
-    #[cfg(windows)]
-    let validated_path = AbsolutePathBuf::from_absolute_path_checked(validated_path).ok()?;
-    #[cfg(windows)]
-    let probe_path = validated_path.as_path();
-    #[cfg(not(windows))]
-    let probe_path = socket_path.as_path();
-    match tokio::time::timeout(
-        AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT,
-        codex_uds::UnixStream::connect(probe_path),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => {
-            #[cfg(windows)]
-            _stream.ensure_non_elevated_peer().ok()?;
-            Some(socket_path)
-        }
-        Ok(Err(err)) => {
-            tracing::debug!(%err, socket_path = %socket_path.display(), "skipping default app-server daemon socket");
-            None
-        }
-        Err(_) => {
-            tracing::debug!(
-                socket_path = %socket_path.display(),
-                timeout_ms = AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT.as_millis(),
-                "timed out probing default app-server daemon socket"
-            );
-            None
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn start_app_server(
-    target: &mut AppServerTarget,
+    _target: &mut AppServerTarget,
     arg0_paths: Arg0DispatchPaths,
     config: Config,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     state_db: &mut Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<AppServerClient> {
-    let connection = if matches!(target, AppServerTarget::Embedded) {
-        None
-    } else {
-        Some(app_server_connection::connect(target).await)
-    };
-    if let Some(connection) = connection {
-        match connection {
-            Ok(app_server) => return Ok(app_server),
-            Err(err)
-                if matches!(
-                    target,
-                    AppServerTarget::LocalDaemon {
-                        allow_embedded_fallback: true,
-                        ..
-                    }
-                ) =>
-            {
-                tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
-                *target = AppServerTarget::Embedded;
-                *state_db = init_state_db_for_app_server_target(&config, target).await?;
-            }
-            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
-                return Err(color_eyre::eyre::eyre!(
-                    "{err:#}\n{}",
-                    daemon_startup::FAILURE_HINT
-                ));
-            }
-            Err(err) => return Err(err),
-        }
-    }
     start_embedded_app_server(
         arg0_paths,
         config,
         cli_kv_overrides,
         loader_overrides,
         strict_config,
-        cloud_config_bundle,
         feedback,
         log_db,
         state_db.clone(),
@@ -633,7 +394,6 @@ async fn start_app_server(
     .map(AppServerClient::InProcess)
 }
 
-#[cfg(test)]
 pub(crate) async fn start_app_server_for_picker(
     backend_id: crate::backend_id::BackendId,
     config: &Config,
@@ -643,15 +403,7 @@ pub(crate) async fn start_app_server_for_picker(
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerSession> {
-    let mut target = target.clone();
-    // The picker must connect to the backend that owns the supplied ID.
-    if let AppServerTarget::LocalDaemon {
-        allow_embedded_fallback,
-        ..
-    } = &mut target
-    {
-        *allow_embedded_fallback = false;
-    }
+    let target = target.clone();
     let mut state_db = state_db;
     let embedded_network_policy =
         codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
@@ -662,7 +414,6 @@ pub(crate) async fn start_app_server_for_picker(
         cli_kv_overrides,
         loader_overrides,
         /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
         &mut state_db,
@@ -690,7 +441,6 @@ pub(crate) async fn start_embedded_app_server_for_picker(
         Vec::new(),
         LoaderOverrides::without_managed_config_for_tests(),
         /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
         &mut state_db,
@@ -713,7 +463,6 @@ async fn start_embedded_app_server_with<F, Fut>(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
@@ -736,13 +485,11 @@ where
         })
         .collect();
     let client = start_client(InProcessClientStartArgs {
-        required_human_approval: true,
         arg0_paths,
         config: Arc::new(config),
         cli_overrides: cli_kv_overrides,
         loader_overrides,
         strict_config,
-        cloud_config_bundle,
         embedded_network_policy,
         feedback,
         log_db,
@@ -817,7 +564,6 @@ pub(crate) fn resume_source_kinds(include_non_interactive: bool) -> Vec<ThreadSo
 }
 
 async fn lookup_session_target_with_app_server(
-    action: resume_picker::SessionPickerAction,
     app_server: &mut AppServerSession,
     config: &Config,
     id_or_name: &str,
@@ -853,47 +599,34 @@ async fn lookup_session_target_with_app_server(
         };
     }
 
-    let model_providers = match action {
-        resume_picker::SessionPickerAction::Resume => Some(Vec::new()),
-        resume_picker::SessionPickerAction::Fork => app_server
-            .history_model_provider(config)
-            .await?
-            .map(|provider| vec![provider]),
-    };
+    let model_provider = app_server.history_model_provider(config).await?;
     Ok(named_session_lookup::lookup(
         app_server,
         config.codex_home.as_path(),
         id_or_name,
         &[named_session_lookup::SessionCollection::Active],
         &[resume_source_kinds(/*include_non_interactive*/ false)],
-        model_providers,
+        model_provider.as_deref(),
     )
     .await?
     .and_then(|thread| session_target_from_app_server_thread(app_server.backend_id(), thread)))
 }
 
 async fn lookup_latest_session_target_with_app_server(
-    action: resume_picker::SessionPickerAction,
     app_server: &mut AppServerSession,
     config: &Config,
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
-    let model_providers = match action {
-        resume_picker::SessionPickerAction::Resume => Some(Vec::new()),
-        resume_picker::SessionPickerAction::Fork => app_server
-            .history_model_provider(config)
-            .await?
-            .map(|provider| vec![provider]),
-    };
     let uses_remote_workspace = app_server.uses_remote_workspace();
+    let model_provider = app_server.history_model_provider(config).await?;
     for lookup_mode in [
         LatestSessionLookupMode::StateDbOnly,
         LatestSessionLookupMode::ScanAndRepair,
     ] {
         let response = app_server
             .thread_list(latest_session_lookup_params(
-                model_providers.clone(),
+                model_provider.clone(),
                 cwd_filter,
                 include_non_interactive,
                 lookup_mode,
@@ -926,13 +659,12 @@ enum LatestSessionLookupMode {
 }
 
 fn latest_session_lookup_params(
-    model_providers: Option<Vec<String>>,
+    model_provider: Option<String>,
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
     lookup_mode: LatestSessionLookupMode,
 ) -> ThreadListParams {
     ThreadListParams {
-        current_account_only: true,
         excluded_thread_ids: None,
         attached_to_thread_id: None,
         originators: None,
@@ -940,7 +672,7 @@ fn latest_session_lookup_params(
         limit: Some(1),
         sort_key: Some(AppServerThreadSortKey::UpdatedAt),
         sort_direction: None,
-        model_providers,
+        model_providers: model_provider.map(|provider| vec![provider]),
         source_kinds: Some(resume_source_kinds(include_non_interactive)),
         archived: Some(false),
         section_id: None,
@@ -982,18 +714,6 @@ fn uses_remote_workspace_or_environment(
         || environment_manager
             .default_environment()
             .is_some_and(|environment| environment.is_remote())
-}
-
-fn backend_preference_local_cwd(
-    config_cwd: &Path,
-    app_server_target: &AppServerTarget,
-    environment_manager: &EnvironmentManager,
-) -> Option<PathBuf> {
-    if uses_remote_workspace_or_environment(app_server_target, environment_manager) {
-        std::env::current_dir().ok()
-    } else {
-        Some(config_cwd.to_path_buf())
-    }
 }
 
 #[expect(
@@ -1084,78 +804,8 @@ fn latest_session_cwd_filter<'a>(
     }
 }
 
-fn app_server_target_for_launch(
-    explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
-    default_daemon_socket: Option<AbsolutePathBuf>,
-    can_reuse_implicit_local_daemon: bool,
-    workload_identity_selected: bool,
-    exec_server_url: Option<&std::ffi::OsStr>,
-) -> std::io::Result<AppServerTarget> {
-    if workload_identity_selected {
-        if explicit_remote_endpoint.is_some() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "workload identity must be configured on the remote app-server host",
-            ));
-        }
-        return Ok(AppServerTarget::Embedded);
-    }
-    Ok(match explicit_remote_endpoint {
-        Some(RemoteAppServerEndpoint::UnixSocket { socket_path })
-            if default_daemon_socket.as_ref() == Some(&socket_path) =>
-        {
-            AppServerTarget::LocalDaemon {
-                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-                allow_embedded_fallback: false,
-            }
-        }
-        Some(endpoint) => AppServerTarget::Remote { endpoint },
-        // A shared daemon cannot adopt this invocation's executor selection.
-        None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
-            default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
-                AppServerTarget::LocalDaemon {
-                    allow_embedded_fallback: true,
-                    endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-                }
-            })
-        }
-        None => AppServerTarget::Embedded,
-    })
-}
-
-async fn cloud_config_bundle_for_app_server_target(
-    app_server_target: &AppServerTarget,
-    bootstrap_config: &ConfigTomlLoadResult,
-    codex_home: &Path,
-    embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
-) -> std::io::Result<CloudConfigBundleLoader> {
-    managed_config_bundle_loader_for_storage(
-        embedded_network_policy
-            .bind_bootstrap_auth(app_server_target.auth_config_for_cloud_loader(
-                bootstrap_auth_config(codex_home, bootstrap_config)?,
-            )),
-        bootstrap_config.config_layer_stack.requirements_toml(),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await
-}
-
-fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
-    let loader_overrides_are_default = loader_overrides.user_config_path.is_none()
-        && loader_overrides.user_config_profile.is_none()
-        && loader_overrides.managed_config_path.is_none()
-        && loader_overrides.system_config_path.is_none()
-        && loader_overrides.system_requirements_path.is_none()
-        && !loader_overrides.ignore_managed_requirements
-        && !loader_overrides.ignore_user_config
-        && !loader_overrides.ignore_user_and_project_exec_policy_rules
-        && loader_overrides
-            .macos_managed_config_requirements_base64
-            .is_none();
-    #[cfg(target_os = "macos")]
-    let loader_overrides_are_default =
-        loader_overrides_are_default && loader_overrides.managed_preferences_base64.is_none();
-    loader_overrides_are_default
+fn app_server_target_for_launch() -> AppServerTarget {
+    AppServerTarget::Embedded
 }
 
 /// Restore terminal modes before a fatal startup exit bypasses destructor cleanup.
@@ -1166,36 +816,19 @@ fn restore_terminal_before_fatal_exit() {
     startup_recovery::print_unsent_draft();
 }
 
-/// Construct a large future outside its caller's poll frame before boxing it.
-/// `Box::pin(large_future())` can still reserve the future's full size on that stack.
-#[inline(never)]
-fn box_future<F: std::future::Future>(create: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
-    Box::pin(create())
-}
-
-// Keep boxed call sites shaped like ordinary calls, without closure indentation.
-macro_rules! boxed_future {
-    ($future:expr) => {
-        $crate::box_future(|| $future)
-    };
-}
-pub(crate) use boxed_future;
-
 pub async fn run_main(
     cli: Cli,
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
-    explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
     system_motion::initialize().await;
     startup_recovery::scope(async move {
         // Startup retains a large future for the whole session. Keep it off callers' stacks,
         // which also need room to construct a replacement chat widget on `/new`.
-        match boxed_future!(startup_orchestration::run_main_inner(
+        match Box::pin(startup_orchestration::run_main_inner(
             cli,
             arg0_paths,
             loader_overrides,
-            explicit_remote_endpoint,
         ))
         .await
         {
@@ -1233,29 +866,14 @@ async fn run_ratatui_app(
     manually_selected_oss_provider: Option<String>,
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
-    mut cloud_config_bundle: CloudConfigBundleLoader,
     feedback: codex_feedback::CodexFeedback,
     log_db: Option<log_db::LogDbLayer>,
     mut state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
     managed_worktree: Option<ManagedTuiWorktree>,
-    daemon_startup_warning: Option<String>,
-    managed_daemon: bool,
-    launch_telemetry: daemon_telemetry::Launch<
-        impl FnOnce(&'static str) -> terminal_size_telemetry::LaunchTags,
-    >,
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
-    // Capture host credentials and project inputs before resume/fork reloads executor config.
-    let backend_preference_context = app::backend_selection::BackendPreferenceContext::new(
-        &initial_config,
-        backend_preference_local_cwd(
-            initial_config.cwd.as_path(),
-            &app_server_target,
-            &environment_manager,
-        ),
-    );
     let backend_id = crate::backend_id::BackendId::new();
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     let workload_identity_selected = is_workload_identity_selected();
@@ -1286,7 +904,6 @@ async fn run_ratatui_app(
                 UpdatePromptOutcome::Continue => {}
                 UpdatePromptOutcome::RunUpdate(action) => {
                     terminal_restore_guard.restore()?;
-                    launch_telemetry.record("update_requested");
                     return Ok(AppExitInfo {
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
@@ -1313,7 +930,6 @@ async fn run_ratatui_app(
                 cli_kv_overrides.clone(),
                 loader_overrides.clone(),
                 strict_config,
-                cloud_config_bundle.clone(),
                 feedback.clone(),
                 log_db.clone(),
                 &mut state_db,
@@ -1323,19 +939,12 @@ async fn run_ratatui_app(
         )
         .await;
     let mut app_server_session = match startup_app_server {
-        Ok(Ok(app_server)) => {
-            tui.terminal_size_tags = launch_telemetry.record(match &app_server_target {
-                AppServerTarget::Embedded => "in_process",
-                AppServerTarget::LocalDaemon { .. } => "local_daemon",
-                AppServerTarget::Remote { .. } => "remote",
-            });
-            AppServerSession::new(
-                backend_id,
-                app_server,
-                app_server_target.thread_params_mode(),
-            )
-            .with_local_codex_home(&initial_config.codex_home)
-        }
+        Ok(Ok(app_server)) => AppServerSession::new(
+            backend_id,
+            app_server,
+            app_server_target.thread_params_mode(),
+        )
+        .with_local_codex_home(&initial_config.codex_home),
         Ok(Err(err)) => {
             terminal_restore_guard.restore_silently();
             session_log::log_session_end();
@@ -1381,31 +990,28 @@ async fn run_ratatui_app(
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
     let startup_model_provider = initial_config.model_provider_id.clone();
-    let Some(active_app_server) = app_server.as_mut() else {
-        unreachable!("app server should exist when auth is required");
-    };
-    let login_status = startup_draft
-        .run_until(&mut tui, get_login_status(active_app_server))
-        .await;
-    let (login_status, mut startup_account) = match login_status {
-        Ok(Ok((login_status, account))) => (login_status, Some(account)),
-        Ok(Err(err)) => {
-            shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
-            return Err(err);
+    let (login_status, mut startup_account) = if workload_identity_selected {
+        (LoginStatus::AuthMode(AuthMode::Chatgpt), None)
+    } else {
+        let Some(active_app_server) = app_server.as_mut() else {
+            unreachable!("app server should exist when auth is required");
+        };
+        let login_status = startup_draft
+            .run_until(&mut tui, get_login_status(active_app_server))
+            .await;
+        match login_status {
+            Ok(Ok((login_status, account))) => (login_status, Some(account)),
+            Ok(Err(err)) => {
+                shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
+                return Err(err);
+            }
+            Err(err) => {
+                shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
+                return Err(err.into());
+            }
         }
-        Err(err) => {
-            shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
-            return Err(err.into());
-        }
     };
-    let requires_openai_auth = startup_account
-        .as_ref()
-        .is_some_and(|account| account.requires_openai_auth);
-    let should_show_onboarding = should_show_onboarding(
-        login_status,
-        requires_openai_auth,
-        should_show_trust_screen_flag,
-    );
+    let should_show_onboarding = should_show_onboarding(should_show_trust_screen_flag);
 
     let mut config = if should_show_onboarding {
         if let Err(err) = startup_draft.flush_pending_events(&mut tui).await {
@@ -1414,26 +1020,10 @@ async fn run_ratatui_app(
         }
         // Authentication can change while any interactive onboarding screen is open.
         startup_account = None;
-        let show_login_screen = should_show_login_screen(login_status, requires_openai_auth);
-        let bedrock_setup_enabled = should_show_provider_setup_wizard(
-            login_status,
-            requires_openai_auth,
-            &initial_config,
-            &app_server_target,
-            Feature::BedrockSetupWizard,
-        );
-        let gcp_setup_enabled = should_show_provider_setup_wizard(
-            login_status,
-            requires_openai_auth,
-            &initial_config,
-            &app_server_target,
-            Feature::GcpSetupWizard,
-        );
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
-                show_login_screen,
-                bedrock_setup_enabled,
-                gcp_setup_enabled,
+                show_login_screen: false,
+                bedrock_setup_enabled: false,
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust: None,
                 login_status,
@@ -1443,11 +1033,7 @@ async fn run_ratatui_app(
                     .map(AppServerSession::request_handle),
                 config: initial_config.clone(),
             },
-            if show_login_screen {
-                app_server.as_mut()
-            } else {
-                None
-            },
+            /*app_server*/ None,
             &mut tui,
         )
         .await;
@@ -1477,28 +1063,13 @@ async fn run_ratatui_app(
         }
         let reloaded_config = startup_draft
             .run_until(&mut tui, async {
-                // If this onboarding run included the login step, always refresh the cloud config
-                // bundle and rebuild config. This avoids missing newly available cloud-managed
-                // policy due to login status detection edge cases.
-                if show_login_screen && !uses_remote_workspace && !workload_identity_selected {
-                    cloud_config_bundle = managed_config_bundle_loader_for_storage(
-                        embedded_network_policy.bind_bootstrap_auth(initial_config.auth_config()),
-                        initial_config.config_layer_stack.requirements_toml(),
-                        /*enable_codex_api_key_env*/ false,
-                    )
-                    .await?;
-                }
-
-                // Reload config when persisted trust or auth changes alter the current process.
+                // Reload config when persisted trust changes alter the current process.
                 Ok::<_, std::io::Error>(
-                    if !uses_remote_workspace
-                        && (onboarding_result.directory_trust_persisted || show_login_screen)
-                    {
+                    if !uses_remote_workspace && onboarding_result.directory_trust_persisted {
                         load_config_or_exit_with_fallback_cwd(
                             cli_kv_overrides.clone(),
                             overrides.clone(),
                             loader_overrides.clone(),
-                            cloud_config_bundle.clone(),
                             strict_config,
                             /*fallback_cwd*/ None,
                             managed_worktree.as_ref(),
@@ -1527,7 +1098,7 @@ async fn run_ratatui_app(
         &crate::local_settings::LocalSettings::from(&config),
         config.cwd.as_path(),
     );
-    if !(cli.resume_picker || cli.fork_picker || cli.agents_overview)
+    if !(cli.resume_picker || cli.fork_picker)
         && let Err(err) = startup_draft.show(&mut tui)
     {
         shutdown_startup_session(app_server.take(), &mut terminal_restore_guard).await;
@@ -1567,9 +1138,7 @@ async fn run_ratatui_app(
     }
 
     let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
-    let mut session_selection = if cli.agents_overview {
-        resume_picker::SessionSelection::AgentsOverview
-    } else if use_fork {
+    let mut session_selection = if use_fork {
         if let Some(id_str) = cli.fork_session_id.as_deref() {
             let Some(startup_app_server) = app_server.as_mut() else {
                 unreachable!("app server should be initialized for --fork <id>");
@@ -1577,12 +1146,7 @@ async fn run_ratatui_app(
             let lookup = startup_draft
                 .run_until(
                     &mut tui,
-                    lookup_session_target_with_app_server(
-                        crate::resume_picker::SessionPickerAction::Fork,
-                        startup_app_server,
-                        &config,
-                        id_str,
-                    ),
+                    lookup_session_target_with_app_server(startup_app_server, &config, id_str),
                 )
                 .await;
             let target_session = match lookup {
@@ -1618,7 +1182,6 @@ async fn run_ratatui_app(
                 .run_until(
                     &mut tui,
                     lookup_latest_session_target_with_app_server(
-                        crate::resume_picker::SessionPickerAction::Fork,
                         startup_app_server,
                         &config,
                         filter_cwd,
@@ -1681,12 +1244,7 @@ async fn run_ratatui_app(
         let lookup = startup_draft
             .run_until(
                 &mut tui,
-                lookup_session_target_with_app_server(
-                    crate::resume_picker::SessionPickerAction::Resume,
-                    startup_app_server,
-                    &config,
-                    id_str,
-                ),
+                lookup_session_target_with_app_server(startup_app_server, &config, id_str),
             )
             .await;
         let target_session = match lookup {
@@ -1722,7 +1280,6 @@ async fn run_ratatui_app(
             .run_until(
                 &mut tui,
                 lookup_latest_session_target_with_app_server(
-                    crate::resume_picker::SessionPickerAction::Resume,
                     startup_app_server,
                     &config,
                     filter_cwd,
@@ -1808,7 +1365,7 @@ async fn run_ratatui_app(
     {
         Ok(ResolveCwdOutcome::Continue(cwd)) => cwd,
         Ok(ResolveCwdOutcome::ContinueAfterPrompt(cwd)) => {
-            // Another daemon client can change authentication while this prompt is open.
+            // Another server client can change authentication while this prompt is open.
             startup_account = None;
             Some(cwd)
         }
@@ -1852,7 +1409,6 @@ async fn run_ratatui_app(
                         cli_kv_overrides.clone(),
                         overrides.clone(),
                         loader_overrides.clone(),
-                        cloud_config_bundle.clone(),
                         strict_config,
                         fallback_cwd,
                         managed_worktree.as_ref(),
@@ -1868,7 +1424,6 @@ async fn run_ratatui_app(
                         cli_kv_overrides.clone(),
                         overrides.clone(),
                         loader_overrides.clone(),
-                        cloud_config_bundle.clone(),
                         strict_config,
                     ),
                 )
@@ -1894,14 +1449,12 @@ async fn run_ratatui_app(
     if config.model_provider_id != startup_model_provider {
         startup_account = None;
         if matches!(&app_server_target, AppServerTarget::Embedded) {
-            // Rebuild the embedded server with the final local configuration.
+            // App-server providers are fixed at startup, so onboarding cannot
+            // reuse a server initialized before it persisted another provider.
             shutdown_app_server_if_present(app_server.take()).await;
         }
     }
-    // Pinning a selected backend changes fallback eligibility, not the launch network policy.
     let uses_embedded_network_policy = app_server_target.uses_embedded_network_policy();
-    // A startup picker may consume its connection, but its selection keeps that backend.
-    app_server_target.preserve_selected_backend(&session_selection);
     let mut app_server = match app_server {
         Some(app_server) => app_server,
         None => match startup_draft
@@ -1914,7 +1467,6 @@ async fn run_ratatui_app(
                     cli_kv_overrides.clone(),
                     loader_overrides.clone(),
                     strict_config,
-                    cloud_config_bundle.clone(),
                     feedback.clone(),
                     log_db.clone(),
                     &mut state_db,
@@ -1971,25 +1523,14 @@ async fn run_ratatui_app(
     }
 
     // The shared overview does not open a workspace; session selection checks trust when needed.
-    if !matches!(
+    // Embedded fallback cannot show the overview and still needs normal startup initialization.
+    if (!matches!(
         session_selection,
         resume_picker::SessionSelection::AgentsOverview
-    ) && (!uses_remote_workspace || remote_cwd_override.is_some())
+    ) || !app_server_target.supports_command_center())
+        && (!uses_remote_workspace || remote_cwd_override.is_some())
     {
-        let resumed_thread = if matches!(app_server_target, AppServerTarget::LocalDaemon { .. })
-            && let resume_picker::SessionSelection::Resume(target) = &session_selection
-        {
-            Some(
-                startup_draft
-                    .run_until(
-                        &mut tui,
-                        app_server.thread_read(target.thread_id, /*include_turns*/ false),
-                    )
-                    .await??,
-            )
-        } else {
-            None
-        };
+        let resumed_thread = None;
         let trust_cwd = remote_cwd_override
             .as_deref()
             .unwrap_or(config.cwd.as_path());
@@ -2013,7 +1554,6 @@ async fn run_ratatui_app(
                 cli_kv_overrides.clone(),
                 overrides.clone(),
                 loader_overrides.clone(),
-                cloud_config_bundle.clone(),
                 strict_config,
                 Some(config.cwd.to_path_buf()),
                 managed_worktree.as_ref(),
@@ -2033,7 +1573,6 @@ async fn run_ratatui_app(
                     cli_kv_overrides.clone(),
                     loader_overrides.clone(),
                     strict_config,
-                    cloud_config_bundle.clone(),
                     feedback.clone(),
                     log_db.clone(),
                     &mut state_db,
@@ -2053,12 +1592,22 @@ async fn run_ratatui_app(
                 trust_decision_was_made = true;
             }
         } else if consent.should_exit {
+            if !app_server_target.supports_command_center() {
+                shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
+                return Ok(AppExitInfo {
+                    token_usage: crate::token_usage::TokenUsage::default(),
+                    thread_id: None,
+                    resume_hint: None,
+                    disconnect_info: None,
+                    update_action: None,
+                    exit_reason: ExitReason::UserRequested,
+                });
+            }
             if !uses_remote_workspace {
                 config = load_config_or_exit_with_fallback_cwd(
                     cli_kv_overrides.clone(),
                     overrides.clone(),
                     loader_overrides.clone(),
-                    cloud_config_bundle.clone(),
                     strict_config,
                     Some(current_cwd.to_path_buf()),
                     managed_worktree.as_ref(),
@@ -2128,12 +1677,7 @@ async fn run_ratatui_app(
     #[cfg(not(target_os = "windows"))]
     let should_prompt_windows_sandbox_nux_at_startup = false;
 
-    let Cli {
-        prompt,
-        shared,
-        daemon_cli_executable,
-        ..
-    } = cli;
+    let Cli { prompt, shared, .. } = cli;
     let images = shared.into_inner().images;
 
     // Persistent app-server resumes may attach to an already-running thread,
@@ -2231,16 +1775,14 @@ async fn run_ratatui_app(
 
     // Keep the large event-loop future out of the enclosing startup futures so session
     // transitions have enough stack headroom to rebuild configuration and the chat widget.
-    let app_result = boxed_future!(App::run(
+    let app_result = Box::pin(App::run(
         &mut tui,
         crate::app::backend_sessions::InitialBackendSessions::singleton(app_server),
         config,
         current_cwd.to_path_buf(),
-        backend_preference_context,
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
-        cloud_config_bundle,
         prompt,
         images,
         session_selection,
@@ -2253,11 +1795,8 @@ async fn run_ratatui_app(
         startup_elapsed_before_app,
         startup_bootstrap,
         startup_hooks_browser,
-        daemon_startup_warning,
-        managed_daemon,
         startup_draft,
         managed_worktree,
-        daemon_cli_executable,
     ))
     .await;
 
@@ -2361,14 +1900,12 @@ async fn load_config_or_exit(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
         overrides,
         loader_overrides,
-        cloud_config_bundle,
         strict_config,
         /*fallback_cwd*/ None,
         /*worktree*/ None,
@@ -2381,7 +1918,6 @@ async fn load_config_or_exit_with_fallback_cwd(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
     fallback_cwd: Option<PathBuf>,
     worktree: Option<&ManagedTuiWorktree>,
@@ -2391,7 +1927,6 @@ async fn load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
         overrides,
         loader_overrides,
-        cloud_config_bundle,
         strict_config,
         fallback_cwd,
         worktree,
@@ -2415,7 +1950,6 @@ async fn load_config_with_worktree_source_policy(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
     fallback_cwd: Option<PathBuf>,
     worktree: Option<&ManagedTuiWorktree>,
@@ -2425,7 +1959,6 @@ async fn load_config_with_worktree_source_policy(
         .harness_overrides(overrides.clone())
         .loader_overrides(loader_overrides.clone())
         .strict_config(strict_config)
-        .cloud_config_bundle(cloud_config_bundle.clone())
         .fallback_cwd(fallback_cwd)
         .build()
         .await
@@ -2436,7 +1969,6 @@ async fn load_config_with_worktree_source_policy(
                 &cli_kv_overrides,
                 &overrides,
                 &loader_overrides,
-                &cloud_config_bundle,
                 strict_config,
             )
             .await?;
@@ -2451,7 +1983,6 @@ async fn load_bootstrap_config_or_exit(
     cli_kv_overrides: Vec<(String, codex_config::TomlValue)>,
     loader_overrides: LoaderOverrides,
     strict_config: bool,
-    cloud_config_bundle: CloudConfigBundleLoader,
 ) -> ConfigTomlLoadResult {
     match load_config_toml_with_layer_stack(
         codex_home,
@@ -2460,7 +1991,6 @@ async fn load_bootstrap_config_or_exit(
         codex_config::ConfigLoadOptions {
             loader_overrides,
             strict_config,
-            cloud_config_bundle,
         },
     )
     .await
@@ -2485,52 +2015,9 @@ async fn load_bootstrap_config_or_exit(
     }
 }
 
-fn should_show_onboarding(
-    login_status: LoginStatus,
-    requires_openai_auth: bool,
-    show_trust_screen: bool,
-) -> bool {
-    if show_trust_screen {
-        return true;
-    }
-
-    should_show_login_screen(login_status, requires_openai_auth)
+fn should_show_onboarding(show_trust_screen: bool) -> bool {
+    show_trust_screen
 }
-
-fn should_show_login_screen(login_status: LoginStatus, requires_openai_auth: bool) -> bool {
-    // Only show the login screen for providers that actually require OpenAI auth
-    // (OpenAI or equivalents). For OSS/other providers, skip login entirely.
-    if !requires_openai_auth {
-        return false;
-    }
-
-    login_status == LoginStatus::NotAuthenticated
-}
-
-fn should_show_provider_setup_wizard(
-    login_status: LoginStatus,
-    requires_openai_auth: bool,
-    config: &Config,
-    app_server_target: &AppServerTarget,
-    feature: Feature,
-) -> bool {
-    let supported_target = match app_server_target {
-        AppServerTarget::Embedded => true,
-        AppServerTarget::LocalDaemon { .. } => feature == Feature::BedrockSetupWizard,
-        AppServerTarget::Remote { .. } => false,
-    };
-    supported_target
-        && should_show_login_screen(login_status, requires_openai_auth)
-        && config.features.enabled(feature)
-        && config.model_provider_id == "openai"
-        && config
-            .auth_config()
-            .is_login_method_allowed(ForcedLoginMethod::Api)
-}
-
-mod daemon_recovery;
-mod daemon_startup;
-mod daemon_telemetry;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

@@ -33,7 +33,7 @@ impl Config {
 
 /// Builds authentication settings from the locally resolved bootstrap config.
 ///
-/// Use this before fetching cloud requirements, when a full [`Config`] is not
+/// Use this before loading managed requirements, when a full [`Config`] is not
 /// yet available. Preserves the configured credential store, keyring backend,
 /// ChatGPT base URL, auth routing, and managed login/workspace restrictions.
 pub fn bootstrap_auth_config(
@@ -80,7 +80,7 @@ pub fn bootstrap_auth_config(
 
 /// Resolve the auth keyring backend from a partially loaded bootstrap config.
 ///
-/// This is intended for startup paths that must read auth before managed cloud
+/// This is intended for startup paths that must read auth before managed
 /// requirements can be loaded and before a full [`Config`] exists.
 pub fn resolve_bootstrap_auth_keyring_backend_kind(
     bootstrap_config: &ConfigTomlLoadResult,

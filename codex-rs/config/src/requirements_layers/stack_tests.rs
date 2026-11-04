@@ -101,7 +101,6 @@ fn top_level_values_use_toml_priority() {
 allowed_approval_policies = ["on-request"]
 allowed_sandbox_modes = ["workspace-write"]
 default_permissions = ":workspace"
-allow_remote_control = true
 unsafe_enforce_sqlite_journal_mode = false
 additional_developer_instructions = "Lower-priority instructions."
 
@@ -117,7 +116,6 @@ additional_developer_instructions = "Lower-priority instructions."
 allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
-allow_remote_control = false
 unsafe_enforce_sqlite_journal_mode = true
 additional_developer_instructions = ""
 
@@ -137,7 +135,6 @@ additional_developer_instructions = ""
 allowed_approval_policies = ["never"]
 allowed_sandbox_modes = ["read-only"]
 default_permissions = ":read-only"
-allow_remote_control = false
 unsafe_enforce_sqlite_journal_mode = true
 additional_developer_instructions = ""
 
@@ -493,7 +490,6 @@ fn composition_strategy_applies_to_non_cloud_layers() {
                 format!(
                     r#"
 allowed_approval_policies = ["on-request"]
-allow_remote_control = true
 
 [features]
 shared = false
@@ -513,7 +509,6 @@ deny_read = [{low_path:?}]
                 format!(
                     r#"
 allowed_approval_policies = ["never"]
-allow_remote_control = false
 
 [features]
 shared = true
@@ -538,7 +533,6 @@ deny_read = [{high_path:?}]
         expected_requirements(format!(
             r#"
 allowed_approval_policies = ["never"]
-allow_remote_control = false
 
 [features]
 shared = true
@@ -563,10 +557,6 @@ deny_read = [{high_path:?}, {low_path:?}]
             vec![AskForApproval::Never],
             mdm_source.clone()
         ))
-    );
-    assert_eq!(
-        composed.allow_remote_control,
-        Some(Sourced::new(/*value*/ false, mdm_source))
     );
 }
 
@@ -867,32 +857,6 @@ fn network_aliases_merge_with_layer_precedence_and_sources() {
                 expected_source,
             ))
         );
-    }
-}
-
-#[test]
-fn permissions_network_conflicts_with_top_level_network_across_layers() {
-    for table in ["network_proxy", "experimental_network"] {
-        for (root_first, root_values) in [(true, "enabled = true"), (false, "")] {
-            let root = layer("root", "Root", &format!("[{table}]\n{root_values}"));
-            let permissions = layer(
-                "permissions",
-                "Permissions",
-                "[permissions.network]\nenabled = true",
-            );
-            let root_source = root.source.clone();
-            let permissions_source = permissions.source.clone();
-            let layers = if root_first {
-                vec![root, permissions]
-            } else {
-                vec![permissions, root]
-            };
-            let err = compose_requirements_for_hostname(layers, /*hostname*/ None)
-                .expect_err("network requirement surfaces must not coexist")
-                .to_string();
-            assert!(err.contains(&root_source.to_string()), "{err}");
-            assert!(err.contains(&permissions_source.to_string()), "{err}");
-        }
     }
 }
 
@@ -1562,75 +1526,6 @@ deny_read = [{high_path:?}, {low_path:?}]
 
 [permissions.managed-standard]
 description = "High profile"
-extends = ":workspace"
-"#
-        ))
-    );
-}
-
-#[test]
-fn permissions_network_merges_with_higher_precedence_filesystem_requirements() {
-    let denied_path = if cfg!(windows) {
-        "C:\\secret"
-    } else {
-        "/secret"
-    };
-    let low = layer(
-        "req_low",
-        "Low",
-        "[permissions.network]\nenabled = true\n[permissions.managed]\nextends = ':workspace'",
-    );
-    let high = layer(
-        "req_high",
-        "High",
-        &format!(
-            r#"
-[permissions.filesystem]
-deny_read = [{denied_path:?}]
-
-[permissions.network.domains]
-'example.com' = 'allow'
-"#
-        ),
-    );
-    let network_source = RequirementSource::composite([high.source.clone(), low.source.clone()]);
-    let filesystem_source = high.source.clone();
-    let composed = compose_requirements_for_hostname(
-        [
-            low,
-            high,
-            layer(
-                "profile",
-                "Profile",
-                "[permissions.other]\nextends = ':workspace'",
-            ),
-        ],
-        /*hostname*/ None,
-    )
-    .expect("compose requirements")
-    .expect("requirements present");
-    let effective = crate::ConfigRequirements::try_from(composed.clone()).expect("requirements");
-    assert_eq!(effective.network.expect("network").source, network_source);
-    assert_eq!(
-        effective.filesystem.expect("filesystem").source,
-        filesystem_source
-    );
-    assert_eq!(
-        composed.into_toml(),
-        expected_requirements(format!(
-            r#"
-[permissions.filesystem]
-deny_read = [{denied_path:?}]
-
-[permissions.network]
-enabled = true
-[permissions.network.domains]
-'example.com' = 'allow'
-
-[permissions.other]
-extends = ":workspace"
-
-[permissions.managed]
 extends = ":workspace"
 "#
         ))

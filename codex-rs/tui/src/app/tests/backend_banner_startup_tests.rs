@@ -28,7 +28,7 @@ async fn backend_banner_fallback_applies_before_initial_and_queued_startup_promp
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let (mut server, requests, proxy) = session_lifecycle_requests::start_recording_app_server(
-        &config, /*blocked_thread_list*/ None, /*failed_thread_name*/ None,
+        &config, /*failed_thread_name*/ None,
     )
     .await?;
     let generation = app.rate_limit_hard_stop_generation;

@@ -16,7 +16,6 @@ use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::PermissionProfileSnapshot;
 use crate::pager_overlay::TranscriptOverlay;
 use crate::status::StatusAccountDisplay;
-use crate::status::remote_connection::RemoteConnectionStatus;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use crate::token_usage::TokenUsage;
@@ -795,7 +794,6 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
         &config,
         /*requires_openai_auth*/ false,
         Some("server-ollama"),
-        /*remote_connection*/ None,
         test_status_account_display().as_ref(),
         /*token_info*/ None,
         &usage,
@@ -826,7 +824,6 @@ async fn status_uses_server_provider_id_and_auth_requirement() {
         &config,
         /*requires_openai_auth*/ true,
         Some("server-openai"),
-        /*remote_connection*/ None,
         test_status_account_display().as_ref(),
         /*token_info*/ None,
         &usage,
@@ -1516,7 +1513,6 @@ async fn status_wraps_long_paths_and_session_ids_without_losing_text() {
         &config,
         /*requires_openai_auth*/ true,
         /*model_provider_id*/ None,
-        /*remote_connection*/ None,
         /*account_display*/ None,
         /*token_info*/ None,
         &usage,
@@ -1734,53 +1730,38 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
         .with_ymd_and_hms(2024, 2, 3, 4, 5, 6)
         .single()
         .expect("timestamp");
-    for (is_local_daemon, snapshot) in [
-        (
-            None,
-            "status_snapshot_uses_default_reasoning_when_config_empty",
-        ),
-        (Some(false), "status_snapshot_remote_server"),
-        (Some(true), "status_snapshot_local_background_server"),
-    ] {
-        let remote_connection = is_local_daemon.map(|is_local_daemon| RemoteConnectionStatus {
-            address: "unix:///tmp/codex-home/app-server-control/app-server-control.sock"
-                .to_string(),
-            version: "v0.133.0".to_string(),
-            is_local_daemon,
-            is_managed_daemon: is_local_daemon,
-        });
-
-        let model_slug = get_model_offline_for_tests(config.model.as_deref());
-        let token_info = token_info_for(&model_slug, &config, &usage);
-        let (composite, _) = new_status_output_with_rate_limits_handle(
-            &config,
-            /*requires_openai_auth*/ true,
-            /*model_provider_id*/ None,
-            remote_connection.as_ref(),
-            account_display.as_ref(),
-            Some(&token_info),
-            &usage,
-            &None,
-            /*thread_name*/ None,
-            /*forked_from*/ None,
-            &[],
-            None,
-            now,
-            &model_slug,
-            /*collaboration_mode*/ None,
-            /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
-            "<none>".to_string(),
-            /*refreshing_rate_limits*/ false,
-        );
-        let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
-        if cfg!(windows) {
-            for line in &mut rendered_lines {
-                *line = line.replace('\\', "/");
-            }
+    let model_slug = get_model_offline_for_tests(config.model.as_deref());
+    let token_info = token_info_for(&model_slug, &config, &usage);
+    let (composite, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        /*requires_openai_auth*/ true,
+        /*model_provider_id*/ None,
+        account_display.as_ref(),
+        Some(&token_info),
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[],
+        None,
+        now,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
+        "<none>".to_string(),
+        /*refreshing_rate_limits*/ false,
+    );
+    let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
+    if cfg!(windows) {
+        for line in &mut rendered_lines {
+            *line = line.replace('\\', "/");
         }
-        let sanitized = sanitize_directory(rendered_lines).join("\n");
-        assert_snapshot!(snapshot, sanitized);
     }
+    let sanitized = sanitize_directory(rendered_lines).join("\n");
+    assert_snapshot!(
+        "status_snapshot_uses_default_reasoning_when_config_empty",
+        sanitized
+    );
 }
 
 #[tokio::test]
@@ -1868,7 +1849,6 @@ async fn transcript_overlay_remeasures_status_after_rate_limit_refresh() {
         &config,
         /*requires_openai_auth*/ true,
         /*model_provider_id*/ None,
-        /*remote_connection*/ None,
         /*account_display*/ None,
         /*token_info*/ None,
         &usage,

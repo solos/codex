@@ -63,9 +63,7 @@ fn snapshots_local_audio_user_input_with_supported_mime_types() -> Result<()> {
 
         assert_eq!(
             UserInput::Audio {
-                audio: AudioReference::Inline {
-                    audio_url: format!("data:{mime};base64,YXVkaW8=")
-                },
+                audio_url: format!("data:{mime};base64,YXVkaW8="),
             },
             input
         );

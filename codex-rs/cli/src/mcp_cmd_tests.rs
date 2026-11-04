@@ -120,7 +120,7 @@ async fn config_with_application_network(
     )?;
     let requirements_path = home.join("requirements.toml");
     std::fs::write(&requirements_path, requirements)?;
-    crate::cloud_config::load_config(
+    crate::config_load::load_config(
         &codex_utils_cli::CliConfigOverrides::default(),
         codex_core::config::LoaderOverrides {
             system_config_path: Some(home.join("absent-system-config.toml")),

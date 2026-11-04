@@ -434,10 +434,6 @@ async fn managed_browser_import_denial_survives_user_and_session_config() {
         ConfigLoadOptions {
             loader_overrides,
             strict_config: false,
-            cloud_config_bundle:
-                crate::test_support::CloudConfigBundleFixture::enterprise_requirement(deny)
-                    .add_enterprise_requirement("[in_app_browser]")
-                    .into_loader(),
         },
         &crate::NoopThreadConfigLoader,
     )
@@ -978,17 +974,14 @@ fn local_layer_projection_preserves_override_blockers_and_cloud_position() {
                     "[a]\nunrequested=true",
                 ),
             ],
-            cloud_insertion_index: 1,
         },
         requirements: LocalTomlLayerStack {
             layers: Vec::<LocalTomlLayer<RequirementSource>>::new(),
-            cloud_insertion_index: 0,
         },
     };
 
     let only_user = layers.clone().project(&[vec!["only_user".into()]], &[]);
     assert_eq!(only_user.config.layers.len(), 1);
-    assert_eq!(only_user.config.cloud_insertion_index, 0);
 
     let projected = layers.project(
         &[
@@ -1015,7 +1008,6 @@ fn local_layer_projection_preserves_override_blockers_and_cloud_position() {
                 layer(ConfigLayerSource::SessionFlags, "a=2"),
                 layer(ConfigLayerSource::LegacyManagedConfigTomlFromMdm, "[a]"),
             ],
-            cloud_insertion_index: 1,
         }
     );
 
@@ -1106,8 +1098,6 @@ async fn local_layers_keep_raw_paths_order_and_legacy_requirements() {
             managed_dir.clone(),
         ]
     );
-    assert_eq!(layers.config.cloud_insertion_index, 1);
-    assert_eq!(layers.requirements.cloud_insertion_index, 1);
     assert_eq!(
         (
             layers.config.layers[2].toml.clone(),

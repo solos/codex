@@ -19,9 +19,7 @@ pub use application::load_local_application_requirements;
 
 use self::layer_io::LoadedConfigLayers;
 use crate::CONFIG_TOML_FILE;
-use crate::CloudConfigBundleLayers;
 use crate::ConfigLayerSource;
-use crate::ConfigRequirements;
 use crate::ProfileV2Name;
 use crate::RequirementsLayerEntry;
 use crate::config_requirements::RequirementSource;
@@ -113,7 +111,6 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 ///
 /// - system    `/etc/codex/requirements.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
-/// - cloud:    enterprise-managed cloud config bundle requirements
 /// - legacy:   `/etc/codex/managed_config.toml` (Unix) reinterpreted as
 ///   requirements.toml
 /// - admin:    managed preferences (*)
@@ -127,7 +124,6 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - admin:    managed preferences (*)
 /// - system    `/etc/codex/config.toml` (Unix) or
 ///   `%ProgramData%\OpenAI\Codex\config.toml` (Windows)
-/// - cloud     enterprise-managed cloud config bundle fragments
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
@@ -155,7 +151,6 @@ pub async fn load_config_layers_state(
     let ConfigLoadOptions {
         loader_overrides: overrides,
         strict_config,
-        cloud_config_bundle,
     } = options.into();
     let packaged_defaults_layer = if let Some(file) = &overrides.packaged_defaults_path {
         let config = layer_io::read_config_from_path(
@@ -205,38 +200,12 @@ pub async fn load_config_layers_state(
     let ignore_project_config = overrides.ignore_project_config;
     let ignore_user_and_project_exec_policy_rules =
         overrides.ignore_user_and_project_exec_policy_rules;
-    let mut bundle_requirements_layers = Vec::new();
-    let mut cloud_config_layers = Vec::new();
-    let mut cloud_config_binding = None;
-    let mut applied_config_server = None;
-
-    if !overrides.ignore_managed_requirements {
-        let snapshot = cloud_config_bundle.get_snapshot().await;
-        cloud_config_binding = snapshot.binding;
-        applied_config_server = snapshot.config_server;
-        if let Some(bundle) = snapshot.bundle.map_err(io::Error::other)? {
-            let cloud_config_base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
-            let bundle_layers = if strict_config {
-                CloudConfigBundleLayers::from_bundle_strict_config(bundle, &cloud_config_base_dir)?
-            } else {
-                CloudConfigBundleLayers::from_bundle(bundle, &cloud_config_base_dir)?
-            };
-            let CloudConfigBundleLayers {
-                enterprise_managed_config,
-                enterprise_managed_requirements,
-            } = bundle_layers;
-            bundle_requirements_layers = enterprise_managed_requirements;
-            cloud_config_layers = enterprise_managed_config;
-        }
-    }
-
     let (config_requirements_toml, loaded_config_layers, requirements_layers) =
         managed_requirements::load_requirements_from_sources(
             fs,
             codex_home,
             &overrides,
             strict_config,
-            bundle_requirements_layers,
         )
         .await?;
     let mut startup_warnings = loaded_config_layers.startup_warnings.clone();
@@ -288,8 +257,6 @@ pub async fn load_config_layers_state(
     )
     .await?;
     layers.push(system_layer);
-    layers.extend(cloud_config_layers);
-
     // Add the base user config layer. When profile-v2 is selected, add the
     // profile config as a second user layer on top so the profile only needs to
     // contain overrides.
@@ -340,7 +307,6 @@ pub async fn load_config_layers_state(
         );
     }
 
-    let requirements = ConfigRequirements::try_from(config_requirements_toml.clone())?;
     let mut is_projectless = false;
     if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
@@ -405,7 +371,7 @@ pub async fn load_config_layers_state(
         };
         apply_credential_broker_requirements(
             &mut project_trust_context,
-            &requirements,
+            &config_requirements_toml,
             &trusted_broker_config,
         );
         let project_layers = load_project_layers(
@@ -498,13 +464,12 @@ pub async fn load_config_layers_state(
         return Err(err);
     }
 
-    let mut config_layer_stack =
-        ConfigLayerStack::new(layers, requirements, config_requirements_toml.into_toml())?
-            .with_cloud_config_binding(cloud_config_binding)
-            .with_applied_config_server(applied_config_server)
-            .with_user_and_project_exec_policy_rules_ignored(
-                ignore_user_and_project_exec_policy_rules,
-            );
+    let mut config_layer_stack = ConfigLayerStack::new(
+        layers,
+        config_requirements_toml.clone().try_into()?,
+        config_requirements_toml.into_toml(),
+    )?
+    .with_user_and_project_exec_policy_rules_ignored(ignore_user_and_project_exec_policy_rules);
     config_layer_stack.is_projectless = is_projectless;
     startup_warnings.extend(ignored_config_warning(
         &config_layer_stack,
@@ -663,7 +628,6 @@ fn validate_cli_overrides_strictly(
 ) -> io::Result<()> {
     let _guard = AbsolutePathBufGuard::new(base_dir);
     let ignored_path = ignored_toml_value_fields::<ConfigToml>(cli_overrides_layer.clone())
-        .unwrap_or_default()
         .into_iter()
         .chain(unknown_tui_toml_value_path(cli_overrides_layer))
         .next()
@@ -1009,7 +973,7 @@ enum CredentialBrokerProjectState {
 
 fn apply_credential_broker_requirements(
     context: &mut ProjectTrustContext,
-    requirements: &ConfigRequirements,
+    requirements: &crate::ConfigRequirementsWithSources,
     trusted_broker_config: &TomlValue,
 ) {
     let credential_masking_enabled = requirements
@@ -1635,7 +1599,7 @@ pub fn resolve_relative_paths_in_config_toml(
     }
     // The typed round trip resolves AbsolutePathBuf fields against this layer's directory.
     let _guard = AbsolutePathBufGuard::new(base_dir);
-    let Ok(resolved) = ConfigToml::try_from(value_from_config_toml.clone()) else {
+    let Ok(resolved) = value_from_config_toml.clone().try_into::<ConfigToml>() else {
         return Ok(value_from_config_toml);
     };
     drop(_guard);

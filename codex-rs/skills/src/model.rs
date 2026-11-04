@@ -16,7 +16,6 @@ pub struct SkillMetadata {
     pub path_to_skills_md: PathUri,
     pub scope: SkillScope,
     pub plugin_id: Option<String>,
-    pub remote_plugin_id: Option<String>,
 }
 
 impl SkillMetadata {

@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use codex_exec_server::EnvironmentAccess;
 use codex_extension_api::ContextualUserFragment;
 use codex_skills::SkillMetadata;
 use codex_skills::normalize_skill_path;
@@ -12,7 +11,7 @@ use crate::render::truncate_main_prompt_contents;
 /// Host skill prompts already supplied or superseded by an extension.
 ///
 /// Core preserves its host skill invocation lifecycle while avoiding duplicate
-/// prompts and retaining executor/cloud skill precedence.
+/// prompts and retaining executor skill precedence.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InjectedHostSkillPrompts {
     paths: HashSet<String>,
@@ -67,11 +66,7 @@ impl HostSkillsSnapshot {
         skip_all,
         fields(selected_skill_count = selected_skills.len())
     )]
-    pub async fn load_skill_prompts(
-        &self,
-        selected_skills: &[SkillMetadata],
-        accessors: &[&dyn EnvironmentAccess],
-    ) -> HostSkillPrompts {
+    pub async fn load_skill_prompts(&self, selected_skills: &[SkillMetadata]) -> HostSkillPrompts {
         let mut prompts = HostSkillPrompts {
             fragments: Vec::with_capacity(selected_skills.len()),
             injected: Vec::with_capacity(selected_skills.len()),
@@ -79,7 +74,7 @@ impl HostSkillsSnapshot {
         };
 
         for skill in selected_skills {
-            match self.read_skill_text(skill, accessors).await {
+            match self.read_skill_text(skill).await {
                 Ok(contents) => {
                     let (contents, truncated) = if self.outcome().is_agent_plugin_skill(skill) {
                         truncate_main_prompt_contents(&contents)

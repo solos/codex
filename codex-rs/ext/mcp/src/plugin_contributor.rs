@@ -1,4 +1,4 @@
-//! Coordinates cloud turn refreshes and executor MCP contributions with thread-owned catalogs.
+//! Coordinates executor MCP contributions with thread-owned catalogs.
 //!
 //! One contributor is registered for both lifecycles. Provider instances are shared, while
 //! catalogs and executor metadata live together in thread extension data.
@@ -14,9 +14,7 @@ pub(crate) struct PluginContributor {
     pub(crate) providers: PluginProviders,
 }
 
-/// Installs one coordinator for cloud turn-start and executor MCP callbacks.
-/// The optional cloud provider never disables executor plugins, and Core's plugin policy applies
-/// to both paths.
+/// Installs one coordinator for executor MCP callbacks.
 pub fn install_plugin_providers(
     builder: &mut ExtensionRegistryBuilder<Config>,
     providers: PluginProviders,

@@ -9,9 +9,7 @@ use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 
-use codex_code_mode_protocol::CodeModeSessionOptions;
-use codex_code_mode_protocol::TerminateRequest;
-use codex_code_mode_protocol::host::BOUNDED_OUTPUT_CAPABILITY;
+use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::host::Capability;
 use codex_code_mode_protocol::host::CapabilitySet;
 use codex_code_mode_protocol::host::ClientHello;
@@ -29,15 +27,9 @@ use codex_code_mode_protocol::host::RequestId;
 use codex_code_mode_protocol::host::SESSION_RESOURCE_LIMITS_CAPABILITY;
 use codex_code_mode_protocol::host::SessionId;
 use codex_code_mode_protocol::host::SupportedProtocolVersions;
-use codex_code_mode_protocol::host::WireContentItem;
 use codex_code_mode_protocol::host::WireExecuteRequest;
-use codex_code_mode_protocol::host::WireOutputTruncation;
 use codex_code_mode_protocol::host::WireResult;
-use codex_code_mode_protocol::host::WireRuntimeResponse;
-use codex_code_mode_protocol::host::WireWaitOutcome;
-use codex_code_mode_protocol::host::WireWaitRequest;
 use pretty_assertions::assert_eq;
-use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
@@ -101,20 +93,6 @@ fn execute_request(source: &str) -> WireExecuteRequest {
         source: source.to_string(),
         yield_time_ms: Some(60_000),
         max_output_tokens: Some(1_000),
-    }
-}
-
-async fn next_response(reader: &mut FramedReader<impl AsyncRead + Unpin>) -> HostToClient {
-    loop {
-        match reader
-            .read()
-            .await
-            .expect("host response")
-            .expect("host connected")
-        {
-            HostToClient::CellClosed { .. } => {}
-            message => return message,
-        }
     }
 }
 
@@ -280,207 +258,50 @@ impl AsyncWrite for BlockingWriter {
 }
 
 #[tokio::test]
-async fn supported_capabilities_are_negotiated_when_optional_or_required() {
-    for capability in [
-        SESSION_RESOURCE_LIMITS_CAPABILITY,
-        BOUNDED_OUTPUT_CAPABILITY,
-    ] {
-        let capability = Capability::new(capability).expect("supported capability");
-        let host_capabilities =
-            CapabilitySet::try_new([capability.clone()]).expect("host capabilities");
+async fn session_resource_limits_are_negotiated_when_optional_or_required() {
+    let resource_limits_capability =
+        Capability::new(SESSION_RESOURCE_LIMITS_CAPABILITY).expect("resource limits capability");
+    let resource_limits =
+        CapabilitySet::try_new([resource_limits_capability.clone()]).expect("host capabilities");
 
-        for (required, optional) in [
-            (
-                CapabilitySet::empty(),
-                CapabilitySet::try_new([capability]).expect("optional capabilities"),
-            ),
-            (host_capabilities.clone(), CapabilitySet::empty()),
-        ] {
-            let (host_stream, client_stream) = tokio::io::duplex(/*max_buf_size*/ 1024);
-            let (host_reader, host_writer) = tokio::io::split(host_stream);
-            let (client_reader, client_writer) = tokio::io::split(client_stream);
-            let host = tokio::spawn(run(host_reader, host_writer));
-            let mut reader = FramedReader::new(client_reader);
-            let mut writer = FramedWriter::new(client_writer);
-
-            writer
-                .write(&ClientToHost::ClientHello(
-                    ClientHello::new(
-                        SupportedProtocolVersions::try_new([ProtocolVersion::V1])
-                            .expect("supported versions"),
-                        required,
-                        optional,
-                    )
-                    .expect("client hello"),
-                ))
-                .await
-                .expect("write hello");
-            assert_eq!(
-                reader.read::<HostToClient>().await.expect("host hello"),
-                Some(HostToClient::HostHello(HostHello::new(
-                    ProtocolVersion::V1,
-                    host_capabilities.clone(),
-                )))
-            );
-
-            drop(writer);
-            drop(reader);
-            host.await.expect("host task").expect("host connection");
-        }
-    }
-}
-
-#[tokio::test]
-async fn output_selection_is_per_session() {
-    let (host_stream, client_stream) = tokio::io::duplex(/*max_buf_size*/ 4096);
-    let (host_reader, host_writer) = tokio::io::split(host_stream);
-    let (client_reader, client_writer) = tokio::io::split(client_stream);
-    let host = tokio::spawn(run(host_reader, host_writer));
-    let mut reader = FramedReader::new(client_reader);
-    let mut writer = FramedWriter::new(client_writer);
-    writer
-        .write(&client_hello([ProtocolVersion::V1], CapabilitySet::empty()))
-        .await
-        .expect("write hello");
-    assert_eq!(
-        reader.read::<HostToClient>().await.expect("host hello"),
-        Some(HostToClient::HostHello(HostHello::new(
-            ProtocolVersion::V1,
+    for (required, optional) in [
+        (
             CapabilitySet::empty(),
-        )))
-    );
-    for (id, name, output_truncation) in [
-        (1, "client", None),
-        (2, "server", Some(WireOutputTruncation::Server)),
+            CapabilitySet::try_new([resource_limits_capability]).expect("optional capabilities"),
+        ),
+        (resource_limits.clone(), CapabilitySet::empty()),
     ] {
-        writer
-            .write(&ClientToHost::Request {
-                id: request_id(id),
-                request: HostRequest::OpenSession {
-                    session_id: session_id(name),
-                    cell_execution_limits: None,
-                    output_truncation,
-                },
-            })
-            .await
-            .expect("open session");
-        assert_eq!(
-            reader.read::<HostToClient>().await.expect("session ready"),
-            Some(HostToClient::Response {
-                id: request_id(id),
-                result: WireResult::Ok {
-                    value: HostResponse::SessionReady {
-                        session_id: session_id(name),
-                    },
-                },
-            })
-        );
-    }
+        let (host_stream, client_stream) = tokio::io::duplex(/*max_buf_size*/ 1024);
+        let (host_reader, host_writer) = tokio::io::split(host_stream);
+        let (client_reader, client_writer) = tokio::io::split(client_stream);
+        let host = tokio::spawn(run(host_reader, host_writer));
+        let mut reader = FramedReader::new(client_reader);
+        let mut writer = FramedWriter::new(client_writer);
 
-    for (id, name, expected_text, expected_wait) in [
-        (
-            3,
-            "client",
-            "0123456789012345678901234567890123456789",
-            "01234567890123456789012345678901234567890123456789012345678901234567890123456789",
-        ),
-        (
-            4,
-            "server",
-            "Warning: truncated output (original token count: 10)\nTotal output lines: 1\n\n0123456789…5 tokens truncated…0123456789",
-            "Warning: truncated output (original token count: 20)\nTotal output lines: 1\n\n01234567890123…13 tokens truncated…67890123456789",
-        ),
-    ] {
-        let mut request = execute_request(
-            "text('0123456789'.repeat(4)); yield_control(); text('0123456789'.repeat(8));",
-        );
-        request.max_output_tokens = Some(5);
         writer
-            .write(&ClientToHost::Request {
-                id: request_id(id),
-                request: HostRequest::Execute {
-                    session_id: session_id(name),
-                    request,
-                },
-            })
+            .write(&ClientToHost::ClientHello(
+                ClientHello::new(
+                    SupportedProtocolVersions::try_new([ProtocolVersion::V1])
+                        .expect("supported versions"),
+                    required,
+                    optional,
+                )
+                .expect("client hello"),
+            ))
             .await
-            .expect("execute");
-        // Admission is sent before start_cell can send its initial result.
-        assert!(matches!(
-            next_response(&mut reader).await,
-            HostToClient::Response {
-                id: actual_id,
-                result: WireResult::Ok { value: HostResponse::ExecutionStarted { .. } },
-            } if actual_id == request_id(id)
-        ));
-        let HostToClient::InitialResponse {
-            id: actual_id,
-            result:
-                WireResult::Ok {
-                    value:
-                        WireRuntimeResponse::Yielded {
-                            cell_id,
-                            content_items,
-                            ..
-                        },
-                },
-        } = next_response(&mut reader).await
-        else {
-            panic!("expected initial yield");
-        };
-        assert_eq!(actual_id, request_id(id));
+            .expect("write hello");
         assert_eq!(
-            content_items,
-            vec![WireContentItem::InputText {
-                text: expected_text.to_string()
-            }]
+            reader.read::<HostToClient>().await.expect("host hello"),
+            Some(HostToClient::HostHello(HostHello::new(
+                ProtocolVersion::V1,
+                resource_limits.clone(),
+            )))
         );
-        writer
-            .write(&ClientToHost::Request {
-                id: request_id(id + 2),
-                request: HostRequest::Wait {
-                    session_id: session_id(name),
-                    request: WireWaitRequest {
-                        cell_id,
-                        yield_time_ms: 60_000,
-                    },
-                    // A supplied budget only affects Server mode and belongs
-                    // to this observation, not the preceding exec.
-                    max_output_tokens: Some(7),
-                },
-            })
-            .await
-            .expect("wait");
-        let HostToClient::Response {
-            id: actual_id,
-            result:
-                WireResult::Ok {
-                    value:
-                        HostResponse::WaitCompleted {
-                            outcome:
-                                WireWaitOutcome::LiveCell(WireRuntimeResponse::Result {
-                                    content_items,
-                                    error_text,
-                                    ..
-                                }),
-                        },
-                },
-        } = next_response(&mut reader).await
-        else {
-            panic!("expected final wait");
-        };
-        assert_eq!(actual_id, request_id(id + 2));
-        assert_eq!(error_text, None);
-        assert_eq!(
-            content_items,
-            vec![WireContentItem::InputText {
-                text: expected_wait.to_string()
-            }]
-        );
+
+        drop(writer);
+        drop(reader);
+        host.await.expect("host task").expect("host connection");
     }
-    drop(writer);
-    drop(reader);
-    host.await.expect("host task").expect("host connection");
 }
 
 #[tokio::test]
@@ -700,7 +521,10 @@ async fn execute_request_id_remains_active_until_initial_response() {
     });
     let session_id = session_id("session-1");
     state
-        .open_session(session_id.clone(), CodeModeSessionOptions::default())
+        .open_session(
+            session_id.clone(),
+            CodeModeSessionCellExecutionLimits::default(),
+        )
         .expect("open session");
     let request_id = request_id(/*value*/ 1);
 
@@ -737,10 +561,7 @@ async fn execute_request_id_remains_active_until_initial_response() {
     state
         .session(&session_id)
         .expect("session")
-        .terminate(TerminateRequest {
-            cell_id: cell_id.into(),
-            max_output_tokens: None,
-        })
+        .terminate(codex_code_mode_protocol::CellId::from(cell_id).into())
         .await
         .expect("terminate cell");
     state.disconnect().await;
@@ -764,7 +585,10 @@ async fn active_cell_limit_rejects_execute_without_disconnecting() {
     };
     let session_id = session_id("session-1");
     state
-        .open_session(session_id.clone(), CodeModeSessionOptions::default())
+        .open_session(
+            session_id.clone(),
+            CodeModeSessionCellExecutionLimits::default(),
+        )
         .expect("open session");
     let request_id = request_id(/*value*/ 1);
 

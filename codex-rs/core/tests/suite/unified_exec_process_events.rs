@@ -2,7 +2,6 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::TurnInputRequest;
 use codex_exec_server::ExecParams;
 use codex_features::Feature;
@@ -31,7 +30,6 @@ use codex_protocol::protocol::TurnEnvironmentRequest;
 use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -1065,53 +1063,24 @@ async fn exec_command_consumes_pushed_remote_process_events(
     ));
     let mut builder = test_codex().with_exec_server_url(exec_server_url);
     if managed_network_configured {
-        let cloud_config_bundle = match managed_network {
-            ManagedNetworkScenario::Enabled {
-                policy_callbacks: true,
-            } => managed_network_requirements_loader(),
-            ManagedNetworkScenario::Enabled {
-                policy_callbacks: false,
-            } => CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[experimental_network]
-enabled = true
-allow_local_binding = true
-managed_allowed_domains_only = true
-
-[experimental_network.domains]
-"allowed.example.com" = "allow"
-"#,
-            ),
-            ManagedNetworkScenario::Disabled => {
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                    r#"
-[experimental_network]
-enabled = false
-"#,
-                )
-            }
-            ManagedNetworkScenario::None => unreachable!("managed network is not configured"),
-        };
-        builder = builder
-            .with_cloud_config_bundle(cloud_config_bundle)
-            .with_pre_build_hook(move |home| {
-                let provider_config = if matches!(
-                    scenario,
-                    PushedExecScenario::CredentialMaskingCustomProvidersUnsupported
-                ) {
-                    r#"[features.network_proxy.credentials.vendor]
+        builder = builder.with_pre_build_hook(move |home| {
+            let provider_config = if matches!(
+                scenario,
+                PushedExecScenario::CredentialMaskingCustomProvidersUnsupported
+            ) {
+                r#"[features.network_proxy.credentials.vendor]
 env = ["VENDOR_TOKEN"]
 patterns = ["vendor_[a-z]{8}"]
 url_prefix_from_env = "VENDOR_BASE_URL"
 auth = ["bearer"]
 "#
-                } else {
-                    ""
-                };
-                fs::write(
-                    home.join("config.toml"),
-                    format!(
-                        r#"default_permissions = "workspace"
+            } else {
+                ""
+            };
+            fs::write(
+                home.join("config.toml"),
+                format!(
+                    r#"default_permissions = "workspace"
 
 [permissions.workspace.filesystem]
 ":minimal" = "read"
@@ -1135,17 +1104,22 @@ type = "command"
 command = "unused"
 timeout = 900
 "#
-                    ),
-                )
-                .expect("write managed-network test config");
-            });
+                ),
+            )
+            .expect("write managed-network test config");
+        });
     }
     if matches!(scenario, PushedExecScenario::OutputOpenWhenCancelled) {
-        builder = builder.with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                "[features]\nunified_exec = false\nshell_tool = true\n",
-            ),
-        );
+        builder = builder.with_config(|config| {
+            config
+                .features
+                .disable(Feature::UnifiedExec)
+                .expect("disable unified exec");
+            config
+                .features
+                .enable(Feature::ShellTool)
+                .expect("enable shell tool");
+        });
     }
     let mut builder = builder.with_config(move |config| {
         config.project_doc_max_bytes = 0;

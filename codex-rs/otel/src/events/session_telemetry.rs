@@ -27,8 +27,6 @@ use crate::metrics::TOOL_CALL_COUNT_METRIC;
 use crate::metrics::TOOL_CALL_DURATION_METRIC;
 use crate::metrics::TURN_COST_MICROUSD_METRIC;
 use crate::metrics::TURN_TTFT_DURATION_METRIC;
-use crate::metrics::WEBSOCKET_CONNECT_COUNT_METRIC;
-use crate::metrics::WEBSOCKET_CONNECT_DURATION_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_COUNT_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_DURATION_METRIC;
 use crate::metrics::WEBSOCKET_REQUEST_COUNT_METRIC;
@@ -122,7 +120,6 @@ pub struct SessionTelemetryMetadata {
 #[derive(Debug, Clone)]
 pub struct SessionTelemetry {
     tool_result_log_config: ToolResultLogConfig,
-    log_sse_deltas: bool,
     pub(crate) metadata: SessionTelemetryMetadata,
     pub(crate) metrics: Option<MetricsClient>,
     pub(crate) metrics_use_metadata_tags: bool,
@@ -145,12 +142,6 @@ pub fn bounded_product_sku(product_sku: Option<&str>) -> Option<&'static str> {
 }
 
 impl SessionTelemetry {
-    /// Suppress successful SSE delta logs while retaining errors and all metrics.
-    pub fn without_sse_delta_logs(mut self) -> Self {
-        self.log_sse_deltas = false;
-        self
-    }
-
     pub fn with_tool_result_log_config(mut self, config: ToolResultLogConfig) -> Self {
         self.tool_result_log_config = config;
         self
@@ -618,7 +609,6 @@ impl SessionTelemetry {
             });
         Self {
             tool_result_log_config: ToolResultLogConfig::default(),
-            log_sse_deltas: true,
             metadata: SessionTelemetryMetadata {
                 conversation_id,
                 agent_name,
@@ -836,7 +826,7 @@ impl SessionTelemetry {
         recovery_mode: Option<&str>,
         recovery_phase: Option<&str>,
         endpoint: &str,
-        reauth: bool,
+        connection_reused: bool,
         request_id: Option<&str>,
         cf_ray: Option<&str>,
         auth_error: Option<&str>,
@@ -848,15 +838,6 @@ impl SessionTelemetry {
                 .map(|code| (200..=299).contains(&code))
                 .unwrap_or(true);
         let success_str = if success { "true" } else { "false" };
-        let mut tags = vec![
-            ("success", success_str),
-            ("reauth", if reauth { "true" } else { "false" }),
-        ];
-        if let Some(product_sku) = self.metadata.product_sku {
-            tags.push(("product_sku", product_sku));
-        }
-        self.counter(WEBSOCKET_CONNECT_COUNT_METRIC, /*inc*/ 1, &tags);
-        self.record_duration(WEBSOCKET_CONNECT_DURATION_METRIC, duration, &tags);
         log_and_trace_event!(
             self,
             common: {
@@ -877,8 +858,7 @@ impl SessionTelemetry {
                 auth.env_provider_key_name = self.metadata.auth_env.provider_env_key_name.as_deref(),
                 auth.env_provider_key_present = self.metadata.auth_env.provider_env_key_present,
                 auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
-                auth.connection_reused = false,
-                auth.reauth = reauth,
+                auth.connection_reused = connection_reused,
                 auth.request_id = request_id,
                 auth.cf_ray = cf_ray,
                 auth.error = auth_error,
@@ -1085,9 +1065,6 @@ impl SessionTelemetry {
             duration,
             &[("kind", kind), ("success", "true")],
         );
-        if !self.log_sse_deltas && kind.ends_with(".delta") {
-            return;
-        }
         log_event!(
             self,
             event.name = "codex.sse_event",

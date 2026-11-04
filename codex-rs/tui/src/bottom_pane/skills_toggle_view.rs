@@ -14,7 +14,6 @@ use ratatui::widgets::Wrap;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
-use crate::clipboard_paste::normalize_pasted_search_query;
 use crate::key_hint;
 use crate::key_hint::KeyBindingListExt;
 use crate::key_hint::ShortcutHint;
@@ -244,15 +243,6 @@ impl BottomPaneView for SkillsToggleView {
         }
     }
 
-    fn handle_paste(&mut self, pasted: String) -> bool {
-        let Some(pasted) = normalize_pasted_search_query(&pasted) else {
-            return false;
-        };
-        self.search_query.push_str(&pasted);
-        self.apply_filter();
-        true
-    }
-
     fn is_complete(&self) -> bool {
         self.complete
     }
@@ -478,14 +468,8 @@ mod tests {
             tx,
             crate::keymap::RuntimeKeymap::defaults().list,
         );
-        view.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(view.handle_paste("  ompletion\r\n\t ".to_string()));
-        assert_eq!(view.search_query, "completion");
-
-        let rendered = render_lines(&view, /*width*/ 96);
-        assert_snapshot!("skills_toggle_pasted_search", rendered);
-        assert!(!view.handle_paste(" \r\n\t ".to_string()));
-        assert_eq!(render_lines(&view, /*width*/ 96), rendered);
+        view.search_query = "completion".to_string();
+        view.apply_filter();
 
         let row_names = view
             .build_rows()

@@ -29,183 +29,18 @@ fn tui_startup_future_stays_bounded() {
     assert!(size < 64 * 1024, "TUI startup future is {size} bytes");
 }
 
+#[test]
+fn login_does_not_trigger_onboarding() {
+    assert!(!should_show_onboarding(/*show_trust_screen*/ false));
+    assert!(should_show_onboarding(/*show_trust_screen*/ true));
+}
+
 async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(temp_dir.path().to_path_buf())
         .build()
         .await
-}
-
-#[tokio::test]
-async fn server_account_requirement_controls_login_screen() -> color_eyre::Result<()> {
-    for requires_openai_auth in [false, true] {
-        let home = TempDir::new()?;
-        std::fs::write(
-            home.path().join("config.toml"),
-            format!(
-                r#"
-model_provider = "test-provider"
-[model_providers.test-provider]
-name = "Test provider"
-base_url = "http://example.test/v1"
-wire_api = "responses"
-requires_openai_auth = {requires_openai_auth}
-"#
-            ),
-        )?;
-        let server_config = build_config(&home).await?;
-        let mut server = AppServerSession::new(
-            crate::backend_id::BackendId::new(),
-            AppServerClient::InProcess(start_test_embedded_app_server(server_config).await?),
-            ThreadParamsMode::Embedded,
-        );
-        let (login_status, account) = get_login_status(&mut server).await?;
-        assert_eq!(account.requires_openai_auth, requires_openai_auth);
-        assert_eq!(
-            should_show_login_screen(login_status, account.requires_openai_auth),
-            requires_openai_auth
-        );
-        assert!(!should_show_login_screen(
-            LoginStatus::AuthMode(AuthMode::Chatgpt),
-            account.requires_openai_auth
-        ));
-        server.shutdown().await?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn provider_setup_wizards_require_eligible_onboarding() -> color_eyre::Result<()> {
-    let shared_endpoint = RemoteAppServerEndpoint::WebSocket {
-        websocket_url: "ws://127.0.0.1:4500/".to_string(),
-        auth_token: None,
-    };
-    let enabled = "[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n";
-
-    for (label, config_toml, login_status, target, expected) in [
-        (
-            "provider defaults",
-            "",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [true, false],
-        ),
-        (
-            "explicitly disabled",
-            "[features]\nbedrock_setup_wizard = false\ngcp_setup_wizard = false\n",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [false, false],
-        ),
-        (
-            "only GCP enabled",
-            "[features]\nbedrock_setup_wizard = false\ngcp_setup_wizard = true\n",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [false, true],
-        ),
-        (
-            "enabled for the default provider",
-            enabled,
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [true, true],
-        ),
-        (
-            "explicit OpenAI provider with default flags",
-            "model_provider = \"openai\"\n",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [true, false],
-        ),
-        (
-            "explicit OpenAI provider with both wizards enabled",
-            "model_provider = \"openai\"\n[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [true, true],
-        ),
-        (
-            "custom provider requiring OpenAI auth",
-            r#"
-model_provider = "test-provider"
-[model_providers.test-provider]
-name = "Test provider"
-base_url = "http://example.test/v1"
-wire_api = "responses"
-requires_openai_auth = true
-[features]
-bedrock_setup_wizard = true
-gcp_setup_wizard = true
-"#,
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [false, false],
-        ),
-        (
-            "forced ChatGPT login",
-            "forced_login_method = \"chatgpt\"\n[features]\nbedrock_setup_wizard = true\ngcp_setup_wizard = true\n",
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Embedded,
-            [false, false],
-        ),
-        (
-            "existing authentication",
-            enabled,
-            LoginStatus::AuthMode(AuthMode::Chatgpt),
-            AppServerTarget::Embedded,
-            [false, false],
-        ),
-        (
-            "shared local daemon",
-            enabled,
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::LocalDaemon {
-                allow_embedded_fallback: true,
-                endpoint: shared_endpoint.clone(),
-            },
-            [true, false],
-        ),
-        (
-            "remote app server",
-            enabled,
-            LoginStatus::NotAuthenticated,
-            AppServerTarget::Remote {
-                endpoint: shared_endpoint,
-            },
-            [false, false],
-        ),
-    ] {
-        let codex_home = TempDir::new()?;
-        std::fs::write(codex_home.path().join("config.toml"), config_toml)?;
-        let config = build_config(&codex_home).await?;
-        for (feature, expected) in [Feature::BedrockSetupWizard, Feature::GcpSetupWizard]
-            .into_iter()
-            .zip(expected)
-        {
-            assert_eq!(
-                should_show_provider_setup_wizard(
-                    login_status,
-                    /*requires_openai_auth*/ true,
-                    &config,
-                    &target,
-                    feature,
-                ),
-                expected,
-                "{label}: {feature:?}"
-            );
-            assert!(!should_show_provider_setup_wizard(
-                login_status,
-                /*requires_openai_auth*/ false,
-                &config,
-                &target,
-                feature,
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 pub(crate) fn write_session_rollout(
@@ -301,98 +136,6 @@ fn startup_removes_legacy_tui_log_file() -> std::io::Result<()> {
     assert!(!legacy_log.exists());
     Ok(())
 }
-
-#[tokio::test]
-async fn startup_services_use_final_cloud_managed_http_policy() -> color_eyre::Result<()> {
-    for (configured_respect_system_proxy, managed_respect_system_proxy) in
-        [(true, false), (false, true)]
-    {
-        let codex_home = TempDir::new()?;
-        std::fs::write(
-            codex_home.path().join("config.toml"),
-            format!("[features]\nrespect_system_proxy = {configured_respect_system_proxy}\n"),
-        )?;
-        let prepared_environment_manager =
-            EnvironmentManager::prepare_from_codex_home(codex_home.path()).await?;
-        let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
-        let bootstrap_config = load_config_toml_with_layer_stack(
-            codex_home.path(),
-            /*cwd*/ None,
-            Vec::new(),
-            codex_config::ConfigLoadOptions {
-                loader_overrides: loader_overrides.clone(),
-                ..Default::default()
-            },
-        )
-        .await?;
-        let bootstrap_http_client_factory = resolve_bootstrap_http_client_factory(
-            &bootstrap_config.config_toml,
-            bootstrap_config
-                .config_layer_stack
-                .requirements()
-                .feature_requirements
-                .as_ref(),
-        )?;
-        let cloud_config_bundle =
-                codex_config::test_support::CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                    format!("[features]\nrespect_system_proxy = {managed_respect_system_proxy}\n"),
-                );
-        let config = ConfigBuilder::default()
-            .codex_home(codex_home.path().to_path_buf())
-            .loader_overrides(loader_overrides)
-            .cloud_config_bundle(cloud_config_bundle)
-            .build()
-            .await?;
-        let runtime_paths = ExecServerRuntimeOptions::new(
-            std::env::current_exe()?,
-            /*codex_linux_sandbox_exe*/ None,
-        )?;
-        let environment_manager = prepared_environment_manager
-            .build(Some(runtime_paths), config.http_client_factory())?;
-
-        assert_ne!(
-            bootstrap_http_client_factory.outbound_proxy_policy(),
-            config.http_client_factory().outbound_proxy_policy()
-        );
-        assert_eq!(
-            environment_manager
-                .http_client_factory()
-                .outbound_proxy_policy(),
-            config.http_client_factory().outbound_proxy_policy()
-        );
-        assert_eq!(
-            config
-                .auth_route_config()
-                .http_client_factory()
-                .outbound_proxy_policy(),
-            config.http_client_factory().outbound_proxy_policy()
-        );
-        assert_eq!(config.respect_system_proxy, managed_respect_system_proxy);
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn start_test_embedded_app_server(
-    config: Config,
-) -> color_eyre::Result<InProcessAppServerClient> {
-    let state_db = init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await?;
-    start_embedded_app_server(
-        Arg0DispatchPaths::default(),
-        config,
-        Vec::new(),
-        LoaderOverrides::default(),
-        /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
-        codex_feedback::CodexFeedback::new(),
-        /*log_db*/ None,
-        state_db,
-        Arc::new(EnvironmentManager::default_for_tests()),
-        Default::default(),
-    )
-    .await
-}
-
 #[tokio::test]
 async fn startup_resume_rejects_guardian_thread() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
@@ -714,271 +457,6 @@ fn session_target_display_label_falls_back_to_thread_id() {
 
     assert_eq!(target.display_label(), format!("thread {thread_id}"));
 }
-
-#[test]
-fn resolve_remote_addr_accepts_websocket_url() {
-    assert_eq!(
-        resolve_remote_addr("ws://127.0.0.1:4500").expect("ws URL should normalize"),
-        RemoteAppServerEndpoint::WebSocket {
-            websocket_url: "ws://127.0.0.1:4500/".to_string(),
-            auth_token: None,
-        }
-    );
-}
-
-#[test]
-fn resolve_remote_addr_accepts_secure_websocket_url() {
-    assert_eq!(
-        resolve_remote_addr("wss://example.com:443").expect("wss URL should normalize"),
-        RemoteAppServerEndpoint::WebSocket {
-            websocket_url: "wss://example.com/".to_string(),
-            auth_token: None,
-        }
-    );
-}
-
-#[test]
-fn resolve_remote_addr_accepts_default_socket() -> color_eyre::Result<()> {
-    let codex_home = find_codex_home().wrap_err("failed to resolve CODEX_HOME")?;
-    assert_eq!(
-        resolve_remote_addr("unix://")?,
-        RemoteAppServerEndpoint::UnixSocket {
-            socket_path: codex_app_server_client::app_server_control_socket_path(&codex_home)?,
-        }
-    );
-    Ok(())
-}
-
-#[test]
-fn resolve_remote_addr_accepts_relative_socket_path() -> color_eyre::Result<()> {
-    assert_eq!(
-        resolve_remote_addr("unix://codex.sock")?,
-        RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
-        }
-    );
-    Ok(())
-}
-
-#[test]
-fn resolve_remote_addr_accepts_absolute_socket_path() -> color_eyre::Result<()> {
-    let temp_dir = TempDir::new()?;
-    let socket_path = temp_dir.path().join("codex.sock");
-    assert_eq!(
-        resolve_remote_addr(&format!("unix://{}", socket_path.display()))?,
-        RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::from_absolute_path(&socket_path)?,
-        }
-    );
-    Ok(())
-}
-
-#[test]
-fn resolve_remote_addr_rejects_invalid_remote_addresses() {
-    for addr in [
-        "ws://127.0.0.1",
-        "wss://example.com",
-        "127.0.0.1:4500",
-        "https://127.0.0.1:4500",
-    ] {
-        let err = resolve_remote_addr(addr).expect_err("invalid remote addresses should fail");
-        assert!(
-            err.to_string().contains(
-                "expected `ws://host:port`, `wss://host:port`, `unix://`, or `unix://PATH`"
-            )
-        );
-    }
-}
-
-#[tokio::test]
-async fn default_daemon_auto_connect_skips_missing_socket() -> color_eyre::Result<()> {
-    let codex_home = TempDir::new()?;
-    assert!(
-        maybe_probe_default_daemon_socket(codex_home.path())
-            .await
-            .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn default_daemon_auto_connect_probes_socket_only() -> color_eyre::Result<()> {
-    let codex_home = TempDir::new()?;
-    let socket_path = codex_app_server_client::app_server_control_socket_path(codex_home.path())?;
-    #[cfg(windows)]
-    {
-        let parent = socket_path.as_path().parent().expect("socket parent");
-        std::fs::create_dir_all(parent)?;
-        let listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
-        assert!(
-            maybe_probe_default_daemon_socket(codex_home.path())
-                .await
-                .is_none()
-        );
-        drop(listener);
-        std::fs::remove_dir_all(parent)?;
-    }
-    codex_uds::prepare_private_socket_directory(
-        socket_path.as_path().parent().expect("socket parent"),
-    )
-    .await?;
-    let _listener = codex_uds::UnixListener::bind(socket_path.as_path()).await?;
-
-    let expected = Some(socket_path);
-    #[cfg(windows)]
-    let expected = {
-        // Existing Windows CI may run elevated; an elevated listener must
-        // never be selected implicitly, even when its directory is private.
-        let output = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"])
-                .output()?;
-        assert!(output.status.success());
-        match String::from_utf8(output.stdout)?.trim() {
-            "True" => None,
-            "False" => expected,
-            other => panic!("unexpected elevation result: {other}"),
-        }
-    };
-    assert_eq!(
-        maybe_probe_default_daemon_socket(codex_home.path()).await,
-        expected
-    );
-    Ok(())
-}
-
-#[test]
-fn app_server_target_for_launch_uses_local_daemon_for_default_socket() -> color_eyre::Result<()> {
-    let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
-    let endpoint = RemoteAppServerEndpoint::UnixSocket {
-        socket_path: socket_path.clone(),
-    };
-    for explicit in [false, true] {
-        let target = app_server_target_for_launch(
-            explicit.then_some(endpoint.clone()),
-            Some(socket_path.clone()),
-            /*can_reuse_implicit_local_daemon*/ !explicit,
-            /*workload_identity_selected*/ false,
-            /*exec_server_url*/ None,
-        )?;
-        assert_eq!(
-            target,
-            AppServerTarget::LocalDaemon {
-                allow_embedded_fallback: !explicit,
-                endpoint: endpoint.clone(),
-            }
-        );
-        assert!(!target.uses_remote_workspace());
-        assert_eq!(target.thread_params_mode(), ThreadParamsMode::Embedded);
-    }
-    Ok(())
-}
-
-#[test]
-fn app_server_target_for_launch_preserves_executor_selection() -> color_eyre::Result<()> {
-    let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
-    for executor in ["none", "ws://127.0.0.1:4501"] {
-        assert_eq!(
-            app_server_target_for_launch(
-                /*explicit_remote_endpoint*/ None,
-                Some(socket_path.clone()),
-                /*can_reuse_implicit_local_daemon*/ true,
-                /*workload_identity_selected*/ false,
-                Some(std::ffi::OsStr::new(executor)),
-            )?,
-            AppServerTarget::Embedded,
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn app_server_target_for_launch_prefers_explicit_remote_endpoint() -> color_eyre::Result<()> {
-    let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
-        socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
-    };
-    let target = app_server_target_for_launch(
-        Some(explicit_endpoint.clone()),
-        Some(AbsolutePathBuf::relative_to_current_dir("default.sock")?),
-        /*can_reuse_implicit_local_daemon*/ false,
-        /*workload_identity_selected*/ false,
-        Some(std::ffi::OsStr::new("none")),
-    )?;
-
-    assert_eq!(
-        target,
-        AppServerTarget::Remote {
-            endpoint: explicit_endpoint,
-        }
-    );
-    assert!(target.uses_remote_workspace());
-    assert_eq!(target.thread_params_mode(), ThreadParamsMode::Remote);
-    Ok(())
-}
-
-#[test]
-fn app_server_target_for_launch_skips_local_daemon_when_launch_config_is_not_replayable()
--> color_eyre::Result<()> {
-    let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
-    let target = app_server_target_for_launch(
-        /*explicit_remote_endpoint*/ None,
-        Some(socket_path),
-        /*can_reuse_implicit_local_daemon*/ false,
-        /*workload_identity_selected*/ false,
-        /*exec_server_url*/ None,
-    )?;
-
-    assert_eq!(target, AppServerTarget::Embedded);
-    Ok(())
-}
-
-#[test]
-fn workload_identity_requires_an_embedded_app_server() -> color_eyre::Result<()> {
-    let default_socket = AbsolutePathBuf::relative_to_current_dir("default.sock")?;
-    assert_eq!(
-        app_server_target_for_launch(
-            /*explicit_remote_endpoint*/ None,
-            Some(default_socket),
-            /*can_reuse_implicit_local_daemon*/ true,
-            /*workload_identity_selected*/ true,
-            /*exec_server_url*/ None,
-        )?,
-        AppServerTarget::Embedded
-    );
-
-    let explicit_endpoint = RemoteAppServerEndpoint::UnixSocket {
-        socket_path: AbsolutePathBuf::relative_to_current_dir("explicit.sock")?,
-    };
-    let error = app_server_target_for_launch(
-        Some(explicit_endpoint),
-        /*default_daemon_socket*/ None,
-        /*can_reuse_implicit_local_daemon*/ false,
-        /*workload_identity_selected*/ true,
-        /*exec_server_url*/ None,
-    )
-    .expect_err("remote hosts must own workload identity");
-    assert_eq!(
-        error.to_string(),
-        "workload identity must be configured on the remote app-server host"
-    );
-    Ok(())
-}
-
-#[test]
-fn should_load_configured_environments_for_local_daemon() -> color_eyre::Result<()> {
-    let target = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
-        },
-    };
-
-    assert!(should_load_configured_environments(
-        &LoaderOverrides::default(),
-        &target,
-    ));
-    Ok(())
-}
-
 #[tokio::test]
 async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
 -> std::io::Result<()> {
@@ -986,13 +464,13 @@ async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
     let cwd = temp_dir.path().join("project");
 
     let params = latest_session_lookup_params(
-        Some(Vec::new()),
+        /*model_provider*/ None,
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, Some(vec![]));
+    assert_eq!(params.model_providers, None);
     assert_eq!(
         params.cwd,
         Some(ThreadListCwdFilter::One(cwd.to_string_lossy().to_string()))
@@ -1000,7 +478,7 @@ async fn latest_session_lookup_params_keep_local_filters_for_embedded_sessions()
     assert!(params.use_state_db_only);
 
     let scan_params = latest_session_lookup_params(
-        Some(Vec::new()),
+        /*model_provider*/ None,
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::ScanAndRepair,
@@ -1014,7 +492,7 @@ async fn latest_session_lookup_params_honor_explicit_provider() -> color_eyre::R
     let temp_dir = TempDir::new()?;
     let cwd = temp_dir.path().join("project");
     let params = latest_session_lookup_params(
-        Some(vec!["selected-provider".to_string()]),
+        Some("selected-provider".to_string()),
         Some(cwd.as_path()),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
@@ -1035,13 +513,13 @@ async fn latest_session_lookup_params_honor_explicit_provider() -> color_eyre::R
 async fn latest_session_lookup_params_omit_local_filters_for_remote_sessions() -> std::io::Result<()>
 {
     let params = latest_session_lookup_params(
-        Some(Vec::new()),
+        /*model_provider*/ None,
         /*cwd_filter*/ None,
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, Some(vec![]));
+    assert_eq!(params.model_providers, None);
     assert_eq!(params.cwd, None);
     Ok(())
 }
@@ -1049,7 +527,7 @@ async fn latest_session_lookup_params_omit_local_filters_for_remote_sessions() -
 #[tokio::test]
 async fn latest_session_lookup_params_can_include_non_interactive_sources() -> std::io::Result<()> {
     let params = latest_session_lookup_params(
-        Some(Vec::new()),
+        /*model_provider*/ None,
         /*cwd_filter*/ None,
         /*include_non_interactive*/ true,
         LatestSessionLookupMode::StateDbOnly,
@@ -1073,13 +551,13 @@ async fn latest_session_lookup_params_keep_explicit_cwd_filter_for_remote_sessio
     let cwd = Path::new("repo/on/server");
 
     let params = latest_session_lookup_params(
-        Some(Vec::new()),
+        /*model_provider*/ None,
         Some(cwd),
         /*include_non_interactive*/ false,
         LatestSessionLookupMode::StateDbOnly,
     );
 
-    assert_eq!(params.model_providers, Some(vec![]));
+    assert_eq!(params.model_providers, None);
     assert_eq!(
         params.cwd,
         Some(ThreadListCwdFilter::One(String::from("repo/on/server")))
@@ -1202,7 +680,6 @@ async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre
         /*show_all*/ false,
     );
     let scoped_target = lookup_latest_session_target_with_app_server(
-        crate::resume_picker::SessionPickerAction::Fork,
         &mut app_server,
         &config,
         filter_cwd,
@@ -1215,7 +692,6 @@ async fn fork_last_filters_latest_session_by_cwd_unless_show_all() -> color_eyre
         /*show_all*/ true,
     );
     let show_all_target = lookup_latest_session_target_with_app_server(
-        crate::resume_picker::SessionPickerAction::Fork,
         &mut app_server,
         &config,
         show_all_filter_cwd,
@@ -1258,12 +734,11 @@ async fn latest_session_lookup_falls_back_for_rollout_missing_from_state_db()
         "2025-01-02T10-00-00",
         "2025-01-02T10:00:00Z",
         "legacy writer session",
-        "previous-provider",
+        config.model_provider_id.as_str(),
         &project_cwd,
     )?;
 
     let target = lookup_latest_session_target_with_app_server(
-        crate::resume_picker::SessionPickerAction::Resume,
         &mut app_server,
         &config,
         Some(project_cwd.as_path()),
@@ -1276,66 +751,10 @@ async fn latest_session_lookup_falls_back_for_rollout_missing_from_state_db()
     assert_eq!(target.thread_id, thread_id);
     Ok(())
 }
-
-#[tokio::test]
-async fn config_cwd_for_app_server_target_omits_cwd_for_remote_sessions() -> std::io::Result<()> {
-    let remote_only_cwd = if cfg!(windows) {
-        Path::new(r"C:\definitely\not\local\to\this\test")
-    } else {
-        Path::new("/definitely/not/local/to/this/test")
-    };
-    let target = AppServerTarget::Remote {
-        endpoint: RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
-        },
-    };
-    let environment_manager = EnvironmentManager::default_for_tests();
-
-    let config_cwd = config_cwd_for_app_server_target(
-        Some(remote_only_cwd),
-        &target,
-        environment_manager
-            .default_environment()
-            .is_some_and(|environment| environment.is_remote()),
-    )?;
-
-    assert_eq!(config_cwd, None);
-    Ok(())
-}
-
 #[tokio::test]
 async fn config_cwd_for_app_server_target_canonicalizes_embedded_cli_cwd() -> std::io::Result<()> {
     let temp_dir = TempDir::new()?;
     let target = AppServerTarget::Embedded;
-    let environment_manager = EnvironmentManager::default_for_tests();
-
-    let config_cwd = config_cwd_for_app_server_target(
-        Some(temp_dir.path()),
-        &target,
-        environment_manager
-            .default_environment()
-            .is_some_and(|environment| environment.is_remote()),
-    )?;
-
-    assert_eq!(
-        config_cwd,
-        Some(AbsolutePathBuf::from_absolute_path(dunce::canonicalize(
-            temp_dir.path()
-        )?)?)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn config_cwd_for_app_server_target_canonicalizes_local_daemon_cli_cwd() -> std::io::Result<()>
-{
-    let temp_dir = TempDir::new()?;
-    let target = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
-        },
-    };
     let environment_manager = EnvironmentManager::default_for_tests();
 
     let config_cwd = config_cwd_for_app_server_target(
@@ -1394,19 +813,6 @@ async fn config_cwd_for_app_server_target_omits_cwd_for_remote_exec_server() -> 
     )
     .await;
 
-    assert_eq!(
-        backend_preference_local_cwd(remote_only_cwd, &target, &environment_manager),
-        std::env::current_dir().ok(),
-    );
-    assert_eq!(
-        backend_preference_local_cwd(
-            remote_only_cwd,
-            &target,
-            &EnvironmentManager::default_for_tests(),
-        ),
-        Some(remote_only_cwd.to_path_buf()),
-    );
-
     let config_cwd = config_cwd_for_app_server_target(
         Some(remote_only_cwd),
         &target,
@@ -1424,16 +830,6 @@ async fn config_cwd_for_app_server_target_omits_cwd_for_remote_exec_server() -> 
     ));
     assert!(uses_remote_workspace_or_environment(
         &target,
-        &environment_manager
-    ));
-    let local_daemon = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
-        },
-    };
-    assert!(uses_remote_workspace_or_environment(
-        &local_daemon,
         &environment_manager
     ));
     Ok(())
@@ -1588,7 +984,6 @@ async fn embedded_app_server_start_failure_is_returned() -> color_eyre::Result<(
         Vec::new(),
         LoaderOverrides::default(),
         /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
         /*state_db*/ None,
@@ -1769,8 +1164,6 @@ async fn theme_warning_uses_final_config() -> std::io::Result<()> {
     Ok(())
 }
 
-#[path = "daemon_startup_tests.rs"]
-mod daemon_startup_tests;
 #[path = "test_backend.rs"]
 pub(crate) mod test_backend;
 #[path = "test_support.rs"]

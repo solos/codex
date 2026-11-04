@@ -524,29 +524,6 @@ async fn status_command_drops_stale_usd_when_updated_usage_has_only_credits() {
 }
 
 #[tokio::test]
-async fn status_command_requests_thread_usage_for_remote_connection_metadata() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.update_account_state(
-        /*status_account_display*/ None,
-        Some(PlanType::Business),
-        /*has_chatgpt_account*/ false,
-        /*has_codex_backend_auth*/ true,
-    );
-    chat.remote_connection = Some(crate::status::remote_connection::RemoteConnectionStatus {
-        address: "wss://remote.example.com".to_string(),
-        version: "v1.0.0".to_string(),
-        is_local_daemon: false,
-        is_managed_daemon: false,
-    });
-
-    chat.dispatch_command(SlashCommand::Status);
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshThreadUsage { .. }));
-}
-
-#[tokio::test]
 async fn status_command_requests_thread_usage_with_backend_only_authentication() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

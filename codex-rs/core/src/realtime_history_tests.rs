@@ -66,7 +66,6 @@ fn assistant_delta(item_id: &str, delta: &str) -> EventMsg {
 
 fn completed_item(item: TurnItem) -> EventMsg {
     EventMsg::ItemCompleted(ItemCompletedEvent {
-        content_token_count: None,
         thread_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
         item,

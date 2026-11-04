@@ -10,7 +10,7 @@ pub enum ConfigLayerSource {
     Mdm { domain: String, key: String },
     /// Host-wide configuration loaded from a file.
     System { file: AbsolutePathBuf },
-    /// Configuration delivered by an enterprise cloud bundle.
+    /// Configuration managed by an enterprise.
     EnterpriseManaged { id: String, name: String },
     /// User configuration, optionally augmented by a selected profile.
     User {

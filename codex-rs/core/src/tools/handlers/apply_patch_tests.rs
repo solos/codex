@@ -55,7 +55,6 @@ async fn invocation_for_payload(payload: ToolPayload) -> ToolInvocation {
         tool_name: codex_tools::ToolName::plain("apply_patch"),
         source: crate::tools::context::ToolCallSource::Direct,
         payload,
-        native_call: None,
         environments: Default::default(),
     }
 }

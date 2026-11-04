@@ -23,12 +23,8 @@ fn startup_preference_stays_below_both_managed_layers() -> anyhow::Result<()> {
                         toml: toml::Value::Table(toml::toml! { [features] prefer_mxc = false }),
                     })
                     .collect(),
-                cloud_insertion_index: 0,
             },
-            requirements: LocalTomlLayerStack {
-                layers: Vec::new(),
-                cloud_insertion_index: 0,
-            },
+            requirements: LocalTomlLayerStack { layers: Vec::new() },
         };
         include_startup_preference(&mut layers, &cwd, Some(true));
         let projected = layers.project(&[vec!["features".into(), "prefer_mxc".into()]], &[]);
@@ -46,7 +42,6 @@ fn startup_preference_stays_below_both_managed_layers() -> anyhow::Result<()> {
             codex_config::merge_toml_values(&mut effective, &layer.toml);
         }
         assert_eq!(effective["features"]["prefer_mxc"].as_bool(), Some(false));
-        assert_eq!(projected.config.cloud_insertion_index, 0);
     }
     Ok(())
 }

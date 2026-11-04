@@ -8,7 +8,7 @@ None
 Absent -> false
 None
 
-Absent -> {"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"} (role - developer)
+Absent -> true (role - developer)
 <plugins_instructions>
 ## Plugins
 A plugin is a local bundle of skills, MCP servers, and apps.
@@ -21,7 +21,7 @@ A plugin is a local bundle of skills, MCP servers, and apps.
 - Missing/blocked: If the user requests a plugin that does not have relevant callable capabilities for the task, say so briefly and continue with the best fallback.
 </plugins_instructions>
 
-false -> {"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"} (role - developer)
+false -> true (role - developer)
 <plugins_instructions>
 ## Plugins
 A plugin is a local bundle of skills, MCP servers, and apps.
@@ -34,14 +34,14 @@ A plugin is a local bundle of skills, MCP servers, and apps.
 - Missing/blocked: If the user requests a plugin that does not have relevant callable capabilities for the task, say so briefly and continue with the best fallback.
 </plugins_instructions>
 
-{"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"} -> {"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"}
+true -> true
 None
 
-{"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"} -> false
+true -> false
 None
 
 Unknown -> false
 None
 
-Unknown -> {"catalog":false,"instructions":"d3f660b06d428f262fffddce3d2b11f390d8b1da"}
+Unknown -> true
 None

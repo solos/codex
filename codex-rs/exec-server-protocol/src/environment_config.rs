@@ -19,7 +19,7 @@ pub struct EnvironmentConfigReadParams {
 pub struct EnvironmentConfigReadResponse {
     /// Executor user home used to expand `~` in path-bearing values.
     pub user_home_dir: Option<PathUri>,
-    /// Executor Codex home used as the base directory for cloud-provided layers.
+    /// Executor Codex home used as the base directory for local layers.
     pub codex_home_dir: PathUri,
     /// Executor hostname used to select matching remote sandbox requirements.
     pub hostname: Option<String>,
@@ -33,8 +33,6 @@ pub struct EnvironmentConfigReadResponse {
 pub struct EnvironmentConfigLayerStack {
     /// Layers ordered from lowest to highest precedence.
     pub layers: Vec<EnvironmentConfigLayer>,
-    /// Position at which cloud-provided layers should be inserted.
-    pub cloud_insertion_index: usize,
 }
 
 /// One selected executor-local TOML layer.

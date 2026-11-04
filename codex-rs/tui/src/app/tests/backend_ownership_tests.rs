@@ -43,13 +43,6 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
         SessionSelection::Resume(target.clone()),
     )
     .await?;
-    assert!(
-        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
-            event,
-            AppEvent::ResumeBackendSession(routed)
-                if routed.backend_id == target.backend_id && routed.thread_id == target.thread_id
-        ))
-    );
     app.resume_target_session(&mut tui, &mut server, target.clone())
         .await?;
     assert_eq!(app.current_displayed_thread_id(), Some(thread_id));
@@ -69,6 +62,7 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
         .collect();
     insta::assert_snapshot!(errors.join("\n"), @r###"
     ■ This session belongs to a different backend. Open the session picker again.
+    ■ This session belongs to a different backend. Open the session picker again.
     "###);
     for action in [
         SessionStartAction::Resume(
@@ -83,6 +77,7 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
                 config: &app.config,
                 local_settings: &app.local_settings,
             },
+            &AppServerTarget::Embedded,
             &target,
             action,
             Err(color_eyre::eyre::eyre!(
@@ -107,83 +102,6 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
     proxy.await??;
     Ok(())
 }
-
-#[tokio::test]
-async fn startup_fallback_requires_no_established_backend() -> Result<()> {
-    let app = make_test_app().await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    drop(listener);
-    let daemon_target = AppServerTarget::LocalDaemon {
-        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
-            websocket_url: format!("ws://{address}"),
-            auth_token: None,
-        },
-        allow_embedded_fallback: true,
-    };
-    let selected = SessionTarget {
-        backend_id: BackendId::new(),
-        thread_id: ThreadId::new(),
-        path: None,
-        cwd: None,
-        history_mode: None,
-    };
-    for selection in [
-        SessionSelection::Resume(selected.clone()),
-        SessionSelection::Fork(selected),
-        SessionSelection::StartFresh,
-    ] {
-        let mut target = daemon_target.clone();
-        target.preserve_selected_backend(&selection);
-        let loader = LoaderOverrides::without_managed_config_for_tests();
-        let policy = codex_app_server_client::EmbeddedNetworkPolicy::load(&loader).await;
-        let mut state_db = None;
-        let result = crate::start_app_server(
-            &mut target,
-            Default::default(),
-            app.config.clone(),
-            Vec::new(),
-            loader,
-            /*strict_config*/ false,
-            crate::CloudConfigBundleLoader::default(),
-            codex_feedback::CodexFeedback::new(),
-            /*log_db*/ None,
-            &mut state_db,
-            Arc::clone(&app.environment_manager),
-            policy,
-        )
-        .await;
-        if matches!(selection, SessionSelection::StartFresh) {
-            let client = result?;
-            assert_eq!(target, AppServerTarget::Embedded);
-            client.shutdown().await?;
-        } else {
-            assert!(
-                result.is_err(),
-                "a selected session must not change backend"
-            );
-        }
-    }
-    let error = crate::start_app_server_for_picker(
-        BackendId::new(),
-        &app.config,
-        &daemon_target,
-        Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        /*state_db*/ None,
-        Arc::clone(&app.environment_manager),
-    )
-    .await
-    .err()
-    .expect("an auxiliary picker must not switch backends");
-    assert!(
-        error
-            .to_string()
-            .contains(crate::daemon_startup::FAILURE_HINT)
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()> {
     let mut app = make_test_app().await;
@@ -214,14 +132,9 @@ async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()>
         /*git_info*/ None,
     )
     .expect("saved rollout");
-    let target = crate::lookup_session_target_with_app_server(
-        crate::resume_picker::SessionPickerAction::Resume,
-        &mut picker,
-        &app.config,
-        &id,
-    )
-    .await?
-    .expect("picker target");
+    let target = crate::lookup_session_target_with_app_server(&mut picker, &app.config, &id)
+        .await?
+        .expect("picker target");
     assert_eq!(target.backend_id, consumer.backend_id());
     crate::legacy_core::config::set_project_trust_level(
         app.config.codex_home.as_path(),
@@ -313,7 +226,6 @@ async fn prepared_resume_cannot_activate_through_another_backend() -> Result<()>
         },
         read_only: false,
         history_notice: None,
-        provider_error: None,
     };
     requests.lock().unwrap().clear();
     while events.try_recv().is_ok() {}

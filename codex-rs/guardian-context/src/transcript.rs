@@ -24,7 +24,6 @@ use codex_protocol::protocol::InterAgentCommunication;
 use crate::ContextSection;
 use crate::ConversationTranscriptEntry;
 use crate::ConversationTranscriptEntryKind;
-use crate::MAX_TEXT_PART_ESTIMATED_TOKENS;
 use crate::PlannedAction;
 use crate::PlannedActionKind;
 use crate::SectionContributor;
@@ -82,7 +81,7 @@ impl Default for ConversationTranscriptOptions {
 /// Per-entry caps resolved by the caller for the current review.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TranscriptEntryLimits {
-    /// Profile cap for assistant and plaintext reasoning; user/approval policy is applied separately.
+    /// Cap for assistant and plaintext reasoning entries; user and manual approvals stay complete.
     pub message_tokens: usize,
     /// Cap for tool calls and ordinary tool outputs.
     pub tool_tokens: usize,
@@ -322,12 +321,8 @@ fn collect_transcript_for_review(
                 {
                     entries.push(ConversationTranscriptEntry {
                         kind,
-                        content: if target == crate::ContextTarget::Sync
-                            || crate::estimate_input_tokens(item)
-                                <= config
-                                    .entry_limits
-                                    .tool_tokens
-                                    .min(MAX_TEXT_PART_ESTIMATED_TOKENS)
+                        content: if crate::estimate_input_tokens(item)
+                            <= config.entry_limits.tool_tokens.min(9_000)
                         {
                             TranscriptContent::NativeMessage(Box::new(item.clone()))
                         } else {

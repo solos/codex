@@ -1,4 +1,3 @@
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::EnvironmentConfig;
 use codex_core::TurnInputRequest;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
@@ -38,7 +37,6 @@ use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_path_uri::PathUri;
 use core_test_support::TempDirExt;
 use core_test_support::assert_regex_match;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::process::process_is_alive;
 use core_test_support::process::wait_for_pid_file;
 use core_test_support::process::wait_for_process_exit;
@@ -297,54 +295,6 @@ async fn exec_command_rejects_login_when_disabled() -> Result<()> {
 
     Ok(())
 }
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_command_hides_and_rejects_tty_when_disabled() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let builder = test_codex().with_model("gpt-5.4").with_cloud_config_bundle(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            "[features]\nunified_exec_tty = false\n",
-        ),
-    );
-    let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
-    let call_id = "tty-denied";
-    let arguments = json!({"cmd": "echo should-not-run > tty-disabled-rejected", "tty": true});
-    let request_log = mount_sse_sequence(
-        harness.server(),
-        vec![
-            sse(vec![
-                ev_response_created(call_id),
-                ev_function_call(call_id, "exec_command", &serde_json::to_string(&arguments)?),
-                ev_completed(call_id),
-            ]),
-            sse(vec![ev_completed("done")]),
-        ],
-    )
-    .await;
-
-    harness
-        .submit("run commands with and without a terminal")
-        .await?;
-
-    let rejection = harness.function_call_stdout("tty-denied").await;
-    insta::assert_snapshot!("exec_command_tty_disabled", rejection);
-    assert!(!harness.path_exists("tty-disabled-rejected").await?);
-
-    let request = request_log.requests()[0].body_json();
-    let tools = request["tools"]
-        .as_array()
-        .expect("tools should be an array");
-    let exec_tool = tools
-        .iter()
-        .find(|tool| tool["name"] == "exec_command")
-        .expect("exec_command should be available");
-    assert!(exec_tool["parameters"]["properties"].get("tty").is_none());
-    assert!(tools.iter().any(|tool| tool["name"] == "write_stdin"));
-
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_command_runs_without_tty_when_tty_disabled() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -353,11 +303,12 @@ async fn exec_command_runs_without_tty_when_tty_disabled() -> Result<()> {
         "basic PowerShell execution through Wine is unavailable"
     );
 
-    let builder = test_codex().with_model("gpt-5.4").with_cloud_config_bundle(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            "[features]\nunified_exec_tty = false\n",
-        ),
-    );
+    let builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config
+            .features
+            .disable(Feature::UnifiedExecTty)
+            .expect("disable unified exec tty");
+    });
     let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
     let mut responses = Vec::new();
     for (call_id, arguments) in [
@@ -1428,18 +1379,15 @@ allow_local_binding = true
         /*exclude_slash_tmp*/ false,
     );
     let permission_profile = permission_profile_for_config.clone();
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_config_bundle(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
-            config
-                .permissions
-                .set_permission_profile(permission_profile_for_config)
-                .expect("set permission profile");
-            #[cfg(windows)]
-            config.set_windows_sandbox_enabled(/*value*/ true);
-        });
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+        config
+            .permissions
+            .set_permission_profile(permission_profile_for_config)
+            .expect("set permission profile");
+        #[cfg(windows)]
+        config.set_windows_sandbox_enabled(/*value*/ true);
+    });
     let test = builder.build_with_auto_env(server).await?;
     assert!(
         test.config.permissions.network.is_some(),
@@ -3391,15 +3339,16 @@ async fn managed_unified_exec_disable_runs_commands_without_retained_authority()
     skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_cloud_config_bundle(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            r#"
-[features]
-unified_exec = false
-shell_tool = true
-"#,
-        ),
-    );
+    let builder = test_codex().with_config(|config| {
+        config
+            .features
+            .disable(Feature::UnifiedExec)
+            .expect("disable unified exec");
+        config
+            .features
+            .enable(Feature::ShellTool)
+            .expect("enable shell tool");
+    });
     let test = builder.build_with_auto_env(&server).await?;
     let late_marker = test.config.cwd.join("one-shot-late-marker");
     let call_id = "managed-one-shot";
@@ -3456,15 +3405,16 @@ async fn managed_one_shot_command_is_terminated_when_the_turn_is_interrupted() -
     skip_if_target_windows!(Ok(()), "uses a POSIX command and process checks");
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_cloud_config_bundle(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            r#"
-[features]
-unified_exec = false
-shell_tool = true
-"#,
-        ),
-    );
+    let builder = test_codex().with_config(|config| {
+        config
+            .features
+            .disable(Feature::UnifiedExec)
+            .expect("disable unified exec");
+        config
+            .features
+            .enable(Feature::ShellTool)
+            .expect("enable shell tool");
+    });
     let test = builder.build_with_auto_env(&server).await?;
     let temp_dir = tempfile::tempdir()?;
     let pid_path = temp_dir.path().join("managed_one_shot_pid");

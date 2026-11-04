@@ -391,7 +391,7 @@ async fn websocket_transport_drain_stops_automatic_turns(
         wait_for_process_exit_within(
             &mut process,
             Duration::from_secs(15),
-            "automatic continuation kept the daemon alive during drain",
+            "automatic continuation kept the server alive during drain",
         )
         .await?
         .success()

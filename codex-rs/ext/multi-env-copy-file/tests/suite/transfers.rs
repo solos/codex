@@ -40,7 +40,6 @@ async fn copy_file_transfers_between_selected_and_native_executors() -> Result<(
             )
             .expect("fixture config layers");
             config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
-            config.cloud_skill_enabled = false;
         })
         .build_with_auto_env(&server)
         .await?;

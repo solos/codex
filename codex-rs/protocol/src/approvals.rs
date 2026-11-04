@@ -275,8 +275,6 @@ pub struct GuardianAssessmentEvent {
 pub enum ExecApprovalKind {
     #[default]
     Command,
-    /// Requires a fresh human decision; automated and reusable approvals are invalid.
-    HumanCommand,
     WriteStdin,
 }
 

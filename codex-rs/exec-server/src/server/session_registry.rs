@@ -13,19 +13,11 @@ use crate::rpc::invalid_request;
 use crate::rpc::session_already_attached;
 use crate::server::process_handler::ProcessHandler;
 use crate::telemetry::ExecServerTelemetry;
-use crate::telemetry::record_recovery_retention_expired;
 
-// Allow the 50s client window, up to 25s of disconnect detection skew, and 5s of margin.
-#[cfg(not(test))]
-const RECOVERY_RETENTION: Duration = Duration::from_secs(80);
 #[cfg(test)]
 const DETACHED_SESSION_TTL: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
-const DETACHED_SESSION_TTL: Duration = RECOVERY_RETENTION;
-#[cfg(test)]
-const RPC_OUTPUT_RETENTION: Duration = Duration::from_millis(25);
-#[cfg(not(test))]
-const RPC_OUTPUT_RETENTION: Duration = RECOVERY_RETENTION;
+const DETACHED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 pub(crate) struct SessionRegistry {
     sessions: Mutex<HashMap<String, Arc<SessionEntry>>>,
@@ -112,12 +104,7 @@ impl SessionRegistry {
                 let session_id = Uuid::new_v4().to_string();
                 let entry = Arc::new(SessionEntry::new(
                     session_id.clone(),
-                    ProcessHandler::new(
-                        notifications,
-                        self.telemetry.clone(),
-                        runtime_paths,
-                        RPC_OUTPUT_RETENTION,
-                    ),
+                    ProcessHandler::new(notifications, self.telemetry.clone(), runtime_paths),
                     connection_id,
                 ));
                 sessions.insert(session_id, Arc::clone(&entry));
@@ -127,7 +114,6 @@ impl SessionRegistry {
         let entry = match outcome? {
             AttachOutcome::Attached(entry) => entry,
             AttachOutcome::Expired { session_id, entry } => {
-                record_recovery_retention_expired("detached_session_resume", DETACHED_SESSION_TTL);
                 entry.process.shutdown().await;
                 return Err(invalid_request(format!("unknown session id {session_id}")));
             }
@@ -162,7 +148,6 @@ impl SessionRegistry {
         };
 
         if let Some(entry) = removed {
-            record_recovery_retention_expired("detached_session_timer", DETACHED_SESSION_TTL);
             entry.process.shutdown().await;
         }
     }

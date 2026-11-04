@@ -225,13 +225,6 @@ pub enum McpServerContribution {
         /// Overrides the HTTP protocol mode, or uses the hosted Apps default when absent.
         protocol_mode: Option<crate::McpProtocolMode>,
     },
-    /// Attributes Apps connectors to an account-hosted plugin. Plugins from executor folders must
-    /// use `McpServerContributor::selected_plugins`, even if they only provide Apps connectors.
-    HostedPluginConnectors {
-        plugin_id: String,
-        plugin_display_name: String,
-        connector_ids: Vec<String>,
-    },
     /// Removes a named MCP server.
     Remove { name: String },
 }

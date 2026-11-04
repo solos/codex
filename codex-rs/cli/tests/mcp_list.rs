@@ -66,7 +66,6 @@ fn api_key_auth_exposes_api_curated_plugin_mcp_servers() -> Result<()> {
         codex_home.path().join("config.toml"),
         r#"[features]
 plugins = true
-remote_plugin = false
 
 [plugins."api-docs@openai-api-curated"]
 enabled = true

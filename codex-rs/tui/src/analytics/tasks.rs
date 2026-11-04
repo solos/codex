@@ -190,7 +190,6 @@ async fn descendants(
                 .request_typed(ClientRequest::ThreadList {
                     request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
                     params: ThreadListParams {
-                        current_account_only: false,
                         ancestor_thread_id: Some(root.id.clone()),
                         archived: Some(archived),
                         cursor,
@@ -242,7 +241,3 @@ async fn descendants(
         descendant_thread_ids,
     })
 }
-
-#[cfg(test)]
-#[path = "tasks_tests.rs"]
-mod tests;

@@ -4,7 +4,7 @@
 //! behavior easier to review without paging through the rest of `chatwidget.rs`.
 
 use super::*;
-use crate::bottom_pane::status_line_content::StatusLineRenderer;
+use crate::bottom_pane::status_line_from_segments;
 use crate::branch_summary;
 use crate::chatwidget::limit_label_for_window;
 use crate::chatwidget::rate_limits::get_limits_duration;
@@ -206,6 +206,7 @@ impl ChatWidget {
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
             self.set_status_line(/*status_line*/ None);
+            self.set_status_line_hyperlink(/*url*/ None);
             return;
         }
 
@@ -216,25 +217,17 @@ impl ChatWidget {
             }
         }
 
-        let content = self.status_line_renderer().content(
+        self.set_status_line(status_line_from_segments(
             segments,
             self.local_settings.tui.status_line_use_colors,
             self.thread_id,
-            self.status_line_pull_request_url(),
-        );
-        self.set_status_line(content);
-    }
-
-    pub(super) fn status_line_renderer(&self) -> StatusLineRenderer {
-        if self
-            .config
-            .features
-            .enabled(Feature::TuiExtensionsStatusLine)
-        {
-            StatusLineRenderer::Extension
-        } else {
-            StatusLineRenderer::Native
-        }
+        ));
+        let hyperlink_url = selections
+            .status_line_items
+            .contains(&StatusLineItem::PullRequestNumber)
+            .then(|| self.status_line_pull_request_url())
+            .flatten();
+        self.set_status_line_hyperlink(hyperlink_url);
     }
 
     /// Clears the terminal title Codex most recently wrote, if any.
@@ -859,11 +852,11 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn status_line_pull_request_url(&self) -> Option<&str> {
+    fn status_line_pull_request_url(&self) -> Option<String> {
         self.status_line_git_summary
             .as_ref()
             .and_then(|summary| summary.pull_request.as_ref())
-            .map(|pull_request| pull_request.url.as_str())
+            .map(|pull_request| pull_request.url.clone())
     }
 
     pub(super) fn status_surface_preview_value_for_item(

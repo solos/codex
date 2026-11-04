@@ -77,7 +77,7 @@ stream_max_retries = 0
                 let mut app_server =
                     crate::start_embedded_app_server_for_picker(&server_config).await?;
                 // Exercise remote request semantics with a real server and separate client config.
-                app_server.thread_params_mode = ThreadParamsMode::Remote;
+                app_server.thread_params_mode = ThreadParamsMode::Embedded;
                 app_server.remote_cwd_override = Some(remote_cwd.to_path_buf());
                 let started = app_server.start_thread(&client_config).await?;
                 let thread_id = started.session.thread_id;

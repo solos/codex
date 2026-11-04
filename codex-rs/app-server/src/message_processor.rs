@@ -42,12 +42,10 @@ use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::ProjectRequestProcessor;
-use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadQueueRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
-use crate::request_processors::ThreadResumeTarget;
 use crate::request_processors::TurnRequestProcessor;
 use crate::request_processors::WindowsSandboxRequestProcessor;
 use crate::request_processors::account_processor::handle_gcp_setup;
@@ -60,7 +58,6 @@ use crate::startup_warnings::StartupWarnings;
 use crate::thread_state::ConnectionCapabilities;
 use crate::thread_state::ThreadStateManager;
 use crate::transport::AppServerTransport;
-use crate::transport::RemoteControlHandle;
 use crate::turn_cost_worker::TurnCostWorker;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppServerRpcTransport;
@@ -80,7 +77,6 @@ use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_core::ThreadManager;
-use codex_core::ThreadStoreBuilder;
 use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
@@ -90,7 +86,6 @@ use codex_feedback::CodexFeedback;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
-use codex_models_manager::manager::ModelCatalogSettings;
 use codex_otel::auth_storage::AuthStorageOriginator;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -101,7 +96,6 @@ use codex_rollout::StateDbHandle;
 use codex_state::log_db::LogDbLayer;
 use codex_thread_store::LocalQueueStore;
 use codex_thread_store::QueueStore;
-use codex_thread_store::ThreadStoreError;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast;
@@ -172,7 +166,6 @@ pub(crate) struct MessageProcessor {
     mcp_processor: McpRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     project_processor: ProjectRequestProcessor,
-    pub(super) remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_queue_processor: ThreadQueueRequestProcessor,
@@ -184,7 +177,6 @@ pub(crate) struct MessageProcessor {
 
 #[derive(Debug)]
 pub(crate) struct ConnectionSessionState {
-    disconnect: CancellationToken,
     pub(crate) rpc_gate: Arc<ConnectionRpcGate>,
     pub(crate) origin: crate::transport::ConnectionOrigin,
     pub(crate) mcp_event_streams: McpEventStreams,
@@ -205,7 +197,6 @@ impl ConnectionSessionState {
     pub(crate) fn new(origin: crate::transport::ConnectionOrigin) -> Self {
         Self {
             origin,
-            disconnect: CancellationToken::new(),
             rpc_gate: Arc::new(ConnectionRpcGate::new()),
             mcp_event_streams: McpEventStreams::default(),
             initialized: OnceLock::new(),
@@ -259,7 +250,6 @@ impl ConnectionSessionState {
 }
 
 pub(crate) struct MessageProcessorArgs {
-    pub(crate) cloud_skill_provider: Option<Arc<dyn codex_skills_extension::SkillProvider>>,
     pub(crate) outgoing: Arc<OutgoingMessageSender>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) arg0_paths: Arg0DispatchPaths,
@@ -279,7 +269,6 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
     pub(crate) rpc_transport: AppServerRpcTransport,
-    pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     /// `None` skips startup tasks; otherwise preserve the initial config-loading path.
     pub(crate) plugin_startup_tasks: Option<PluginStartupConfig>,
 }
@@ -289,7 +278,6 @@ impl MessageProcessor {
     /// `Sender` so handlers can enqueue messages to be written to stdout.
     pub(crate) fn new(args: MessageProcessorArgs) -> Self {
         let MessageProcessorArgs {
-            cloud_skill_provider,
             outgoing,
             analytics_events_client,
             arg0_paths,
@@ -308,7 +296,6 @@ impl MessageProcessor {
             installation_id,
             code_mode_session_provider,
             rpc_transport,
-            remote_control_handle,
             plugin_startup_tasks,
         } = args;
         // Startup credential reads must not open a browser before initialize selects the policy.
@@ -320,27 +307,7 @@ impl MessageProcessor {
         // The thread store is intentionally process-scoped. Config reloads can
         // affect per-thread behavior, but they must not move newly started,
         // resumed, or forked threads to a different persistence backend/root.
-        let sqlite = config.sqlite_config().clone();
-        let guardian_v3_enabled = config.features.enabled(Feature::GuardianV3);
-        let thread_store = ThreadStoreBuilder::from_config(config.as_ref(), state_db.clone())
-            .with_additional_cleanup(move |thread_ids| {
-                let sqlite = sqlite.clone();
-                Box::pin(async move {
-                    crate::delete_agent_message_boards(&sqlite, &thread_ids).await?;
-                    if guardian_v3_enabled {
-                        let boards = thread_ids.into_iter().map(Into::into).collect::<Vec<_>>();
-                        codex_guardian_v3::delete_local_boards(&sqlite, &boards)
-                            .await
-                            .map_err(|err| ThreadStoreError::Internal {
-                                message: format!(
-                                    "failed to delete Guardian evidence boards: {err}"
-                                ),
-                            })?;
-                    }
-                    Ok(())
-                })
-            })
-            .build();
+        let thread_store = codex_core::thread_store_from_config(config.as_ref(), state_db.clone());
         // Queue persistence requires SQLite, so in-memory thread stores and
         // app servers without a state database do not have a queue backend.
         let queue_store: Option<Arc<dyn QueueStore>> = match &config.experimental_thread_store {
@@ -354,6 +321,7 @@ impl MessageProcessor {
         let restriction_product = session_source.restriction_product();
         let executor_skill_provider: Arc<dyn codex_skills_extension::SkillProvider> = Arc::new(
             codex_skills_extension::ExecutorSkillProvider::new_with_restriction_product(
+                Arc::clone(&environment_manager_for_extensions),
                 restriction_product,
             ),
         );
@@ -372,15 +340,10 @@ impl MessageProcessor {
                     Arc::clone(&extension_event_sink),
                 ))
             });
-            let startup = codex_core::build_startup_models(
-                config.as_ref(),
-                auth_manager.clone(),
-                installation_id,
-                Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
-            );
             let manager = ThreadManager::new(
                 config.as_ref(),
-                startup,
+                auth_manager.clone(),
+                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
@@ -396,7 +359,6 @@ impl MessageProcessor {
                         goal_service: Arc::clone(&goal_service),
                         environment_manager: Arc::clone(&environment_manager_for_extensions),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
-                        cloud_skill_provider: cloud_skill_provider.clone(),
                         git_attribution_base_url: config.chatgpt_base_url.clone(),
                         http_client_factory: config.http_client_factory(),
                         queue_service: queue_service.clone(),
@@ -410,6 +372,7 @@ impl MessageProcessor {
                 codex_core::passthrough_image_store(),
                 Arc::clone(&thread_store),
                 codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
+                installation_id,
                 Some(app_server_attestation_provider(
                     outgoing.clone(),
                     thread_state_manager.clone(),
@@ -429,7 +392,8 @@ impl MessageProcessor {
             config_manager.clone(),
             startup_cwd,
             Arc::clone(&config),
-            Arc::clone(&thread_manager),
+            thread_manager.get_models_manager(),
+            Arc::clone(&auth_manager),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_catalog);
         let turn_cost_worker =
@@ -525,7 +489,6 @@ impl MessageProcessor {
             config_manager.clone(),
             on_effective_plugins_changed,
         );
-        let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -661,7 +624,6 @@ impl MessageProcessor {
             mcp_processor,
             plugin_processor,
             project_processor,
-            remote_control_processor,
             search_processor,
             thread_goal_processor,
             thread_queue_processor,
@@ -822,40 +784,6 @@ impl MessageProcessor {
         self.thread_processor.thread_created_receiver()
     }
 
-    pub(crate) async fn daemon_recovery_snapshot(
-        &self,
-    ) -> codex_app_server_transport::daemon_recovery::RecoverySnapshot {
-        self.thread_processor.daemon_recovery_snapshot().await
-    }
-
-    pub(crate) async fn restore_daemon_threads(
-        &self,
-        mut snapshot: codex_app_server_transport::daemon_recovery::RecoverySnapshot,
-    ) {
-        for thread_id in snapshot.loaded {
-            let Ok(_permit) = self.turn_admission.admit() else {
-                break;
-            };
-            if let Err(err) = self
-                .thread_processor
-                .thread_resume(
-                    ThreadResumeTarget::DaemonRecovery(snapshot.interrupted.remove(&thread_id)),
-                    codex_app_server_protocol::ThreadResumeParams {
-                        thread_id: thread_id.clone(),
-                        exclude_turns: true,
-                        ..Default::default()
-                    },
-                    /*app_server_client_name*/ None,
-                    /*app_server_client_version*/ None,
-                    ClientMcpExtensions::default(),
-                )
-                .await
-            {
-                tracing::warn!(code = err.code, "failed to restore saved daemon thread");
-            }
-        }
-    }
-
     pub(crate) async fn send_initialize_notifications_to_connection(
         &self,
         connection_id: ConnectionId,
@@ -931,7 +859,6 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
-        session_state.disconnect.cancel();
         session_state.rpc_gate.close().await;
         self.account_processor
             .gateway_connection_closed(connection_id);
@@ -1060,7 +987,6 @@ impl MessageProcessor {
             | ClientRequest::ThreadDelete { .. }
             | ClientRequest::ThreadArchive { .. } => (Some(self.turn_admission.admit()?), false),
             ClientRequest::ThreadSample { .. }
-            | ClientRequest::ThreadGuardianReview { .. }
             | ClientRequest::TurnStart { .. }
             | ClientRequest::TurnSteer { .. }
             | ClientRequest::ReviewStart { .. }
@@ -1242,46 +1168,6 @@ impl MessageProcessor {
                     .experimental_feature_enablement_set(request_id.clone(), params)
                     .await
             }
-            ClientRequest::RemoteControlEnable { params, .. } => self
-                .remote_control_processor
-                .enable(
-                    params.is_some_and(|params| params.ephemeral),
-                    app_server_client_name.as_deref(),
-                )
-                .await
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlDisable { params, .. } => self
-                .remote_control_processor
-                .disable(
-                    params.is_some_and(|params| params.ephemeral),
-                    app_server_client_name.as_deref(),
-                )
-                .await
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlStatusRead { .. } => self
-                .remote_control_processor
-                .status_read()
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlPairingStart { params, .. } => self
-                .remote_control_processor
-                .pairing_start(params, app_server_client_name.as_deref())
-                .await
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlPairingStatus { params, .. } => self
-                .remote_control_processor
-                .pairing_status(params)
-                .await
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlClientsList { params, .. } => self
-                .remote_control_processor
-                .clients_list(params)
-                .await
-                .map(|response| Some(response.into())),
-            ClientRequest::RemoteControlClientsRevoke { params, .. } => self
-                .remote_control_processor
-                .clients_revoke(params)
-                .await
-                .map(|response| Some(response.into())),
             ClientRequest::ConfigRequirementsRead { params: _, .. } => self
                 .config_processor
                 .config_requirements_read()
@@ -1341,16 +1227,6 @@ impl MessageProcessor {
                 .unwatch(connection_id, params)
                 .await
                 .map(|response| Some(response.into())),
-            ClientRequest::ModelProviderList { params, .. } => self
-                .config_processor
-                .model_provider_list(params)
-                .await
-                .map(|r| Some(r.into())),
-            ClientRequest::ModelProviderConfigWrite { params, .. } => self
-                .config_processor
-                .model_provider_config_write(params)
-                .await
-                .map(|r| Some(r.into())),
             ClientRequest::ModelProviderCapabilitiesRead { params: _, .. } => self
                 .config_processor
                 .model_provider_capabilities_read()
@@ -1382,7 +1258,7 @@ impl MessageProcessor {
             ClientRequest::ThreadResume { params, .. } => {
                 self.thread_processor
                     .thread_resume(
-                        ThreadResumeTarget::Client(request_id.clone()),
+                        request_id.clone(),
                         params,
                         app_server_client_name.clone(),
                         client_version.clone(),
@@ -1505,9 +1381,7 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadSectionMove { params, .. } => {
-                self.thread_processor
-                    .thread_section_move(request_id.clone(), params)
-                    .await
+                self.thread_processor.thread_section_move(params).await
             }
             ClientRequest::ThreadSectionList { params, .. } => {
                 self.thread_processor.thread_section_list(params).await
@@ -1659,43 +1533,11 @@ impl MessageProcessor {
             ClientRequest::PluginList { params, .. } => {
                 self.plugin_processor.plugin_list(params).await
             }
-            ClientRequest::PluginSearch { params, .. } => {
-                self.plugin_processor.plugin_search(params).await
-            }
             ClientRequest::PluginInstalled { params, .. } => {
                 self.plugin_processor.plugin_installed(params).await
             }
-            ClientRequest::PluginReconcile { params, .. } => {
-                self.plugin_processor
-                    .plugin_reconcile(
-                        params,
-                        self.config_processor.clone(),
-                        &self.request_serialization_queues,
-                    )
-                    .await
-            }
             ClientRequest::PluginRead { params, .. } => {
                 self.plugin_processor.plugin_read(params).await
-            }
-            ClientRequest::PluginSkillRead { params, .. } => {
-                self.plugin_processor.plugin_skill_read(params).await
-            }
-            ClientRequest::PluginShareSave { params, .. } => {
-                self.plugin_processor.plugin_share_save(params).await
-            }
-            ClientRequest::PluginShareUpdateTargets { params, .. } => {
-                self.plugin_processor
-                    .plugin_share_update_targets(params)
-                    .await
-            }
-            ClientRequest::PluginShareList { params, .. } => {
-                self.plugin_processor.plugin_share_list(params).await
-            }
-            ClientRequest::PluginShareCheckout { params, .. } => {
-                self.plugin_processor.plugin_share_checkout(params).await
-            }
-            ClientRequest::PluginShareDelete { params, .. } => {
-                self.plugin_processor.plugin_share_delete(params).await
             }
             ClientRequest::AppsRead { params, .. } => self.apps_processor.apps_read(params).await,
             ClientRequest::AppsList { params, .. } => {
@@ -1744,20 +1586,6 @@ impl MessageProcessor {
                         client_version.clone(),
                     )
                     .await
-            }
-            ClientRequest::ThreadGuardianReview { params, .. } => {
-                let cancellation = &request_context.cancellation;
-                let review =
-                    self.turn_processor
-                        .thread_guardian_review(&request_id, params, cancellation);
-                tokio::pin!(review);
-                tokio::select! {
-                    result = &mut review => result,
-                    _ = session.disconnect.cancelled() => {
-                        cancellation.cancel();
-                        review.await
-                    }
-                }
             }
             ClientRequest::ThreadInjectItems { params, .. } => {
                 self.turn_processor
@@ -2047,7 +1875,3 @@ mod gateway_oauth_tests;
 #[cfg(test)]
 #[path = "message_processor_thread_lifecycle_tests.rs"]
 mod thread_lifecycle_tests;
-
-#[cfg(test)]
-#[path = "message_processor_workspace_routing_tests.rs"]
-mod workspace_routing_tests;

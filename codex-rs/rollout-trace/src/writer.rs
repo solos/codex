@@ -1,7 +1,4 @@
 //! Hot-path trace bundle writer.
-//!
-//! All producers share one writer. Write failures prevent further recording and
-//! suppress the final closing event.
 
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -17,7 +14,6 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use serde::Serialize;
 
 use crate::bundle::MANIFEST_FILE_NAME;
@@ -48,8 +44,6 @@ struct TraceWriterInner {
     event_log: BufWriter<File>,
     next_seq: u64,
     next_payload_ordinal: u64,
-    // Preserve the first failure even when a producer cannot return it to its caller.
-    error: Option<String>,
 }
 
 impl TraceWriter {
@@ -68,13 +62,14 @@ impl TraceWriter {
         let started_at_unix_ms = unix_time_ms();
         let manifest =
             TraceBundleManifest::new(trace_id, rollout_id, root_thread_id, started_at_unix_ms);
+        write_json_file(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest)?;
+
         let event_log_path = bundle_dir.join(RAW_EVENT_LOG_FILE_NAME);
         let event_log = OpenOptions::new()
-            .create_new(true)
-            .write(true)
+            .create(true)
+            .append(true)
             .open(&event_log_path)
             .with_context(|| format!("open trace event log {}", event_log_path.display()))?;
-        write_json_file(&bundle_dir.join(MANIFEST_FILE_NAME), &manifest)?;
 
         Ok(Self {
             inner: Mutex::new(TraceWriterInner {
@@ -83,7 +78,6 @@ impl TraceWriter {
                 event_log: BufWriter::new(event_log),
                 next_seq: 1,
                 next_payload_ordinal: 1,
-                error: None,
             }),
         })
     }
@@ -95,7 +89,6 @@ impl TraceWriter {
         value: &impl Serialize,
     ) -> Result<RawPayloadRef> {
         let mut inner = self.lock_inner();
-        inner.check()?;
         let ordinal = inner.next_payload_ordinal;
         inner.next_payload_ordinal += 1;
         let raw_payload_id = format!("raw_payload:{ordinal}");
@@ -104,8 +97,7 @@ impl TraceWriter {
         // Payload files are created before the event that references them. A
         // replay interrupted after an event is appended should never point at a
         // payload file that the writer planned but had not written yet.
-        let result = write_json_file(&absolute_path, value);
-        inner.record_result(result)?;
+        write_json_file(&absolute_path, value)?;
         Ok(RawPayloadRef {
             raw_payload_id,
             kind,
@@ -125,7 +117,6 @@ impl TraceWriter {
         payload: RawTraceEventPayload,
     ) -> Result<RawTraceEvent> {
         let mut inner = self.lock_inner();
-        inner.check()?;
         let event = RawTraceEvent {
             schema_version: RAW_TRACE_EVENT_SCHEMA_VERSION,
             seq: inner.next_seq,
@@ -135,20 +126,11 @@ impl TraceWriter {
             codex_turn_id: context.codex_turn_id,
             payload,
         };
-        let result = (|| {
-            serde_json::to_writer(&mut inner.event_log, &event)?;
-            inner.event_log.write_all(b"\n")?;
-            inner.event_log.flush()?;
-            Ok(())
-        })();
-        inner.record_result(result)?;
         inner.next_seq += 1;
+        serde_json::to_writer(&mut inner.event_log, &event)?;
+        inner.event_log.write_all(b"\n")?;
+        inner.event_log.flush()?;
         Ok(event)
-    }
-
-    /// Reports any earlier recording failure, including failures in detached producers.
-    pub(crate) fn check(&self) -> Result<()> {
-        self.lock_inner().check()
     }
 
     fn lock_inner(&self) -> MutexGuard<'_, TraceWriterInner> {
@@ -156,34 +138,6 @@ impl TraceWriter {
         // writer would lose subsequent diagnostic events in exactly the session
         // we are trying to debug.
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-impl TraceWriterInner {
-    fn check(&self) -> Result<()> {
-        if let Some(error) = &self.error {
-            bail!("rollout recording failed: {error}");
-        }
-        Ok(())
-    }
-
-    fn record_result<T>(&mut self, result: Result<T>) -> Result<T> {
-        if let Err(error) = &result {
-            let error = format!("{error:#}");
-            tracing::error!("rollout recording failed: {error}");
-            self.error = Some(error);
-        }
-        result
-    }
-}
-
-impl Drop for TraceWriter {
-    fn drop(&mut self) {
-        // The last producer releases the writer, even for interrupted turns.
-        // This marks recorder closure, not successful task completion.
-        if !self.inner.is_poisoned() && !std::thread::panicking() {
-            let _ = self.append(RawTraceEventPayload::RecordingCompleted);
-        }
     }
 }
 
@@ -310,56 +264,6 @@ mod tests {
             "payloads/1.json"
         );
 
-        Ok(())
-    }
-
-    #[test]
-    fn payload_failure_prevents_finalization_even_after_storage_recovers() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let writer =
-            TraceWriter::create(temp.path(), "trace".into(), "rollout".into(), "root".into())?;
-        std::fs::remove_dir(temp.path().join("payloads"))?;
-        assert!(
-            writer
-                .write_json_payload(RawPayloadKind::ProtocolEvent, &json!({}))
-                .is_err()
-        );
-        std::fs::create_dir(temp.path().join("payloads"))?;
-        assert!(writer.check().is_err());
-        assert!(
-            writer
-                .write_json_payload(RawPayloadKind::ProtocolEvent, &json!({}))
-                .is_err()
-        );
-        drop(writer);
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("trace.jsonl"))?,
-            ""
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn event_write_failure_prevents_finalization() -> anyhow::Result<()> {
-        let temp = TempDir::new()?;
-        let writer =
-            TraceWriter::create(temp.path(), "trace".into(), "rollout".into(), "root".into())?;
-        // A read-only file makes the real buffered write fail on every platform.
-        writer.lock_inner().event_log =
-            std::io::BufWriter::new(std::fs::File::open(temp.path().join("trace.jsonl"))?);
-        assert!(
-            writer
-                .append(RawTraceEventPayload::RolloutEnded {
-                    status: RolloutStatus::Completed
-                })
-                .is_err()
-        );
-        assert!(writer.check().is_err());
-        drop(writer);
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("trace.jsonl"))?,
-            ""
-        );
         Ok(())
     }
 }

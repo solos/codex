@@ -68,7 +68,7 @@ async fn user_verification_rpc_disconnect_cancels_worker_and_releases_slot() -> 
 
 #[tokio::test]
 async fn user_verification_rpc_network_peers_cannot_use_server_keys() -> Result<()> {
-    for origin in [ConnectionOrigin::WebSocket, ConnectionOrigin::RemoteControl] {
+    for origin in [ConnectionOrigin::WebSocket] {
         let mut h = Harness::new(origin, || true).await?;
         h.initialize("codex-tui", /*opt_in*/ true).await;
         for method in [

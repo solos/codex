@@ -155,27 +155,6 @@ fn exec_server_websocket_auth_rejects_inapplicable_transports() -> Result<()> {
     for (transport, expected) in [
         (vec!["--listen", "stdio"], "not stdio"),
         (vec!["--listen", "stdio://"], "not stdio"),
-        (
-            vec![
-                "--remote",
-                "https://registry.example",
-                "--environment-id",
-                "test",
-            ],
-            "cannot be used with --remote",
-        ),
-        (
-            vec![
-                "forward",
-                "--connect",
-                "ws://127.0.0.1:1234",
-                "--remote",
-                "https://registry.example",
-                "--environment-id",
-                "test",
-            ],
-            "cannot be used with --remote",
-        ),
     ] {
         assert_cmd::Command::new(&codex)
             .env("CODEX_HOME", home.path())

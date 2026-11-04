@@ -213,10 +213,7 @@ fn serialize_layer_stack<S>(
             })
         })
         .collect::<Result<Vec<_>, ReadEnvironmentConfigError>>()?;
-    Ok(EnvironmentConfigLayerStack {
-        layers,
-        cloud_insertion_index: stack.cloud_insertion_index,
-    })
+    Ok(EnvironmentConfigLayerStack { layers })
 }
 
 #[cfg(test)]

@@ -249,7 +249,6 @@ use crate::render::renderable::RenderableExt;
 use crate::render::renderable::RenderableItem;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
-use crate::status::remote_connection::RemoteConnectionStatus;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
@@ -281,7 +280,6 @@ mod goal_menu;
 mod ide_context;
 use self::ide_context::IdeContextState;
 mod input_queue;
-mod provider_error;
 mod reconnect;
 use self::input_queue::InputQueueState;
 mod image_submission;
@@ -559,8 +557,7 @@ pub(crate) struct ChatWidget {
     session_header: SessionHeader,
     pub(crate) initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
-    pub(crate) remote_connection: Option<RemoteConnectionStatus>,
-    /// Remote app servers cannot read image paths on the TUI host.
+    /// App servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
     pub(crate) local_worktree_operations: bool,
@@ -599,7 +596,6 @@ pub(crate) struct ChatWidget {
     // Remember the account's Reserve entry notice across chats and transient banner refreshes.
     luna_reserve_notice_account_id: Option<String>,
     pub(crate) warning_display_state: WarningDisplayState,
-    pub(crate) composer_images: Option<crate::transcript_image::composer::ComposerImages>,
     pub(crate) rendered_selection: std::cell::RefCell<crate::rendered_selection::RenderedSelection>,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
     add_credits_nudge_email_in_flight: Option<rate_limits::PendingCreditsNudge>,
@@ -650,9 +646,6 @@ pub(crate) struct ChatWidget {
     ide_context: IdeContextState,
     plugins_cache: PluginsCacheState,
     plugins_fetch_state: PluginListFetchState,
-    plugin_remote_sections_loading: bool,
-    plugin_remote_sections_loaded: bool,
-    plugin_remote_section_errors: Vec<crate::app_event::PluginRemoteSectionError>,
     plugin_install_apps_needing_auth: Vec<AppSummary>,
     plugin_install_auth_flow: Option<PluginInstallAuthFlowState>,
     plugins_active_tab_id: Option<String>,
@@ -687,7 +680,6 @@ pub(crate) struct ChatWidget {
     active_side_conversation: bool,
     blocks_direct_input: bool,
     external_writer_view: bool,
-    provider_error: Option<codex_app_server_protocol::ModelProviderError>,
     /// Covers both queued and executing forks so repeated shortcuts cannot queue another one.
     pub(crate) fork_in_progress: bool,
     misalignment_policy_violation: Option<misalignment_policy::MisalignmentViolation>,
@@ -712,7 +704,6 @@ pub(crate) struct ChatWidget {
     safety_buffering_source: UserMessageSource,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
-    new_backend_label: Option<String>,
     /// Whether the preset submenu owns the next key.
     quick_dial_menu: bool,
     /// Ignore a held key after it dismisses the preset submenu.
@@ -1268,31 +1259,31 @@ impl ChatWidget {
         &mut self,
         cell: &dyn HistoryCell,
     ) -> Option<Box<dyn HistoryCell>> {
-        let active = self.transcript.active_cell.as_ref()?;
         // Keep the placeholder session header as the active cell until real session info arrives,
         // so we can merge headers instead of committing a duplicate box to history.
-        if !self.is_session_configured()
-            && active
-                .as_any()
-                .is::<history_cell::SessionHeaderHistoryCell>()
-        {
-            return None;
-        }
+        let keep_placeholder_header_active = !self.is_session_configured()
+            && self
+                .transcript
+                .active_cell
+                .as_ref()
+                .is_some_and(|c| c.as_any().is::<history_cell::SessionHeaderHistoryCell>());
         let history_width = self
             .last_rendered_width
             .get()
             .map(|width| self.history_wrap_width(width))
             .unwrap_or(u16::MAX);
 
-        if !cell
-            .display_lines_for_mode(history_width, self.history_render_mode())
-            .is_empty()
+        if !keep_placeholder_header_active
+            && !cell
+                .display_lines_for_mode(history_width, self.history_render_mode())
+                .is_empty()
         {
             // Only break exec grouping if the cell renders visible lines.
             if !self.has_active_stream_tail() {
                 return self.transcript.take_active_cell();
             }
-        } else if self.has_completed_tool_activity()
+        } else if !keep_placeholder_header_active
+            && self.has_completed_tool_activity()
             && !cell.transcript_lines(history_width).is_empty()
         {
             return self.transcript.take_active_cell();
@@ -1603,14 +1594,6 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn add_server_version_warning(
-        &mut self,
-        notice: crate::status::remote_connection::ServerVersionNotice,
-    ) {
-        self.add_to_history(history_cell::new_server_version_warning(notice));
-        self.request_redraw();
-    }
-
     pub(crate) fn add_error_message(&mut self, message: String) {
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
@@ -1746,17 +1729,6 @@ impl ChatWidget {
         if !had_rendered_width {
             self.request_redraw();
         }
-    }
-
-    /// Reflow at the allocated conversation width and report any presentation-only revision change.
-    pub(crate) fn resize_owned_conversation(&mut self, width: u16) -> Option<(u64, u64)> {
-        if self.last_rendered_width.get() == Some(width) {
-            return None;
-        }
-        let previous = self.transcript.active_cell_revision;
-        self.on_terminal_resize(width);
-        let reflowed = self.transcript.active_cell_revision;
-        (previous != reflowed).then_some((previous, reflowed))
     }
 
     /// Whether an agent message stream is active (not a plan stream).
@@ -2086,16 +2058,9 @@ impl ChatWidget {
         &self.config
     }
 
+    #[cfg(test)]
     pub(crate) fn status_line_text(&self) -> Option<String> {
-        self.status_line_content()
-            .cloned()
-            .map(|content| content.into_hyperlink_line().line.to_string())
-    }
-
-    pub(crate) fn status_line_content(
-        &self,
-    ) -> Option<&crate::bottom_pane::footer_content::FooterContent> {
-        self.bottom_pane.status_line_content()
+        self.bottom_pane.status_line_text()
     }
 
     pub(crate) fn clear_token_usage(&mut self) {

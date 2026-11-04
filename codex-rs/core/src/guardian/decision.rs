@@ -50,7 +50,7 @@ pub(crate) fn decide_approval(
     reasons: ApprovalRequestReasons,
     mut options: GuardianReviewOptions,
 ) -> futures::future::BoxFuture<'static, Option<ReviewDecision>> {
-    let mut context: GuardianReviewContext = context.into();
+    let context: GuardianReviewContext = context.into();
     let request: ReviewAction = request.into();
     // Bind the invocation before scheduling. Async review cleanup can outlive
     // the decision, but must not extend the time blocking this tool.
@@ -90,9 +90,6 @@ pub(crate) fn decide_approval(
     } else {
         None
     };
-    context.review_execution = review_timing
-        .as_ref()
-        .and_then(codex_direct_tool_timing::ToolBlockingTimingGuard::review_execution);
     Box::pin(async move {
         let _review_timing = review_timing;
         let (_, history_reset) = session.history_reset().await;
@@ -116,23 +113,9 @@ pub(crate) fn decide_approval(
             context.approval_policy,
             &turn.config.permissions.effective_permission_profile(),
         );
-        let mut require_synchronous_review = options.require_synchronous_review;
-        if let Some(assessment) = &context.serving_assessment {
-            let permissions = request.request.as_ref().ok().and_then(|request| {
-                super::permissions::for_environment(&context, request.target_environment_id()).ok()
-            });
-            require_synchronous_review |= !assessment.authorization.local.retained_context_complete
-                || permissions.as_ref() != Some(&assessment.authorization.permissions)
-                || assessment.authorization
-                    != super::ScoreAuthorization::for_session(
-                        &session,
-                        &assessment.authorization.permissions,
-                    )
-                    .await;
-        }
+        let require_synchronous_review = options.require_synchronous_review;
         let retried = reasons.retry.is_some();
         let decision = codex_guardian_reviewer::ReviewRequest {
-            serving_assessment: context.serving_assessment.as_ref().map(|value| value.requires_review),
             host: ReviewRuntime {
                 session: Arc::clone(&session),
                 history_reset: history_reset.clone(),

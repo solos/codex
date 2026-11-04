@@ -996,7 +996,6 @@ async fn submission_prefers_selected_duplicate_skill_path() {
             mention: "figma".to_string(),
             path: user_skill_path.to_string_lossy().into_owned(),
         }],
-        crate::bottom_pane::ShellPrefixHandling::Interpret,
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1173,42 +1172,6 @@ async fn blocked_image_restore_with_remote_images_keeps_local_placeholder_mappin
     assert_eq!(chat.bottom_pane.composer_text_elements(), text_elements);
     assert_eq!(chat.bottom_pane.composer_local_images(), local_images);
     assert_eq!(chat.remote_image_urls(), remote_image_urls);
-}
-
-#[tokio::test]
-async fn startup_draft_handoff_preserves_literal_and_shell_bang() {
-    for text in [
-        "!echo literal",
-        "!echo literal\nsecond line",
-        "  !echo literal",
-    ] {
-        let (mut source, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-        source.bottom_pane.insert_str(&format!("x{text}"));
-        source.bottom_pane.set_composer_cursor(/*cursor*/ 0);
-        source.handle_key_event(KeyEvent::from(KeyCode::Delete));
-        let draft = source.composer_draft_snapshot();
-        assert_eq!(draft.text, text);
-        assert_eq!(draft.shell_mode, Some(false));
-
-        let (mut chat, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
-        chat.thread_id = Some(ThreadId::new());
-        chat.restore_startup_draft(draft.clone());
-        assert_eq!(chat.bottom_pane.composer_draft_snapshot(), draft);
-        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-        assert_hidden_shell_payload_is_literal(ops.try_recv(), text.trim().to_string());
-    }
-
-    let (mut source, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    source
-        .bottom_pane
-        .set_composer_text("!pwd".into(), Vec::new(), Vec::new());
-    let draft = source.composer_draft_snapshot();
-    assert_eq!(draft.shell_mode, Some(true));
-    let (mut chat, _rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.restore_startup_draft(draft);
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    assert_matches!(ops.try_recv(), Ok(Op::RunUserShellCommand { command }) if command == "pwd");
 }
 
 #[tokio::test]
@@ -1909,7 +1872,6 @@ async fn restore_thread_input_state_applies_running_state_policy() {
         text_elements: Vec::new(),
     });
     let input_state = ThreadInputState {
-        provider_error: None,
         questions: None,
         pending_thread_settings: None,
         initial_user_message: None,
@@ -2716,7 +2678,6 @@ async fn image_preparation_failure_restores_full_input_without_submitting() {
                 mention: "file".into(),
                 path: "/tmp/skills/file/SKILL.md".into(),
             }],
-            crate::bottom_pane::ShellPrefixHandling::Interpret,
         );
         let draft = chat.bottom_pane.composer_draft_snapshot();
         if oversized {
@@ -2956,55 +2917,4 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
                 assert!(chat.pending_image_submission.is_none());
             });
     }
-}
-
-#[tokio::test]
-async fn provider_error_recovers_only_the_rejected_steer() {
-    let (mut chat, _events, mut operations) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut accepted = pending_steer("Focus on the backend");
-    accepted.client_id = "accepted".into();
-    let mut rejected = pending_steer("Also add tests");
-    rejected.client_id = "rejected".into();
-    chat.input_queue
-        .pending_steers
-        .extend([accepted.clone(), rejected.clone()]);
-
-    chat.show_provider_error(
-        codex_app_server_protocol::ModelProviderError::ModelProviderPolicyConflict {
-            model_provider: "old-provider".into(),
-            required_model_provider: "required-provider".into(),
-        },
-        Some("rejected"),
-    );
-
-    assert_eq!(chat.input_queue.pending_steers, VecDeque::from([accepted]));
-    assert_eq!(
-        chat.input_queue.rejected_steers_queue,
-        VecDeque::from([rejected.user_message])
-    );
-    assert!(chat.input_queue.suppress_queue_autosend);
-    assert!(operations.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn provider_error_recovers_the_rejected_initial_prompt() {
-    let (mut chat, _events, mut operations) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.thread_id = Some(ThreadId::new());
-    chat.submit_user_message(UserMessage::from("Keep this prompt"));
-    let Op::UserTurn {
-        client_user_message_id,
-        ..
-    } = next_submit_op(&mut operations)
-    else {
-        panic!("expected user turn");
-    };
-    chat.show_provider_error(
-        codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
-            model_provider: "old-provider".into(),
-        },
-        Some(&client_user_message_id),
-    );
-    assert_eq!(chat.queued_user_message_texts(), vec!["Keep this prompt"]);
-    assert!(!chat.input_queue.user_turn_pending_start);
-    assert!(operations.try_recv().is_err());
 }

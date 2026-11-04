@@ -459,12 +459,6 @@
             "null"
           ]
         },
-        "allowRemoteControl": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "allowedApprovalPolicies": {
           "items": {
             "$ref": "#/definitions/AskForApproval"
@@ -1273,12 +1267,6 @@
           ]
         },
         "log_guardian_assessments": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "log_sse_deltas": {
           "type": [
             "boolean",
             "null"

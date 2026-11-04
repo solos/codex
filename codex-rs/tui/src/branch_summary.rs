@@ -3,7 +3,7 @@
 //! This module owns the git and GitHub probes behind the TUI `git-branch`, `pull-request-number`,
 //! and `branch-changes` status-line items. It deliberately talks only to a
 //! `WorkspaceCommandExecutor`, not to `tokio::process::Command`, so the same lookup logic works
-//! when the TUI is connected to either an embedded or remote app-server.
+//! when the TUI is connected to its embedded app-server.
 //!
 //! All lookups are best-effort. A failed command, missing `git` or `gh`, unauthenticated GitHub
 //! CLI, non-git directory, or ambiguous repository state should result in absent optional metadata

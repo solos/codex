@@ -45,8 +45,6 @@ async fn config_requirements_read_preserves_import_policy() -> Result<()> {
     for (contents, expected_table) in [
         ("", None),
         ("[in_app_browser]", None),
-        ("allow_remote_control = true", None),
-        ("allow_remote_control = true\n[in_app_browser]", Some(None)),
         (ALLOW, Some(Some(true))),
         (DENY, Some(Some(false))),
     ] {

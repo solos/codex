@@ -149,7 +149,3 @@ pub(super) async fn fetch_installed_connector_mentions(
 
     Ok(ConnectorsSnapshot { connectors })
 }
-
-#[cfg(test)]
-#[path = "connector_mentions_tests.rs"]
-mod tests;

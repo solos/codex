@@ -144,7 +144,6 @@ pub(super) async fn roots(
 
 pub(super) fn list_params() -> ThreadListParams {
     ThreadListParams {
-        current_account_only: true,
         excluded_thread_ids: None,
         attached_to_thread_id: None,
         limit: Some(100),
@@ -194,7 +193,3 @@ async fn estimates(session: &Session, ids: &[&str]) -> Result<Vec<ThreadUsage>, 
     }
     Ok(rows)
 }
-
-#[cfg(test)]
-#[path = "chats_tests.rs"]
-mod tests;

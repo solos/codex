@@ -67,7 +67,6 @@ pub fn render_original_verified_answer(answer: &VerifiedAnswer) -> String {
 #[derive(Clone, PartialEq)]
 pub struct TrustedUserAnswer {
     pub(crate) text: String,
-    pub(crate) protected: bool,
     pub(crate) answer_bytes: Option<usize>,
 }
 
@@ -82,12 +81,8 @@ impl std::fmt::Debug for TrustedUserAnswer {
 
 impl From<String> for TrustedUserAnswer {
     fn from(text: String) -> Self {
-        let protected = text == crate::authorization::TRUSTED_ANSWERS_START
-            || text == ">>> TRUSTED USER ANSWERS END\n"
-            || text == GuardianRootMessage::IncompleteVerifiedAnswers.render();
         Self {
             text,
-            protected,
             answer_bytes: None,
         }
     }
@@ -113,7 +108,6 @@ pub fn collect_verified_answer_candidates(context: &RetainedContext) -> Vec<Trus
         if let RetainedContextEntry::VerifiedAnswer(answer) = entry {
             let text = render_original_verified_answer(answer);
             items.push(TrustedUserAnswer {
-                protected: false,
                 answer_bytes: Some(text.len()),
                 text: format!("Retained source order: {order}\n{text}"),
             });

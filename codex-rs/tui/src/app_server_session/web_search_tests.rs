@@ -31,7 +31,7 @@ async fn legacy_search_overrides_respect_launch_origins() -> Result<()> {
             .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
             .build()
             .await?;
-        let overrides = config_request_overrides_from_config(&config, ThreadParamsMode::Remote)
+        let overrides = config_request_overrides_from_config(&config, ThreadParamsMode::Embedded)
             .expect("config overrides");
         assert_eq!(
             overrides
@@ -77,7 +77,7 @@ async fn web_search_overrides_preserve_explicit_legacy_choices() -> Result<()> {
             .build()
             .await?;
         assert_eq!(
-            config_request_overrides_from_config(&config, ThreadParamsMode::Remote),
+            config_request_overrides_from_config(&config, ThreadParamsMode::Embedded),
             Some(std::collections::HashMap::from([(
                 "web_search".to_string(),
                 serde_json::json!(expected),
@@ -134,7 +134,7 @@ async fn embedded_legacy_search_honors_shared_feature_requirements() -> Result<(
             .await?;
         for (mode, expected) in [
             (ThreadParamsMode::Embedded, embedded_mode),
-            (ThreadParamsMode::Remote, Some(remote_mode)),
+            (ThreadParamsMode::Embedded, Some(remote_mode)),
         ] {
             let overrides =
                 config_request_overrides_from_config(&config, mode).expect("config overrides");

@@ -40,8 +40,6 @@ use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpPermissionPromptAutoApproveContext;
-use codex_mcp::McpPermissionSource;
-use codex_mcp::McpToolRequestMetaHook;
 use codex_mcp::PreparedMcpCall;
 use codex_mcp::SandboxState;
 use codex_mcp::ToolInfo;
@@ -73,12 +71,11 @@ use codex_protocol::mcp_approval_meta::PERSIST_KEY as MCP_TOOL_APPROVAL_PERSIST_
 use codex_protocol::mcp_approval_meta::PERSIST_SESSION as MCP_TOOL_APPROVAL_PERSIST_SESSION;
 use codex_protocol::mcp_approval_meta::SOURCE_CONNECTOR as MCP_TOOL_APPROVAL_SOURCE_CONNECTOR;
 use codex_protocol::mcp_approval_meta::SOURCE_KEY as MCP_TOOL_APPROVAL_SOURCE_KEY;
-use codex_protocol::mcp_approval_meta::TOOL_ANNOTATIONS_KEY as MCP_TOOL_APPROVAL_TOOL_ANNOTATIONS_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_DESCRIPTION_KEY as MCP_TOOL_APPROVAL_TOOL_DESCRIPTION_KEY;
-use codex_protocol::mcp_approval_meta::TOOL_NAME_KEY as MCP_TOOL_APPROVAL_TOOL_NAME_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_DISPLAY_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_DISPLAY_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_PARAMS_KEY as MCP_TOOL_APPROVAL_TOOL_PARAMS_KEY;
 use codex_protocol::mcp_approval_meta::TOOL_TITLE_KEY as MCP_TOOL_APPROVAL_TOOL_TITLE_KEY;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::McpInvocation;
@@ -292,7 +289,7 @@ pub(crate) async fn handle_mcp_tool_call(
         &hook_tool_name,
         &metadata,
         prepared_call.config(),
-        prepared_call.permission_source(),
+        prepared_call.permission_profile(),
         prepared_call.server_environment_id(),
         approval_policy,
     )
@@ -488,39 +485,6 @@ async fn handle_approved_mcp_tool_call(
     let mut tool_input = arguments_value
         .clone()
         .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new()));
-    let is_search = prepared_call.is_host_owned_apps()
-        && codex_mcp::is_model_search_tool(prepared_call.tool_info());
-    let search = if is_search {
-        step_context
-            .extension_data
-            .get::<crate::model_search::ModelSearch>()
-    } else {
-        None
-    };
-    // Code Mode can retain this step past a later turn's first native call.
-    // A call rejected here never reaches the peer or acquires MCP attribution.
-    if matches!(
-        search.as_deref(),
-        Some(crate::model_search::ModelSearch::Hosted { .. })
-    ) && !crate::model_search::SearchOwner::admit(
-        &sess.services.thread_extension_data,
-        codex_protocol::openai_models::WebSearchProvider::SearchMcp,
-    ) {
-        let result = notify_mcp_tool_call_skip(
-            sess,
-            turn_context,
-            call_id,
-            invocation,
-            item_metadata,
-            "This thread is using native search".to_string(),
-            /*already_started*/ true,
-        )
-        .await;
-        return HandledMcpToolCall {
-            result: CallToolResult::from_result(result),
-            tool_input,
-        };
-    }
     let mut elicitation_type = None;
     let mut request_error_code = None;
     let result = async {
@@ -576,58 +540,13 @@ async fn handle_approved_mcp_tool_call(
                     if let Some(rewritten_arguments) = rewritten_arguments.as_ref() {
                         tool_input = rewritten_arguments.clone();
                     }
-                    let mut request_meta = build_mcp_tool_call_request_meta(
+                    let request_meta = build_mcp_tool_call_request_meta(
                         step_context,
                         &server,
                         call_id,
                         Some(&metadata),
                         prepared_call.is_host_owned_apps(),
                     );
-                    if let Some(recipient) = sess
-                        .services
-                        .thread_extension_data
-                        .get::<crate::AgentMcpMetadataRecipient>()
-                        && recipient.matches(
-                            prepared_call.server_name(),
-                            &prepared_call.config().mcp_server_catalog,
-                        )
-                        && let Some(JsonValue::Object(meta)) = &mut request_meta
-                    {
-                        meta.insert(
-                            "x-codex-root-turn-id".into(),
-                            serde_json::json!(turn_context.turn_metadata_state.root_turn_id()),
-                        );
-                        meta.insert(
-                            "x-codex-cyber-access-program".into(),
-                            serde_json::json!(turn_context.cyber_access_program),
-                        );
-                    }
-                    let request_meta = if let Some(crate::model_search::ModelSearch::Hosted {
-                        binding,
-                        context,
-                    }) = search.as_deref()
-                    {
-                        let mut meta = request_meta.unwrap_or_else(|| serde_json::json!({}));
-                        let turn_meta = meta
-                            .as_object_mut()
-                            .ok_or_else(|| anyhow::anyhow!("invalid MCP metadata"))?
-                            .entry(crate::X_CODEX_TURN_METADATA_HEADER)
-                            .or_insert_with(|| serde_json::json!({}));
-                        crate::model_search::with_search_context(turn_meta, context)?;
-                        let pin = binding
-                            .search_invocation_context(&prepared_call)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("Search MCP connection changed after discovery")
-                            })?;
-                        let apps = meta
-                            .get_mut(MCP_TOOL_CODEX_APPS_META_KEY)
-                            .and_then(serde_json::Value::as_object_mut)
-                            .ok_or_else(|| anyhow::anyhow!("missing hosted Apps call metadata"))?;
-                        apps.insert("invocation_context".to_string(), pin.clone());
-                        Some(meta)
-                    } else {
-                        request_meta
-                    };
                     let request_meta = with_mcp_tool_call_ids_meta(
                         request_meta,
                         &sess.thread_id.to_string(),
@@ -640,37 +559,14 @@ async fn handle_approved_mcp_tool_call(
                         request_meta,
                     )
                     .await?;
-                    if is_search
-                        && let Some(usage) = step_context
-                            .turn
-                            .extension_data
-                            .get::<crate::model_search::SearchTurnUsage>()
-                    {
-                        usage.record(
-                            &step_context.turn,
-                            codex_protocol::openai_models::WebSearchProvider::SearchMcp,
-                        );
-                    }
                     let mcp_call_trace = sess
                         .services
                         .rollout_thread_trace
                         .start_mcp_call_trace(call_id);
-                    let mut request_meta = mcp_call_trace.add_request_meta(request_meta);
-                    if let Some(hook) = sess
-                        .services
-                        .thread_extension_data
-                        .get::<McpToolRequestMetaHook>()
-                    {
-                        hook.apply(
-                            &prepared_call,
-                            sess.thread_id,
-                            &turn_context.sub_id,
-                            call_id,
-                            &mut request_meta,
-                        )
-                        .await?;
-                    }
-                    Ok((rewritten_arguments, request_meta))
+                    Ok((
+                        rewritten_arguments,
+                        mcp_call_trace.add_request_meta(request_meta),
+                    ))
                 })
                 .await
                 .map_err(|error| {
@@ -1305,7 +1201,7 @@ impl McpToolApprovalPolicy {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct McpToolApprovalMetadata {
     annotations: Option<ToolAnnotations>,
     pub(crate) connector_id: Option<String>,
@@ -1574,7 +1470,6 @@ struct McpToolApprovalPromptOptions {
 
 struct McpToolApprovalElicitationRequest<'a> {
     server: &'a str,
-    tool_name: &'a str,
     metadata: Option<&'a McpToolApprovalMetadata>,
     tool_params: Option<&'a serde_json::Value>,
     tool_params_display: Option<&'a [RenderedMcpToolApprovalParam]>,
@@ -1627,7 +1522,7 @@ async fn maybe_request_mcp_tool_approval(
     hook_tool_name: &HookToolName,
     metadata: &McpToolApprovalMetadata,
     config: &codex_mcp::McpConfig,
-    permission_source: McpPermissionSource<'_>,
+    permission_profile: &PermissionProfile,
     environment_id: &str,
     policy: McpToolApprovalPolicy,
 ) -> Option<McpToolApproval> {
@@ -1647,7 +1542,7 @@ async fn maybe_request_mcp_tool_approval(
     if !strict_auto_review
         && mcp_permission_prompt_is_auto_approved(
             config.approval_policy.value(),
-            permission_source.profile(),
+            permission_profile,
             McpPermissionPromptAutoApproveContext {
                 tool_approval_mode: Some(policy.mode),
             },
@@ -1707,16 +1602,8 @@ async fn maybe_request_mcp_tool_approval(
         approval_mode: policy.mode,
         allow_session_remember: session_approval_key.is_some(),
         allow_persistent_approval: persistent_approval_key.is_some(),
-        prompt_permissions: match permission_source {
-            McpPermissionSource::Environment {
-                environment_id,
-                sandbox,
-            } => Some((environment_id.to_owned(), Arc::clone(sandbox))),
-            McpPermissionSource::Thread { .. } => None,
-        },
     };
     let approval_context = ApprovalContext {
-        exec_requirement: None,
         review_context: GuardianReviewContext::from(step_context),
         cancellation_token: Some(cancellation_token.clone()),
         call_id: call_id.to_string(),
@@ -1807,23 +1694,28 @@ pub(crate) async fn request_mcp_tool_user_approval(
             .map(|rendered_template| rendered_template.question.as_str()),
     );
     let (request_dispatched, decision, cancellation_reason) = if tool_call_mcp_elicitation_enabled {
-        let metadata = sess
+        let link_id = sess
             .mcp_tool_approval_metadata(server, id)
-            .map(|context| context.metadata)
-            .unwrap_or_else(|| McpToolApprovalMetadata {
-                connector_id: connector_id.clone(),
-                connector_name: connector_name.clone(),
-                connector_description: connector_description.clone(),
-                connected_account_email: connected_account_email.clone(),
-                tool_title: tool_title.clone(),
-                tool_description: tool_description.clone(),
-                ..Default::default()
-            });
+            .and_then(|context| context.metadata.link_id);
+        let metadata = McpToolApprovalMetadata {
+            annotations: None,
+            connector_id: connector_id.clone(),
+            link_id,
+            connector_name: connector_name.clone(),
+            connector_description: connector_description.clone(),
+            connected_account_email: connected_account_email.clone(),
+            plugin_id: None,
+            tool_title: tool_title.clone(),
+            tool_description: tool_description.clone(),
+            mcp_app_resource_uri: None,
+            mcp_app_ui: None,
+            codex_apps_meta: None,
+            openai_file_input_optional_fields: None,
+        };
         let request_id = rmcp::model::RequestId::String(question_id.clone().into());
         let request =
             build_mcp_tool_approval_elicitation_request(McpToolApprovalElicitationRequest {
                 server,
-                tool_name,
                 metadata: Some(&metadata),
                 tool_params: rendered_template
                     .as_ref()
@@ -1856,7 +1748,7 @@ pub(crate) async fn request_mcp_tool_user_approval(
             cancellation_reason,
         )
     } else {
-        if turn_context.root_capabilities_restricted {
+        if turn_context.session_source.is_non_root_agent() {
             return ApprovalResolution {
                 decision: ReviewDecision::denied(concat!(
                     "MCP tool approval via request_user_input requires the root thread. ",
@@ -1975,7 +1867,6 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
                 open_world_hint: annotations.open_world_hint,
                 read_only_hint: annotations.read_only_hint,
             }),
-        prompt_permissions: None,
     }
 }
 
@@ -2176,7 +2067,6 @@ fn build_mcp_tool_approval_elicitation_request(
     ElicitationRequest::Form {
         meta: build_mcp_tool_approval_elicitation_meta(
             request.server,
-            request.tool_name,
             request.metadata,
             request.tool_params,
             request.tool_params_display,
@@ -2192,7 +2082,6 @@ fn build_mcp_tool_approval_elicitation_request(
 
 fn build_mcp_tool_approval_elicitation_meta(
     server: &str,
-    tool_name: &str,
     metadata: Option<&McpToolApprovalMetadata>,
     tool_params: Option<&serde_json::Value>,
     tool_params_display: Option<&[RenderedMcpToolApprovalParam]>,
@@ -2230,24 +2119,7 @@ fn build_mcp_tool_approval_elicitation_meta(
         }
         (false, false) => {}
     }
-    meta.insert(
-        MCP_TOOL_APPROVAL_TOOL_NAME_KEY.to_string(),
-        serde_json::Value::String(tool_name.to_owned()),
-    );
     if let Some(metadata) = metadata {
-        if let Some(annotations) = &metadata.annotations {
-            let hints = ToolAnnotations::from_raw(
-                /*title*/ None,
-                annotations.read_only_hint,
-                annotations.destructive_hint,
-                annotations.idempotent_hint,
-                annotations.open_world_hint,
-            );
-            meta.insert(
-                MCP_TOOL_APPROVAL_TOOL_ANNOTATIONS_KEY.to_string(),
-                serde_json::json!(hints),
-            );
-        }
         if let Some(tool_title) = metadata.tool_title.as_ref() {
             meta.insert(
                 MCP_TOOL_APPROVAL_TOOL_TITLE_KEY.to_string(),

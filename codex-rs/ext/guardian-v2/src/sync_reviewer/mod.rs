@@ -280,7 +280,3 @@ pub fn install(
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "reviewer_config_tests.rs"]
-mod reviewer_config_tests;

@@ -95,11 +95,6 @@ pub trait McpServerContributor<C: Sync>: Send + Sync {
         context: McpServerContributionContext<'a, C>,
     ) -> ExtensionFuture<'a, Vec<McpServerContribution>>;
 
-    /// Reads canonical hosted-plugin IDs from published state without discovery or MCP I/O.
-    fn hosted_plugin_ids(&self, _context: McpServerContributionContext<'_, C>) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Declares executor plugins, including those without MCP servers or connectors. Each
     /// declaration identifies the plugin once; its deferred MCP data cannot change that identity.
     /// Return plugins in precedence order: across contributors in registration order, the first
@@ -362,18 +357,11 @@ pub trait SkillInvocationContributor: Send + Sync {
     }
 }
 
-/// A selected capability root bound to filesystem access for the current callback.
-#[derive(Clone, Copy)]
-pub struct AccessedSelectedCapabilityRoot<'a> {
-    pub root: &'a SelectedCapabilityRoot,
-    pub fs: &'a dyn codex_file_system::EnvironmentAccess,
-}
-
 /// Runtime inputs shared by preparation, tool construction, and later context consumers.
 #[derive(Clone, Copy)]
 pub struct StepPreparationInput<'a> {
     pub turn_id: &'a str,
-    pub ready_selected_capability_roots: &'a [AccessedSelectedCapabilityRoot<'a>],
+    pub ready_selected_capability_roots: &'a [SelectedCapabilityRoot],
     pub executor_capability_discovery: Option<&'a ExecutorCapabilityDiscoverySnapshot>,
     pub executor_capability_discovery_v2: Option<&'a [ExecutorCapabilityDiscoveryV2Snapshot]>,
     /// Captured plugin policy; an empty snapshot represents no selected plugins.

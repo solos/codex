@@ -97,7 +97,6 @@ pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::ReadStateOperation;
 pub use runtime::ReadStateUpdate;
-pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::SqliteIntegrityCheck;
 pub use runtime::SqliteQueueStore;
 pub use runtime::ThreadFilterOptions;

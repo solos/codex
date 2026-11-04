@@ -337,15 +337,6 @@ pub fn find_marketplace_manifest_path(root: &Path) -> Option<AbsolutePathBuf> {
         })
 }
 
-/// A symlinked manifest (or one of its parent directories) may change without a new Git commit.
-pub(crate) fn has_symlinked_marketplace_manifest(root: &Path) -> bool {
-    MARKETPLACE_MANIFEST_RELATIVE_PATHS.iter().any(|relative| {
-        Path::new(relative)
-            .ancestors()
-            .any(|component| root.join(component).is_symlink())
-    })
-}
-
 fn supported_marketplace_manifest_path(path: &Path) -> Option<AbsolutePathBuf> {
     if !path.is_file() {
         return None;
@@ -612,7 +603,15 @@ fn resolve_supported_plugin_source(
             None
         }
         source => match resolve_plugin_source(marketplace_path, source) {
-            Ok(source) => Some(source),
+            Ok(source @ MarketplacePluginSource::Local { .. }) => Some(source),
+            Ok(MarketplacePluginSource::Git { .. } | MarketplacePluginSource::Npm { .. }) => {
+                warn!(
+                    path = %marketplace_path.display(),
+                    plugin = plugin_name,
+                    "skipping marketplace plugin with remote source"
+                );
+                None
+            }
             Err(err) => {
                 warn!(
                     path = %marketplace_path.display(),
@@ -648,7 +647,7 @@ fn resolve_plugin_source(
             url: normalize_git_plugin_source_url(marketplace_path, &url)?,
             path: path
                 .as_deref()
-                .map(|path| normalize_remote_plugin_subdir(marketplace_path, path))
+                .map(|path| normalize_git_plugin_subdir(marketplace_path, path))
                 .transpose()?,
             ref_name: normalize_optional_git_selector(&ref_name),
             sha: normalize_optional_git_selector(&sha),
@@ -662,7 +661,7 @@ fn resolve_plugin_source(
             },
         ) => Ok(MarketplacePluginSource::Git {
             url: normalize_git_plugin_source_url(marketplace_path, &url)?,
-            path: Some(normalize_remote_plugin_subdir(marketplace_path, &path)?),
+            path: Some(normalize_git_plugin_subdir(marketplace_path, &path)?),
             ref_name: normalize_optional_git_selector(&ref_name),
             sha: normalize_optional_git_selector(&sha),
         }),
@@ -728,7 +727,7 @@ fn resolve_local_plugin_source_path(
     Ok(marketplace_root_dir(marketplace_path)?.join(relative_source_path))
 }
 
-fn normalize_remote_plugin_subdir(
+fn normalize_git_plugin_subdir(
     marketplace_path: &AbsolutePathBuf,
     path: &str,
 ) -> Result<String, MarketplaceError> {

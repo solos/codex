@@ -35,71 +35,6 @@ use codex_protocol::mcp::Tool;
 use rmcp::model::ContentBlock;
 
 const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
-
-#[test]
-fn connected_server_version_notice_snapshot() {
-    let target = crate::AppServerTarget::Remote {
-        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::from_absolute_path(
-                std::env::temp_dir().join("codex.sock"),
-            )
-            .expect("absolute socket path"),
-        },
-    };
-    let settings = codex_config::types::Tui {
-        show_server_version_notice: true,
-        ..Default::default()
-    };
-    let (notice, _) = crate::status::remote_connection::pending_server_version_notice(
-        &settings,
-        &target,
-        /*server_home*/ None,
-        "0.153.0",
-        Some("0.152.1"),
-        /*last_shown*/ None,
-    )
-    .expect("older remote service should have a notice");
-    let cell = new_server_version_warning(notice);
-    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 100)).join("\n"));
-}
-
-#[test]
-fn local_daemon_version_notice_snapshot() {
-    let target = crate::AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::from_absolute_path(
-                std::env::temp_dir().join("codex.sock"),
-            )
-            .expect("absolute socket path"),
-        },
-    };
-    let settings = codex_config::types::Tui {
-        show_server_version_notice: true,
-        ..Default::default()
-    };
-    for (client, server, snapshot) in [
-        ("0.153.0", "0.152.1", "local_daemon_version_notice_snapshot"),
-        ("0.155.0-alpha.12", "0.156.0", "local_daemon_alpha_mismatch"),
-        ("0.0.0", "0.156.0", "local_daemon_source_mismatch"),
-    ] {
-        let (notice, _) = crate::status::remote_connection::pending_server_version_notice(
-            &settings,
-            &target,
-            /*server_home*/ None,
-            client,
-            Some(server),
-            /*last_shown*/ None,
-        )
-        .expect("local service should have a notice");
-        let cell = new_server_version_warning(notice);
-        insta::assert_snapshot!(
-            snapshot,
-            render_lines(&cell.transcript_lines(/*width*/ 100)).join("\n")
-        );
-    }
-}
-
 async fn test_config() -> Config {
     let codex_home = std::env::temp_dir();
     ConfigBuilder::default()
@@ -827,27 +762,22 @@ async fn session_info_preserves_styled_tooltip_links() {
 }
 
 #[tokio::test]
-async fn session_info_first_event_respects_tooltip_preference() {
+async fn session_info_first_event_suppresses_tooltips_and_nux() {
     let config = test_config().await;
-    let mut local_settings = crate::local_settings::LocalSettings::from(&config);
-    for show_tooltips in [true, false] {
-        local_settings.tui.show_tooltips = show_tooltips;
-        let cell = new_session_info(
-            &config,
-            &local_settings,
-            "requested-model",
-            "gpt-5",
-            &session_configured_event("gpt-5"),
-            /*is_first_event*/ true,
-            Some("Model just became available".to_string()),
-            Some(PlanType::Free),
-        );
+    let cell = new_session_info(
+        &config,
+        &crate::local_settings::LocalSettings::from(&config),
+        "gpt-5",
+        "gpt-5",
+        &session_configured_event("gpt-5"),
+        /*is_first_event*/ true,
+        Some("Model just became available".to_string()),
+        Some(PlanType::Free),
+    );
 
-        let rendered = render_transcript(&cell).join("\n");
-        assert_eq!(rendered.contains("To get started"), show_tooltips);
-        assert!(!rendered.contains("Model just became available"));
-        assert!(!rendered.contains("model changed:"));
-    }
+    let rendered = render_transcript(&cell).join("\n");
+    assert!(!rendered.contains("Model just became available"));
+    assert!(rendered.contains("To get started"));
 }
 
 #[tokio::test]
@@ -2973,26 +2903,15 @@ fn deprecation_notice_renders_summary_with_details() {
 }
 
 #[test]
-fn legacy_feature_migration_notices() {
-    for (key, snapshot) in [
-        ("shell_zsh_fork", "legacy_zsh_migration_notice_snapshot"),
-        ("daemon_auto_start", "daemon_auto_start_migration_notice"),
-    ] {
-        let mut features = codex_features::Features::with_defaults();
-        features.apply_map(&std::collections::BTreeMap::from([(
-            key.to_string(),
-            false,
-        )]));
-        let usage = features
-            .legacy_feature_usages()
-            .next()
-            .expect("migration notice");
-        let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
-        insta::assert_snapshot!(
-            snapshot,
-            render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n")
-        );
-    }
+fn legacy_zsh_migration_notice_snapshot() {
+    let mut features = codex_features::Features::default();
+    features.record_legacy_usage_force("shell_zsh_fork", codex_features::Feature::ShellZshFork);
+    let usage = features
+        .legacy_feature_usages()
+        .next()
+        .expect("migration notice");
+    let cell = new_deprecation_notice(usage.summary.clone(), usage.details.clone());
+    insta::assert_snapshot!(render_lines(&cell.transcript_lines(/*width*/ 80)).join("\n"));
 }
 
 #[test]

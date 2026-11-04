@@ -15,7 +15,7 @@ pub struct PluginListQuery {
     pub thread_id: String,
     pub turn_id: String,
     pub mcp_resources: Option<Arc<McpResourceClient>>,
-    /// Already-acquired V2 inventories; empty for cloud listing.
+    /// Already-acquired V2 inventories.
     pub snapshots: Vec<ExecutorCapabilityDiscoveryV2Snapshot>,
 }
 
@@ -35,7 +35,7 @@ pub type PluginProviderFuture<'a, T> =
 
 /// Lists plugin metadata without resolving packages or binding filesystems.
 ///
-/// Cloud providers implement `list`; executor listing is not yet supported.
+/// Executor listing is not yet supported through this interface.
 /// Package access uses [`crate::ExecutorPluginProvider::resolve_bound`] directly.
 pub trait PluginProvider: Send + Sync {
     /// Returns a snapshot; on error, callers retain the previous snapshot.

@@ -204,7 +204,7 @@ fn emit_startup_warning(message: &str) {
 /// Open the DB if it exists and its startup backfill has already completed.
 ///
 /// Unlike [`init`], this helper does not run rollout backfill. It is for
-/// optional local reads from non-owning contexts such as remote app-server mode.
+/// optional local reads from non-owning contexts such as shared app-server stores.
 pub async fn get_state_db(config: &impl RolloutConfigView) -> Option<StateDbHandle> {
     let state_path = config.sqlite_config().state_db_path();
     if !tokio::fs::try_exists(&state_path).await.unwrap_or(false) {

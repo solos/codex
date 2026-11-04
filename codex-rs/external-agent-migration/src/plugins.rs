@@ -43,15 +43,14 @@ impl ExternalAgentConfigService {
         )
     }
 
-    pub(super) fn partition_plugin_migration_details(
+    pub(super) fn local_plugin_migration_details(
         &self,
         cwd: Option<&Path>,
         details: MigrationDetails,
-    ) -> io::Result<(Option<MigrationDetails>, Option<MigrationDetails>)> {
+    ) -> io::Result<Option<MigrationDetails>> {
         let import_sources = self.marketplace_import_sources(cwd)?;
 
         let mut local_plugins = Vec::new();
-        let mut remote_plugins = Vec::new();
         for plugin_group in details.plugins {
             let is_local = import_sources
                 .get(&plugin_group.marketplace_name)
@@ -66,21 +65,13 @@ impl ExternalAgentConfigService {
 
             if is_local {
                 local_plugins.push(plugin_group);
-            } else {
-                remote_plugins.push(plugin_group);
             }
         }
 
-        let local_details = (!local_plugins.is_empty()).then_some(MigrationDetails {
+        Ok((!local_plugins.is_empty()).then_some(MigrationDetails {
             plugins: local_plugins,
             ..Default::default()
-        });
-        let remote_details = (!remote_plugins.is_empty()).then_some(MigrationDetails {
-            plugins: remote_plugins,
-            ..Default::default()
-        });
-
-        Ok((local_details, remote_details))
+        }))
     }
 
     pub async fn import_plugins(

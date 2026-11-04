@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_login::auth::BedrockApiKeyAuth;
@@ -204,72 +203,6 @@ async fn amazon_bedrock_runtime_preserves_cross_region_models_without_web_search
         assert_eq!(
             (body["model"].as_str(), web_search_tool),
             (Some(model), None)
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn amazon_bedrock_web_search_is_disabled_when_managed_requirements_prohibit_cached_search() {
-    skip_if_no_network!();
-
-    for (allowed_mode, requested_mode) in [
-        ("live", WebSearchMode::Live),
-        ("indexed", WebSearchMode::Indexed),
-    ] {
-        let server = start_mock_server().await;
-        let resp_mock = responses::mount_sse_once(
-            &server,
-            responses::sse(vec![
-                responses::ev_response_created("resp-1"),
-                responses::ev_completed("resp-1"),
-            ]),
-        )
-        .await;
-
-        let auth = CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
-            api_key: "dummy".to_string(),
-            region: "us-east-1".to_string(),
-        });
-        let mut builder = test_codex()
-            .with_auth(auth)
-            .with_model(AMAZON_BEDROCK_GPT_5_5_MODEL_ID)
-            .with_cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                    r#"allowed_web_search_modes = ["{allowed_mode}"]"#
-                )),
-            )
-            .with_config(move |config| {
-                assert_eq!(config.web_search_mode.value(), requested_mode);
-                let base_url = config.model_provider.base_url.clone();
-                config.model_provider_id = AMAZON_BEDROCK_PROVIDER_ID.to_string();
-                config.model_provider =
-                    ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
-                config.model_provider.base_url = base_url;
-            });
-        let test = builder
-            .build_with_auto_env(&server)
-            .await
-            .expect("create managed Bedrock conversation");
-
-        test.submit_turn_with_permission_profile(
-            "hello managed Bedrock web search",
-            PermissionProfile::Disabled,
-        )
-        .await
-        .expect("submit managed Bedrock turn");
-
-        let body = resp_mock.single_request().body_json();
-        let web_search_tool = body
-            .get("tools")
-            .and_then(Value::as_array)
-            .and_then(|tools| {
-                tools
-                    .iter()
-                    .find(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search"))
-            });
-        assert_eq!(
-            web_search_tool, None,
-            "Bedrock search should be disabled when managed requirements only allow {allowed_mode}"
         );
     }
 }

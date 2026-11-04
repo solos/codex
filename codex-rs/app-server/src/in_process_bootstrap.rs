@@ -17,7 +17,7 @@ pub struct EmbeddedNetworkPolicy {
 }
 
 impl EmbeddedNetworkPolicy {
-    /// Loads the local rules for cloud bootstrap; all other traffic starts unavailable.
+    /// Loads local rules at startup; all other traffic starts unavailable.
     pub async fn load(overrides: &codex_config::LoaderOverrides) -> Self {
         let policy = Self::default();
         let local = async {
@@ -26,7 +26,7 @@ impl EmbeddedNetworkPolicy {
                 overrides,
             )
             .await?
-            .compose(Default::default())
+            .compose()
         }
         .await;
         if let Ok(application) = local {
@@ -66,35 +66,6 @@ impl EmbeddedNetworkPolicy {
     /// Keeps a rebuilt caller config on the live policy owned by the running app-server.
     pub fn bind_config(&self, config: &mut Config) {
         config.application_network_policy = self.effective.policy();
-    }
-
-    /// Limits cloud discovery and each authentication request to their exact local-policy endpoints.
-    pub fn bind_bootstrap_auth(
-        &self,
-        mut auth: codex_login::AuthConfig,
-    ) -> codex_login::AuthConfig {
-        let factory = auth
-            .auth_route_config
-            .http_client_factory()
-            .clone()
-            .with_network_policy(self.local.policy());
-        let endpoint = codex_backend_client::Client::new(
-            auth.chatgpt_base_url
-                .as_deref()
-                .unwrap_or("https://chatgpt.com/backend-api/"),
-            factory.clone(),
-        )
-        .config_bundle_url();
-        auth.auth_route_config = codex_login::AuthRouteConfig::from_http_client_factory(
-            factory.clone().with_network_policy(
-                self.local
-                    .policy()
-                    .restrict_to_endpoints(endpoint.parse().into_iter().collect()),
-            ),
-        )
-        .with_local_bootstrap_factory(factory)
-        .with_application_network_policy(self.effective.policy());
-        auth
     }
 }
 

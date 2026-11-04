@@ -29,7 +29,6 @@ async fn delegated_thread_is_listed_before_user_followup() {
         live_thread
             .append_items(&[RolloutItem::EventMsg(EventMsg::ItemCompleted(
                 ItemCompletedEvent {
-                    content_token_count: None,
                     thread_id,
                     turn_id: "delegated-turn".to_string(),
                     item: TurnItem::FunctionCallOutput(FunctionCallOutputItem {

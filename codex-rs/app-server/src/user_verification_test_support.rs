@@ -19,7 +19,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppServerRpcTransport;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::ConfigBuilder;
@@ -144,7 +143,6 @@ impl Harness {
             Vec::new(),
             LoaderOverrides::default(),
             /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
             Arg0DispatchPaths::default(),
             Arc::new(codex_config::NoopThreadConfigLoader),
         );
@@ -154,7 +152,6 @@ impl Harness {
             AnalyticsEventsClient::disabled(),
         ));
         let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-            cloud_skill_provider: None,
             outgoing: Arc::clone(&outgoing),
             analytics_events_client: AnalyticsEventsClient::disabled(),
             arg0_paths: Arg0DispatchPaths::default(),
@@ -174,12 +171,9 @@ impl Harness {
             code_mode_session_provider: None,
             rpc_transport: match origin {
                 ConnectionOrigin::InProcess => AppServerRpcTransport::InProcess,
-                ConnectionOrigin::Stdio | ConnectionOrigin::RemoteControl => {
-                    AppServerRpcTransport::Stdio
-                }
+                ConnectionOrigin::Stdio => AppServerRpcTransport::Stdio,
                 ConnectionOrigin::WebSocket => AppServerRpcTransport::Websocket,
             },
-            remote_control_handle: None,
             plugin_startup_tasks: None,
         }));
         Ok(Self {
@@ -195,11 +189,7 @@ impl Harness {
                 ConnectionOrigin::WebSocket => AppServerTransport::WebSocket {
                     bind_address: "127.0.0.1:0".parse()?,
                 },
-                // Remote control can share a process whose primary listener is stdio.
-                // Keeping that case tests that authorization uses the connection's origin.
-                ConnectionOrigin::Stdio
-                | ConnectionOrigin::InProcess
-                | ConnectionOrigin::RemoteControl => AppServerTransport::Stdio,
+                ConnectionOrigin::Stdio | ConnectionOrigin::InProcess => AppServerTransport::Stdio,
             },
         })
     }

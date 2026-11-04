@@ -538,7 +538,6 @@ mod tests {
                 thread_id,
                 vec![RolloutItem::EventMsg(EventMsg::ItemCompleted(
                     ItemCompletedEvent {
-                        content_token_count: None,
                         thread_id,
                         turn_id: "turn-1".to_string(),
                         item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
@@ -651,7 +650,6 @@ mod tests {
         let update = sync
             .observe_appended_items(&[RolloutItem::EventMsg(EventMsg::ItemCompleted(
                 ItemCompletedEvent {
-                    content_token_count: None,
                     thread_id,
                     turn_id: "turn-1".to_string(),
                     item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
@@ -750,7 +748,6 @@ mod tests {
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,
-                    requested_approvals_reviewer: None,
                     permission_profile: permission_profile.clone(),
                     active_permission_profile: None,
                     cwd: cwd.clone().try_into().expect("absolute settings cwd"),

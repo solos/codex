@@ -112,7 +112,7 @@ impl App {
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
-            .cloud_config_bundle(self.cloud_config_bundle.clone());
+            .build();
         build_config_on_runtime_worker(
             builder,
             base.application_network_policy.clone(),
@@ -136,7 +136,7 @@ impl App {
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
-            .cloud_config_bundle(self.cloud_config_bundle.clone());
+            .build();
         build_config_on_runtime_worker(
             builder,
             self.config.application_network_policy.clone(),
@@ -411,11 +411,6 @@ impl App {
         {
             return Some(selection.clone());
         }
-        if self.app_server_target.thread_params_mode()
-            == crate::app_server_session::ThreadParamsMode::Remote
-        {
-            return None;
-        }
         let config = self.chat_widget.config_ref();
         let active = config.permissions.active_permission_profile()?;
         if active.id.starts_with(':')
@@ -484,7 +479,6 @@ impl App {
             .await?;
         self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All)?;
         self.local_settings = self.local_settings.reloaded(&config);
-        self.refresh_server_version_overview_notice(CODEX_CLI_VERSION);
         // Copy preferences read directly by the live widget. Other preferences have runtime
         // caches and are adopted when the widget is replaced.
         self.chat_widget
@@ -1162,36 +1156,6 @@ impl App {
         resume_model_settings_for_overrides(&self.config, &self.harness_overrides)
     }
 
-    pub(super) fn reject_remote_resume_permission_override(
-        &mut self,
-        config: &Config,
-        target: &AppServerTarget,
-    ) -> bool {
-        if target.thread_params_mode() != crate::app_server_session::ThreadParamsMode::Remote {
-            return false;
-        }
-        let explicitly_selected =
-            has_explicit_resume_permission_override(config, &self.harness_overrides)
-                || self.runtime_approvals_reviewer_override.is_some()
-                || matches!(
-                    self.runtime_approval_policy_override,
-                    Some(RuntimeApprovalPolicyOverride::Explicit(_))
-                )
-                || self
-                    .runtime_permission_profile_override
-                    .as_ref()
-                    .is_some_and(|profile| {
-                        profile.turn_override == RuntimePermissionProfileTurnOverride::LegacySandbox
-                    });
-        if explicitly_selected {
-            self.add_agents_overview_error(
-                "Permission overrides are not supported when resuming a remote task.".into(),
-            );
-            return true;
-        }
-        false
-    }
-
     pub(super) fn sync_tui_theme_selection(&mut self, name: String) {
         self.local_settings.tui.theme = Some(name.clone());
         self.chat_widget.set_tui_theme(Some(name));
@@ -1766,66 +1730,6 @@ mod tests {
             app_enabled_in_effective_config(&app.config, &app_id),
             Some(false)
         );
-        Ok(())
-    }
-
-    // Regression coverage for `/new` and `/clear`: cloud requirements
-    // must survive the config refresh that runs before thread transitions.
-    #[tokio::test]
-    async fn refresh_in_memory_config_from_disk_keeps_cloud_requirements_for_thread_transitions()
-    -> Result<()> {
-        let mut app = make_test_app().await;
-        let codex_home = tempdir()?;
-        let required_policy = codex_protocol::protocol::AskForApproval::Never;
-        let cloud_config_bundle =
-            codex_config::test_support::CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approval_policies = ["never"]"#,
-            );
-
-        let config = ConfigBuilder::default()
-            .codex_home(codex_home.path().to_path_buf())
-            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
-            .cloud_config_bundle(cloud_config_bundle.clone())
-            .build()
-            .await?;
-        app.config = config;
-        app.cloud_config_bundle = cloud_config_bundle;
-        let app_id = "unit_test_cloud_requirements_reload_marker";
-        std::fs::write(
-            codex_home.path().join("config.toml"),
-            format!(
-                r#"
-[apps.{app_id}]
-enabled = false
-"#
-            ),
-        )?;
-
-        let assert_cloud_requirements = |app: &App| {
-            let config = &app.config;
-            assert_eq!(
-                config
-                    .config_layer_stack
-                    .requirements_toml()
-                    .allowed_approval_policies
-                    .clone(),
-                Some(vec![required_policy])
-            );
-            assert_eq!(config.permissions.approval_policy.value(), required_policy);
-        };
-
-        assert_cloud_requirements(&app);
-        assert_eq!(app_enabled_in_effective_config(&app.config, app_id), None);
-
-        // This is the fallible reload that the best-effort `/new`, `/clear`,
-        // `/fork`, side-conversation, and session-picker paths wrap.
-        app.refresh_in_memory_config_from_disk().await?;
-
-        assert_eq!(
-            app_enabled_in_effective_config(&app.config, app_id),
-            Some(false)
-        );
-        assert_cloud_requirements(&app);
         Ok(())
     }
 

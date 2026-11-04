@@ -109,6 +109,7 @@ pub(crate) async fn write(
             let key = format!("features.{}", serde_json::json!(name));
             Ok(crate::config_update::replace_config_value(
                 key,
+                // Keep an explicit opt-out even before rollout defaults enable it.
                 if *enabled || feature.default_enabled {
                     serde_json::json!(enabled)
                 } else {
@@ -154,7 +155,3 @@ pub(crate) async fn write(
         warning: overridden.then(|| "Changes were saved, but the configured values differ from your selections. A higher-priority setting may override them.".to_string()),
     })
 }
-
-#[cfg(test)]
-#[path = "experimental_features_tests.rs"]
-mod tests;

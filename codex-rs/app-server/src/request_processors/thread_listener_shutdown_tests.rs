@@ -4,14 +4,12 @@
 
 use super::super::thread_goal_processor::ThreadGoalRequestProcessor;
 use super::super::thread_processor::ThreadRequestProcessor;
-use super::super::thread_processor::ThreadResumeTarget;
 use super::*;
 use crate::config_manager::ConfigManager;
 use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::thread_sample::SampleResponseRegistry;
 use crate::thread_state::ConnectionCapabilities;
-use crate::thread_state::PendingNetworkApproval;
 use crate::thread_state::resolve_server_request_on_thread_listener;
 use anyhow::Context;
 use anyhow::Result;
@@ -84,7 +82,7 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
         test.thread_store.clone(),
         Default::default(),
         thread_state_manager.clone(),
-        thread_watch_manager.clone(),
+        thread_watch_manager,
         Arc::new(Semaphore::new(/*permits*/ 1)),
         thread_goal_processor,
         /*state_db*/ None,
@@ -107,37 +105,19 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
             .connection_initialized(connection_id, ConnectionCapabilities::default())
             .await;
     }
-    let network_request_id = RequestId::Integer(4);
     if attach_before_shutdown {
         processor
             .try_attach_thread_listener(thread_id, Arc::clone(&thread), connection_ids.clone())
             .await;
-        // Leave the prompt outstanding so shutdown runs before the proxy waiter resolves it.
-        let permission_guard = thread_watch_manager
-            .note_permission_requested(&thread_id.to_string())
-            .await;
-        thread_state_manager
-            .thread_state(thread_id)
-            .await
-            .lock()
-            .await
-            .network_approvals
-            .insert(
-                "network-approval".to_string(),
-                PendingNetworkApproval {
-                    request_id: network_request_id.clone(),
-                    permission_guard,
-                },
-            );
     }
     thread.shutdown_and_wait().await?;
     let shutdown_result = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
         let resume = processor
             .thread_resume(
-                ThreadResumeTarget::Client(ConnectionRequestId {
+                ConnectionRequestId {
                     connection_id,
                     request_id: RequestId::Integer(1),
-                }),
+                },
                 ThreadResumeParams {
                     thread_id: thread_id.to_string(),
                     exclude_turns: true,
@@ -154,23 +134,8 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
                 .try_attach_thread_listener(thread_id, Arc::clone(&thread), connection_ids)
                 .await;
         }
-        let mut network_resolved = false;
         loop {
             match outgoing_rx.recv().await.expect("outgoing channel closed") {
-                OutgoingEnvelope::ToConnection {
-                    connection_id: recipient,
-                    message: OutgoingMessage::AppServerNotification(notification),
-                    ..
-                } if recipient == connection_id
-                    && matches!(
-                        &notification.notification,
-                        ServerNotification::ServerRequestResolved(resolved)
-                            if resolved.request_id == network_request_id
-                    ) =>
-                {
-                    assert!(!network_resolved, "duplicate network prompt resolution");
-                    network_resolved = true;
-                }
                 OutgoingEnvelope::Broadcast {
                     message: OutgoingMessage::AppServerNotification(notification),
                 } if matches!(
@@ -184,7 +149,6 @@ async fn listener_shutdown_releases_runtime_and_preserves_other_subscribers(
                 _ => {}
             }
         }
-        assert_eq!(network_resolved, attach_before_shutdown);
         drop(thread);
         while runtime.upgrade().is_some() {
             tokio::task::yield_now().await;

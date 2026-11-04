@@ -89,18 +89,8 @@ pub(crate) fn fetch(
 ) {
     let handle = app_server.request_handle();
     let mode = app_server.thread_params_mode();
-    if mode.settings_owner() == ThreadSettingsOwner::Server {
-        tx.send(AppEvent::PermissionProfilesLoaded {
-            request_id,
-            result: Err("Cloud conversations use server-selected permissions.".to_string()),
-        });
-        return;
-    }
     let cwd = thread_cwd
-        .or_else(|| match mode {
-            ThreadParamsMode::Embedded => Some(config.cwd.as_path()),
-            ThreadParamsMode::Remote | ThreadParamsMode::Cloud => app_server.remote_cwd_override(),
-        })
+        .or_else(|| Some(config.cwd.as_path()))
         .map(|cwd| cwd.to_string_lossy().into_owned());
     tokio::spawn(async move {
         let request = async {

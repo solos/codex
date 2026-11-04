@@ -2,16 +2,13 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
 use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
-use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionProvider;
 use codex_code_mode_protocol::CodeModeSessionProviderFuture;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
@@ -86,17 +83,7 @@ impl CodeModeSessionProvider for ProcessOwnedCodeModeSessionProvider {
         &'a self,
         limits: CodeModeSessionCellExecutionLimits,
     ) -> CodeModeSessionProviderFuture<'a> {
-        self.create_session_with_options(CodeModeSessionOptions {
-            cell_execution_limits: limits,
-            ..CodeModeSessionOptions::default()
-        })
-    }
-
-    fn create_session_with_options<'a>(
-        &'a self,
-        options: CodeModeSessionOptions,
-    ) -> CodeModeSessionProviderFuture<'a> {
-        Box::pin(create_host_session(self.process_host(), options))
+        Box::pin(create_host_session(self.process_host(), limits))
     }
 }
 
@@ -119,9 +106,9 @@ impl CodeModeSessionProvider for DisabledCodeModeSessionProvider {
 
 async fn create_host_session(
     host: Arc<OwnedCodeModeHost>,
-    options: CodeModeSessionOptions,
+    limits: CodeModeSessionCellExecutionLimits,
 ) -> Result<Arc<dyn CodeModeSession>, String> {
-    let session = ProcessOwnedCodeModeSession::with_host(host, options);
+    let session = ProcessOwnedCodeModeSession::with_host(host, limits);
     session.connection().await?;
     Ok(Arc::new(session))
 }
@@ -231,9 +218,7 @@ struct SessionBinding {
 
 struct SessionInner {
     host: Arc<OwnedCodeModeHost>,
-    options: CodeModeSessionOptions,
-    // The first successful open fixes the output policy for all generations of this session.
-    output_truncation: OnceLock<CodeModeOutputTruncation>,
+    limits: CodeModeSessionCellExecutionLimits,
     state: StdMutex<SessionState>,
     shutdown_requested: AtomicBool,
     shutdown_result: StdMutex<Option<ShutdownResultReceiver>>,
@@ -251,16 +236,15 @@ impl ProcessOwnedCodeModeSession {
             Arc::new(OwnedCodeModeHost::new(
                 InstallContext::current().code_mode_host_program(),
             )),
-            CodeModeSessionOptions::default(),
+            CodeModeSessionCellExecutionLimits::default(),
         )
     }
 
-    fn with_host(host: Arc<OwnedCodeModeHost>, options: CodeModeSessionOptions) -> Self {
+    fn with_host(host: Arc<OwnedCodeModeHost>, limits: CodeModeSessionCellExecutionLimits) -> Self {
         Self {
             inner: Arc::new(SessionInner {
                 host,
-                options,
-                output_truncation: OnceLock::new(),
+                limits,
                 state: StdMutex::new(SessionState::New),
                 shutdown_requested: AtomicBool::new(false),
                 shutdown_result: StdMutex::new(None),
@@ -273,13 +257,9 @@ impl ProcessOwnedCodeModeSession {
         self.inner.connection().await
     }
 
-    fn server_output_budget(&self, budget: Option<usize>) -> Option<usize> {
-        budget.filter(|_| self.output_truncation() == CodeModeOutputTruncation::Server)
-    }
-
     pub async fn execute(
         &self,
-        mut request: ExecuteRequest,
+        request: ExecuteRequest,
         delegate: Arc<dyn CodeModeSessionDelegate>,
         preempt: Option<CancellationToken>,
     ) -> Result<StartedCell, String> {
@@ -288,10 +268,6 @@ impl ProcessOwnedCodeModeSession {
             delegate,
             trace: codex_otel::current_span_w3c_trace_context(),
         });
-        // V1 encodes the exec budget as i32. Its maximum already exceeds the host collector limit.
-        request.max_output_tokens = self
-            .server_output_budget(request.max_output_tokens)
-            .map(|tokens| tokens.min(i32::MAX as usize));
         binding
             .connection
             .execute(binding.remote, request, delegate, preempt)
@@ -300,21 +276,22 @@ impl ProcessOwnedCodeModeSession {
 
     pub async fn wait(
         &self,
-        mut request: WaitRequest,
+        request: WaitRequest,
         preempt: Option<CancellationToken>,
     ) -> Result<WaitOutcome, String> {
         let binding = self.connection().await?;
-        request.max_output_tokens = self.server_output_budget(request.max_output_tokens);
         binding
             .connection
             .wait(binding.remote, request, preempt)
             .await
     }
 
-    pub async fn terminate(&self, mut request: TerminateRequest) -> Result<WaitOutcome, String> {
+    pub async fn terminate(&self, request: TerminateRequest) -> Result<WaitOutcome, String> {
         let binding = self.connection().await?;
-        request.max_output_tokens = self.server_output_budget(request.max_output_tokens);
-        binding.connection.terminate(binding.remote, request).await
+        binding
+            .connection
+            .terminate(binding.remote, request.cell_id)
+            .await
     }
 
     pub async fn shutdown(&self) -> Result<(), String> {
@@ -375,11 +352,7 @@ impl SessionInner {
         let result = match self.host.connection().await {
             Ok(connection) => {
                 let cleanup = connection
-                    .open_session(
-                        remote.clone(),
-                        self.options.clone(),
-                        &self.output_truncation,
-                    )
+                    .open_session(remote.clone(), self.limits.clone())
                     .await;
                 cleanup.map(|cleanup| SessionBinding {
                     connection,
@@ -556,14 +529,6 @@ impl Default for ProcessOwnedCodeModeSession {
 }
 
 impl CodeModeSession for ProcessOwnedCodeModeSession {
-    fn output_truncation(&self) -> CodeModeOutputTruncation {
-        self.inner
-            .output_truncation
-            .get()
-            .copied()
-            .unwrap_or_default()
-    }
-
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,

@@ -44,13 +44,6 @@ impl From<&Config> for LocalSettings {
 }
 
 impl LocalSettings {
-    pub(crate) fn workspace_enabled(&self, config: &Config) -> bool {
-        self.transcript_mode.is_owned()
-            && config
-                .features
-                .enabled(codex_features::Feature::TuiWorkspace)
-    }
-
     fn with_accessibility_preferences(
         config: &Config,
         system_motion: crate::motion::MotionMode,
@@ -63,14 +56,12 @@ impl LocalSettings {
                 config.tui_alternate_screen != codex_config::types::AltScreenMode::Never,
             ),
             tui: Tui {
-                default_hosts: Default::default(),
                 notification_settings: config.tui_notifications.clone(),
                 animations: config.animations,
                 screen_reader_detection_done: None,
                 effects: config.tui_effects,
                 rendering: config.tui_rendering,
                 show_tooltips: config.show_tooltips,
-                show_server_version_notice: config.tui_show_server_version_notice,
                 auto_recap: config.tui_auto_recap,
                 disable_paste_burst: Some(config.disable_paste_burst),
                 vim_mode_default: config.tui_vim_mode_default,
@@ -166,15 +157,6 @@ impl LocalSettings {
         system_motion: crate::motion::MotionMode,
         screen_reader_default: crate::motion::MotionMode,
     ) {
-        self.tui.default_hosts = layers
-            .effective_user_config()
-            .and_then(|config| {
-                config
-                    .get("tui")
-                    .and_then(|tui| tui.get("default_hosts"))
-                    .and_then(|value| value.clone().try_into().ok())
-            })
-            .unwrap_or_default();
         if screen_reader_default == crate::motion::MotionMode::Reduced {
             // Consult the current layers so preferences edited after startup still win.
             self.tui.animations &= layers
@@ -268,7 +250,6 @@ impl LocalSettings {
                         | TerminalName::Iterm2
                         | TerminalName::WarpTerminal
                         | TerminalName::WezTerm
-                        | TerminalName::Rex
                         | TerminalName::Alacritty
                         | TerminalName::Konsole
                         | TerminalName::GnomeTerminal

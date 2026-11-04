@@ -9,7 +9,6 @@ use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::WebSearchItem;
 use codex_protocol::items::build_hook_prompt_message;
-use codex_protocol::models::AudioReference;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::ImageReference;
@@ -246,9 +245,7 @@ fn skips_local_audio_label_text() {
         content: vec![
             ContentItem::InputText { text: label },
             ContentItem::InputAudio {
-                audio: AudioReference::Inline {
-                    audio_url: audio_url.clone(),
-                },
+                audio_url: audio_url.clone(),
             },
             ContentItem::InputText {
                 text: "</audio>".to_string(),
@@ -268,9 +265,7 @@ fn skips_local_audio_label_text() {
             assert_eq!(
                 user.content,
                 vec![
-                    UserInput::Audio {
-                        audio: AudioReference::Inline { audio_url }
-                    },
+                    UserInput::Audio { audio_url },
                     UserInput::Text {
                         text: user_text,
                         text_elements: Vec::new(),

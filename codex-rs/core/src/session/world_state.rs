@@ -100,14 +100,7 @@ impl Session {
                 Some(BaseInstructionsProvenance::Model { .. }) => render_current_instructions(),
                 Some(BaseInstructionsProvenance::Custom) | None => base_instructions.text,
             };
-            ModelInstructionsState::for_incremental_tools(
-                &model_info.slug,
-                instructions,
-                turn_context
-                    .config
-                    .features
-                    .enabled(Feature::SuppressModelChangeAnnouncements),
-            )
+            ModelInstructionsState::for_incremental_tools(&model_info.slug, instructions)
         } else {
             let model_instructions = render_current_instructions();
             let base_instructions = self.get_prompt_base_instructions().await.text;
@@ -134,11 +127,7 @@ impl Session {
                 model_instructions,
             )
         };
-        let environment_subagents = if turn_context.config.include_environment_context
-            && matches!(
-                self.agent_runtime,
-                crate::agent::host::AgentRuntimeServices::Controller
-            ) {
+        let environment_subagents = if turn_context.config.include_environment_context {
             match turn_context.multi_agent_version {
                 MultiAgentVersion::V2 => {
                     let agent_paths = self
@@ -238,7 +227,7 @@ impl Session {
         if turn_context.config.include_permissions_instructions {
             let environment = step_context.environments.primary();
             let sandbox = environment
-                .filter(|environment| environment.environment().is_remote())
+                .filter(|environment| environment.environment.is_remote())
                 .map(|environment| {
                     environment.sandbox_context(/*additional_permissions*/ None)
                 });
@@ -282,13 +271,14 @@ impl Session {
             ));
         }
         if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
-            let send_user_message_async_available = !turn_context.root_capabilities_restricted
-                && step_context
-                    .settings
-                    .model_info
-                    .experimental_supported_tools
-                    .iter()
-                    .any(|tool| tool == "send_user_message_async");
+            let send_user_message_async_available =
+                !turn_context.session_source.is_non_root_agent()
+                    && step_context
+                        .settings
+                        .model_info
+                        .experimental_supported_tools
+                        .iter()
+                        .any(|tool| tool == "send_user_message_async");
             world_state.add_section(PersistentModeState::new(
                 turn_context.config.features.persistent_execution_enabled(
                     step_context.settings.effective_reasoning_effort().as_ref(),
@@ -345,15 +335,9 @@ impl Session {
         ));
         let plugins_usage_instructions_available =
             step_context.mcp.plugins_available() && model_info.include_plugin_usage_instructions;
-        let plugins_state = {
-            let state = self.state.lock().await;
-            PluginsInstructionsState::new(
-                plugins_usage_instructions_available,
-                model_messages.generic_plugin(),
-                state.history.raw_items(),
-            )
-        };
-        world_state.add_section(plugins_state);
+        world_state.add_section(PluginsInstructionsState::new(
+            plugins_usage_instructions_available,
+        ));
         if turn_context
             .config
             .features

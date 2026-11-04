@@ -1,9 +1,5 @@
 pub use binding::McpBinding;
-pub use binding::McpPermissionSource;
 pub use binding::PreparedMcpCall;
-pub use binding::SEARCH_CONNECTOR;
-pub use binding::SearchDiscovery;
-pub use binding::is_model_search_tool;
 pub use client_capabilities::client_mcp_extensions;
 pub use client_tool_catalog::CodexAppsToolSnapshot;
 pub use codex_rmcp_client::McpProtocolMode;
@@ -41,8 +37,6 @@ pub use sandbox_metadata::MCP_SANDBOX_STATE_CAPABILITY;
 pub use sandbox_metadata::MCP_SANDBOX_STATE_META_CAPABILITY;
 pub use sandbox_metadata::SandboxState;
 pub use tool_catalog_cache::McpToolCatalogCache;
-pub use tool_request_meta::McpToolRequestMetaHook;
-pub use tool_request_meta::McpToolRequestMetaProvider;
 pub use tools::ToolInfo;
 pub use trusted_access::TrustedAccessContext;
 
@@ -64,7 +58,6 @@ pub use catalog::ResolvedMcpServer;
 pub use mcp::CODEX_APPS_MCP_SERVER_NAME;
 pub use mcp::DEFAULT_OPTIONAL_MCP_STARTUP_GRACE;
 pub use mcp::McpConfig;
-pub use mcp::McpServerPermissions;
 pub use mcp::ToolPluginContext;
 pub use server::EffectiveMcpServer;
 
@@ -146,6 +139,5 @@ mod sandbox_executable;
 mod sandbox_metadata;
 pub(crate) mod server;
 mod tool_catalog_cache;
-mod tool_request_meta;
 pub(crate) mod tools;
 mod trusted_access;

@@ -86,7 +86,6 @@ async fn user_reload_promotes_plugin_and_feature_requirements_without_server_cha
         Vec::new(),
         overrides,
         /*strict_config*/ false,
-        codex_config::CloudConfigBundleLoader::default(),
         codex_arg0::Arg0DispatchPaths::default(),
         Arc::new(codex_config::NoopThreadConfigLoader),
     );
@@ -150,103 +149,5 @@ async fn user_reload_promotes_plugin_and_feature_requirements_without_server_cha
             .feature_requirements
             .is_some()
     );
-    Ok(())
-}
-
-#[test_case::test_case(codex_config::CloudConfigBundleBindingStatus::Stale)]
-#[test_case::test_case(codex_config::CloudConfigBundleBindingStatus::Suspended)]
-#[tokio::test]
-async fn mcp_refresh_rejects_superseded_app_server_policy(
-    status: codex_config::CloudConfigBundleBindingStatus,
-) -> anyhow::Result<()> {
-    use codex_config::CloudConfigBundle;
-    use codex_config::CloudConfigBundleLoader;
-    use codex_config::CloudConfigBundlePolicy;
-    use codex_config::CloudConfigBundleSnapshot;
-    use codex_core::ConfigRefreshOutcome;
-
-    let home = tempfile::tempdir()?;
-    let policy = CloudConfigBundlePolicy::default();
-    let mut snapshot = CloudConfigBundleSnapshot {
-        config_server: None,
-        bundle: Ok(None),
-        binding: None,
-    };
-    policy.publish_snapshot(&mut snapshot);
-    let loader =
-        CloudConfigBundleLoader::default().with_ema_policy_snapshots(policy.clone(), move || {
-            let snapshot = snapshot.clone();
-            async move { snapshot }
-        });
-    let manager = ConfigManager::new(
-        home.path().to_path_buf(),
-        Vec::new(),
-        codex_config::LoaderOverrides::without_managed_config_for_tests(),
-        /*strict_config*/ false,
-        loader,
-        codex_arg0::Arg0DispatchPaths::default(),
-        Arc::new(codex_config::NoopThreadConfigLoader),
-    );
-    let initial = manager
-        .load_latest_config(Some(home.path().to_path_buf()))
-        .await?;
-    let threads = codex_core::test_support::thread_manager_with_models_provider_and_home(
-        CodexAuth::from_api_key("dummy"),
-        initial.model_provider.clone(),
-        initial.codex_home.to_path_buf(),
-        Arc::new(EnvironmentManager::default_for_tests()),
-    );
-    let thread = threads
-        .start_thread(codex_core::StartThreadOptions::new(initial))
-        .await?
-        .thread;
-    let current = thread.config().await;
-    let next = manager
-        .load_latest_config_with_session_layers(&current.config_layer_stack, &current.cwd)
-        .await?;
-    let mut replacement = CloudConfigBundle::default();
-    replacement
-        .config_toml
-        .enterprise_managed
-        .push(codex_config::CloudConfigFragment {
-            id: "replacement".into(),
-            name: "replacement".into(),
-            contents: "model = 'replacement-model'".into(),
-        });
-    policy.observe_remote_bundle(&replacement);
-    if status == codex_config::CloudConfigBundleBindingStatus::Stale {
-        policy.publish_snapshot(&mut CloudConfigBundleSnapshot {
-            config_server: None,
-            bundle: Ok(Some(replacement)),
-            binding: None,
-        });
-    }
-    assert_eq!(
-        next.config_layer_stack
-            .cloud_config_binding()
-            .expect("app-server must retain the policy binding")
-            .read()
-            .status,
-        status,
-    );
-    let outcome = thread.refresh_mcp_config(Arc::clone(&current), next).await;
-    let expected = match status {
-        codex_config::CloudConfigBundleBindingStatus::Stale => ConfigRefreshOutcome::Stale,
-        codex_config::CloudConfigBundleBindingStatus::Suspended => ConfigRefreshOutcome::Rejected,
-        codex_config::CloudConfigBundleBindingStatus::Current => unreachable!(),
-    };
-    assert_eq!(outcome, expected);
-    if status == codex_config::CloudConfigBundleBindingStatus::Stale {
-        assert!(Arc::ptr_eq(&current, &thread.config().await));
-    } else {
-        assert!(
-            thread
-                .config()
-                .await
-                .config_layer_stack
-                .cloud_config_binding()
-                .is_none()
-        );
-    }
     Ok(())
 }

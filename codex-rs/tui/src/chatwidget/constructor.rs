@@ -4,9 +4,7 @@ use super::*;
 
 impl ChatWidget {
     pub(crate) fn new_with_app_event(common: ChatWidgetInit) -> Self {
-        let mut widget = Self::new_with_op_target(common, CodexOpTarget::AppEvent);
-        widget.bottom_pane.enable_agents_navigation();
-        widget
+        Self::new_with_op_target(common, CodexOpTarget::AppEvent)
     }
 
     pub(super) fn new_with_op_target(
@@ -76,11 +74,7 @@ impl ChatWidget {
             &header_model,
             &model_catalog.try_list_models().unwrap_or_default(),
         );
-        let runtime_keymap = RuntimeKeymap::for_session(
-            &local_settings.tui.keymap,
-            local_settings.workspace_enabled(&config),
-        )
-        .ok();
+        let runtime_keymap = RuntimeKeymap::from_config(&local_settings.tui.keymap).ok();
         let default_keymap = RuntimeKeymap::defaults();
         let copy_last_response_binding = runtime_keymap
             .as_ref()
@@ -145,7 +139,6 @@ impl ChatWidget {
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             status_account_display,
-            remote_connection: None,
             snapshot_local_images: false,
             pending_image_submission: None,
             local_worktree_operations: true,
@@ -182,7 +175,6 @@ impl ChatWidget {
             backend_banner_notice_model: None,
             luna_reserve_notice_account_id: None,
             warning_display_state: WarningDisplayState::default(),
-            composer_images: None,
             rendered_selection: Default::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
             add_credits_nudge_email_in_flight: None,
@@ -216,9 +208,6 @@ impl ChatWidget {
             ide_context: IdeContextState::default(),
             plugins_cache: PluginsCacheState::default(),
             plugins_fetch_state: PluginListFetchState::default(),
-            plugin_remote_sections_loading: false,
-            plugin_remote_sections_loaded: false,
-            plugin_remote_section_errors: Vec::new(),
             plugin_install_apps_needing_auth: Vec::new(),
             plugin_install_auth_flow: None,
             plugins_active_tab_id: None,
@@ -246,7 +235,6 @@ impl ChatWidget {
             active_side_conversation: false,
             blocks_direct_input: false,
             external_writer_view: false,
-            provider_error: None,
             fork_in_progress: false,
             misalignment_policy_violation: None,
             normal_placeholder_text: placeholder,
@@ -264,7 +252,6 @@ impl ChatWidget {
             suppress_initial_user_message_submit: false,
             pending_notification: None,
             quit_shortcut_expires_at: None,
-            new_backend_label: None,
             quick_dial_menu: false,
             quick_dial_menu_key_guard: None,
             quit_shortcut_key: None,

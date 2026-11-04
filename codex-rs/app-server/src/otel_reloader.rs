@@ -64,7 +64,7 @@ where
                         break;
                     }
 
-                    // Account handlers install the new cloud loader after publishing auth changes.
+                    // Account handlers install the new configuration loader after publishing auth changes.
                     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
 
                     let config = match config_manager.load_latest_config(/*fallback_cwd*/ None).await {

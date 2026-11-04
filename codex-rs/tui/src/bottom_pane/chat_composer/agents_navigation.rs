@@ -1,5 +1,6 @@
 //! Availability of the empty-prompt agents shortcut and its footer hint.
 //!
+//! Active sessions can enable this shortcut.
 //! Draft contents, transient input surfaces, and explicit editor remaps take precedence.
 
 use super::*;

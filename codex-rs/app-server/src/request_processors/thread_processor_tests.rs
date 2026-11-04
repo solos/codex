@@ -155,7 +155,6 @@ mod thread_processor_behavior_tests {
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadItemPayload;
     use codex_app_server_protocol::ToolRequestUserInputParams;
-    use codex_config::CloudConfigBundleLoader;
     use codex_config::LoaderOverrides;
     use codex_config::SessionThreadConfig;
     use codex_config::StaticThreadConfigLoader;
@@ -502,8 +501,6 @@ mod thread_processor_behavior_tests {
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread");
         let stored_thread = StoredThread {
-            creator_user_id: None,
-            creator_account_id: None,
             originator: None,
             thread_id,
             extra_config: None,
@@ -551,88 +548,6 @@ mod thread_processor_behavior_tests {
             Some("2025-01-02T03:04:06.789Z")
         );
     }
-
-    #[test]
-    fn config_load_error_marks_cloud_config_bundle_failures_for_relogin() {
-        let err = std::io::Error::other(CloudConfigBundleLoadError::new(
-            CloudConfigBundleLoadErrorCode::Auth,
-            Some(401),
-            "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
-        ));
-
-        let error = config_load_error(&err);
-
-        assert_eq!(
-            error.data,
-            Some(json!({
-                "reason": "cloudConfigBundle",
-                "errorCode": "Auth",
-                "action": "relogin",
-                "statusCode": 401,
-                "detail": "Your authentication session could not be refreshed automatically. Please log out and sign in again.",
-            }))
-        );
-        assert!(
-            error.message.contains("failed to load configuration"),
-            "unexpected error message: {}",
-            error.message
-        );
-    }
-
-    #[test]
-    fn config_load_error_leaves_non_cloud_config_bundle_failures_unmarked() {
-        let err = std::io::Error::other("required MCP servers failed to initialize");
-
-        let error = config_load_error(&err);
-
-        assert_eq!(error.data, None);
-        assert!(
-            error.message.contains("failed to load configuration"),
-            "unexpected error message: {}",
-            error.message
-        );
-    }
-
-    #[test]
-    fn config_load_error_marks_non_auth_cloud_config_bundle_failures_without_relogin() {
-        let err = std::io::Error::other(CloudConfigBundleLoadError::new(
-            CloudConfigBundleLoadErrorCode::RequestFailed,
-            /*status_code*/ None,
-            "Failed to load cloud config bundle (workspace-managed policies).",
-        ));
-
-        let error = config_load_error(&err);
-
-        assert_eq!(
-            error.data,
-            Some(json!({
-                "reason": "cloudConfigBundle",
-                "errorCode": "RequestFailed",
-                "detail": "Failed to load cloud config bundle (workspace-managed policies).",
-            }))
-        );
-    }
-
-    #[test]
-    fn config_load_error_marks_invalid_cloud_config_bundle_failures_without_relogin() {
-        let err = std::io::Error::other(CloudConfigBundleLoadError::new(
-            CloudConfigBundleLoadErrorCode::InvalidBundle,
-            /*status_code*/ None,
-            "invalid cloud config bundle: invalid cloud config fragment Base policy (cfg_123)",
-        ));
-
-        let error = config_load_error(&err);
-
-        assert_eq!(
-            error.data,
-            Some(json!({
-                "reason": "cloudConfigBundle",
-                "errorCode": "InvalidBundle",
-                "detail": "invalid cloud config bundle: invalid cloud config fragment Base policy (cfg_123)",
-            }))
-        );
-    }
-
     #[tokio::test]
     async fn derive_config_from_params_uses_session_thread_config_model_provider() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -668,7 +583,6 @@ mod thread_processor_behavior_tests {
             Vec::new(),
             LoaderOverrides::default(),
             /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
             Arg0DispatchPaths::default(),
             Arc::new(StaticThreadConfigLoader::new(vec![
                 ThreadConfigSource::Session(SessionThreadConfig {

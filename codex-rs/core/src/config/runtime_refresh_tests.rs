@@ -4,7 +4,6 @@ use super::*;
 use crate::config::ConfigBuilder;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core_plugins::PluginLoadOutcome;
 use pretty_assertions::assert_eq;
 
@@ -27,16 +26,19 @@ async fn layered_config(
     session: &str,
 ) -> Config {
     std::fs::write(base.codex_home.join(CONFIG_TOML_FILE), user).unwrap();
+    let requirements_path = base.codex_home.join("requirements.toml");
+    std::fs::write(&requirements_path, format!("[features]\n{requirements}")).unwrap();
+    let mut loader_overrides = codex_config::LoaderOverrides::without_managed_config_for_tests();
+    loader_overrides.system_requirements_path = Some(requirements_path);
+    let managed_config_path = base.codex_home.join("managed_config.toml");
+    std::fs::write(&managed_config_path, managed).unwrap();
+    loader_overrides.managed_config_path = Some(managed_config_path);
     let overrides: toml::Table = toml::from_str(session).unwrap();
     ConfigBuilder::without_managed_config_for_tests()
         .codex_home(base.codex_home.to_path_buf())
         .fallback_cwd(Some(base.cwd.to_path_buf()))
         .cli_overrides(overrides.into_iter().collect())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::enterprise_config(managed)
-                .add_enterprise_requirement(format!("[features]\n{requirements}"))
-                .into_loader(),
-        )
+        .loader_overrides(loader_overrides)
         .build()
         .await
         .unwrap()
@@ -289,55 +291,4 @@ async fn mcp_refresh_preserves_apps_until_new_session() {
         .unwrap();
     assert!(reloaded.features.enabled(Feature::Apps));
     assert!(!next.features.enabled(Feature::Apps));
-}
-
-/// Explicit plugin updates replace only their session override, retaining other thread settings.
-#[tokio::test]
-async fn plugin_override_refresh_preserves_session_and_restores_inheritance() {
-    let (_home, base) = base_config().await;
-    let mut current = layered_config(
-        &base,
-        "[plugins.browser]\nenabled = false",
-        "",
-        "",
-        "[apps.calendar]\nenabled = false\n[plugins.browser]\nenabled = true",
-    )
-    .await;
-    let incoming = layered_config(
-        &base,
-        "[plugins.browser]\nenabled = false",
-        "",
-        "",
-        "[apps.calendar]\nenabled = true",
-    )
-    .await;
-    let original_apps = current.config_layer_stack.effective_config()["apps"].clone();
-    let layer_count = current.config_layer_stack.all_layers_low_to_high().count();
-    let unchanged = current
-        .resolve_runtime_refresh(&incoming, RuntimeConfigRefresh::Mcp)
-        .unwrap();
-    assert_eq!(unchanged.plugins, current.plugins);
-    for (override_text, expected) in [
-        ("[browser]\nenabled = false", false),
-        ("[browser]\nenabled = true", true),
-        ("", false),
-    ] {
-        let mut incoming = incoming.clone();
-        incoming.config_layer_stack = incoming
-            .config_layer_stack
-            .with_session_plugins(toml::from_str(override_text).unwrap())
-            .unwrap();
-        current = current
-            .resolve_runtime_refresh(&incoming, RuntimeConfigRefresh::Mcp)
-            .unwrap();
-        assert_eq!(current.plugins.plugins["browser"].enabled, Some(expected));
-        assert_eq!(
-            current.config_layer_stack.effective_config()["apps"],
-            original_apps
-        );
-        assert_eq!(
-            current.config_layer_stack.all_layers_low_to_high().count(),
-            layer_count
-        );
-    }
 }

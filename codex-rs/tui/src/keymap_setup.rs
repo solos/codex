@@ -822,7 +822,6 @@ mod tests {
     fn fast_mode_action_filter() -> KeymapActionFilter {
         KeymapActionFilter {
             fast_mode_enabled: true,
-            ..Default::default()
         }
     }
 
@@ -896,16 +895,11 @@ mod tests {
 
     #[test]
     fn picker_covers_every_replaceable_action() {
-        let keymap = TuiKeymap::default();
-        let runtime = RuntimeKeymap::for_session(&keymap, /*workspace*/ true).unwrap();
+        let runtime = RuntimeKeymap::defaults();
         let params = build_keymap_picker_params_with_filter(
             &runtime,
-            &keymap,
-            KeymapActionFilter {
-                fast_mode_enabled: true,
-                multi_backend_enabled: true,
-                workspace_enabled: true,
-            },
+            &TuiKeymap::default(),
+            fast_mode_action_filter(),
         );
         let all_tab = selection_tab(&params, KEYMAP_ALL_TAB_ID);
 
@@ -1278,21 +1272,13 @@ mod tests {
 
     #[test]
     fn picker_all_tab_items_remain_searchable() {
-        let keymap = TuiKeymap::default();
-        let runtime = RuntimeKeymap::for_session(&keymap, /*workspace*/ true).unwrap();
-        let params = build_keymap_picker_params_with_filter(
-            &runtime,
-            &keymap,
-            KeymapActionFilter {
-                workspace_enabled: true,
-                ..Default::default()
-            },
-        );
+        let runtime = RuntimeKeymap::defaults();
+        let params = build_keymap_picker_params(&runtime, &TuiKeymap::default());
         let all_tab = selection_tab(&params, KEYMAP_ALL_TAB_ID);
         let snapshot = all_tab
             .items
             .iter()
-            .take(13)
+            .take(12)
             .map(|item| {
                 format!(
                     "{} | {} | {}",

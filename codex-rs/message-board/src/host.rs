@@ -18,9 +18,10 @@ pub enum NotificationDelivery {
 ///
 /// The host remains authoritative for membership even when runtimes are unloaded.
 /// Clock reads use the posting agent's configured source, including simulated
-/// time. Notifications follow the host's ordinary queue-only agent-message
-/// scheduling and wake policy, and may be buffered for an idle recipient.
-/// Acceptance does not guarantee that the model has consumed the notification.
+/// time. Notifications are accepted only while a running turn still accepts
+/// mailbox delivery; otherwise they are skipped without being queued.
+/// Accepted notifications must not start a new turn or reopen a finalized answer,
+/// but may remain in conversation history for a later turn.
 /// Backends may implement these capabilities with local handles or remote RPCs.
 pub trait MessageBoardHost: Send + Sync {
     fn agent_path(&self, caller: ThreadId) -> BoxFuture<'_, Result<AgentPath>>;

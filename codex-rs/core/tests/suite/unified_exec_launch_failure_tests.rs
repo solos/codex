@@ -9,7 +9,6 @@ use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnStatus;
 use codex_config::Constrained;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionData;
@@ -74,12 +73,15 @@ async fn interrupted_one_shot_launch_failure_completes_and_persists() -> Result<
     let test = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_history_mode(ThreadHistoryMode::Paginated)
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                "[features]\nunified_exec = false\nshell_tool = true\n",
-            ),
-        )
         .with_config(|config| {
+            config
+                .features
+                .disable(Feature::UnifiedExec)
+                .expect("disable unified exec");
+            config
+                .features
+                .enable(Feature::ShellTool)
+                .expect("enable shell tool");
             config.features.disable(Feature::ShellSnapshot).unwrap();
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config

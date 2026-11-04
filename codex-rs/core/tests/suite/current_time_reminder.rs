@@ -12,7 +12,6 @@ use anyhow::anyhow;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::SleepFuture;
 use codex_core::TimeFuture;
 use codex_core::TimeProvider;
@@ -370,99 +369,6 @@ async fn current_time_reminders_can_follow_only_user_or_tool_outputs() -> Result
     );
     Ok(())
 }
-
-#[test_case(ClockSetup::Configured; "configured")]
-#[test_case(ClockSetup::Persistent; "persistent")]
-#[test_case(ClockSetup::OrdinaryEffort; "ordinary_effort")]
-#[test_case(ClockSetup::ModelTools; "model_tools_without_reminders")]
-#[test_case(ClockSetup::ExplicitlyDisabled; "explicitly_disabled")]
-#[test_case(ClockSetup::RequiredOff; "required_off")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn system_time_source_adds_current_time_reminder(clock_setup: ClockSetup) -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let responses = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    )
-    .await;
-    let mut builder = test_codex()
-        .with_model_info_override("gpt-5.5", move |model_info| {
-            if matches!(clock_setup, ClockSetup::Configured | ClockSetup::ModelTools) {
-                model_info
-                    .experimental_supported_tools
-                    .push("clock".to_string());
-            }
-        })
-        .with_pre_build_hook(move |home| {
-            let config = match clock_setup {
-                ClockSetup::Configured => Some("[features]\ncurrent_time_reminder = true\n"),
-                ClockSetup::ModelTools | ClockSetup::ExplicitlyDisabled => {
-                    Some("[features]\ncurrent_time_reminder = false\n")
-                }
-                ClockSetup::Persistent | ClockSetup::OrdinaryEffort | ClockSetup::RequiredOff => {
-                    None
-                }
-            };
-            if let Some(config) = config {
-                std::fs::write(home.join("config.toml"), config)
-                    .expect("clock configuration should be written");
-            }
-        })
-        .with_config(move |config| {
-            config.include_environment_context = false;
-            config.model_reasoning_effort = Some(match clock_setup {
-                ClockSetup::OrdinaryEffort | ClockSetup::ModelTools => ReasoningEffort::High,
-                ClockSetup::Configured
-                | ClockSetup::Persistent
-                | ClockSetup::ExplicitlyDisabled
-                | ClockSetup::RequiredOff => ReasoningEffort::Persistent,
-            });
-        });
-    if matches!(clock_setup, ClockSetup::RequiredOff) {
-        builder = builder.with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                "[features]\ncurrent_time_reminder = false\n",
-            ),
-        );
-    }
-    let test = builder.build_with_auto_env(&server).await?;
-
-    test.submit_text_turn("what time is it?").await?;
-
-    let request = responses.single_request();
-    assert_eq!(
-        ["curr_time", "sleep"].map(|name| request.tool_by_name("clock", name).is_some()),
-        match clock_setup {
-            ClockSetup::Configured => [true, false],
-            ClockSetup::Persistent | ClockSetup::ModelTools => [true, true],
-            ClockSetup::OrdinaryEffort
-            | ClockSetup::ExplicitlyDisabled
-            | ClockSetup::RequiredOff => [false, false],
-        }
-    );
-    if matches!(
-        clock_setup,
-        ClockSetup::OrdinaryEffort
-            | ClockSetup::ModelTools
-            | ClockSetup::ExplicitlyDisabled
-            | ClockSetup::RequiredOff
-    ) {
-        assert!(current_time_reminders(&request).is_empty());
-        return Ok(());
-    }
-    assert!(request.has_content_kinds(&["current_time.reminder"]));
-    let reminders = current_time_reminders(&request);
-    assert_eq!(reminders.len(), 1);
-    assert_regex_match(
-        r"^<current_time_reminder>It is \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC\.</current_time_reminder>$",
-        &reminders[0],
-    );
-
-    Ok(())
-}
-
 #[test_case(ReasoningEffort::High, true; "model_enabled")]
 #[test_case(ReasoningEffort::High, false; "model_disabled")]
 #[test_case(ReasoningEffort::Persistent, true; "persistent_enabled")]

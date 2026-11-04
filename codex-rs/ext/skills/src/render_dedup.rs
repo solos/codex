@@ -1,11 +1,9 @@
-//! Prefers cloud skills before budgeting while retaining aliases from the full visible inventory.
+//! Prepares skill catalogs for rendering.
 //! Collects comparison metadata after the final rendering has been selected.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-
-use codex_protocol::protocol::SkillScope;
 
 use super::AvailableSkillsRender;
 use super::CatalogLines;
@@ -19,9 +17,7 @@ use super::render_catalog;
 use crate::aliases::AliasPlan;
 use crate::catalog::SkillCatalog;
 use crate::catalog::SkillCatalogEntry;
-use crate::catalog::SkillSourceKind;
 use crate::catalog_delta::CatalogSkill;
-use crate::catalog_delta::GrantStatus;
 use crate::catalog_delta::SkillEntrySnapshot;
 use crate::catalog_prompt::SkillPromptKind;
 
@@ -57,22 +53,6 @@ impl<'a> PreparedSkillCatalog<'a> {
         }
     }
 
-    pub(crate) fn prefer_cloud_skills(&mut self, cloud: &SkillCatalog) {
-        let cloud_names: HashSet<_> = cloud
-            .entries
-            .iter()
-            .filter(|entry| entry.is_model_visible())
-            .map(|entry| entry.name.as_str())
-            .filter(|name| {
-                name.split_once(':')
-                    .is_some_and(|(plugin, skill)| !plugin.is_empty() && !skill.is_empty())
-            })
-            .collect();
-
-        self.entries
-            .retain(|entry| !cloud_names.contains(entry.name.as_str()));
-    }
-
     pub(super) fn unaliased(&self) -> CatalogLines<'a> {
         CatalogLines::unaliased(&self.entries, self.policy)
     }
@@ -86,8 +66,6 @@ impl<'a> PreparedSkillCatalog<'a> {
     pub(crate) fn entries_for_render(
         &self,
         rendered: &AvailableSkillsRender,
-        grants: Option<&crate::TurnSkillFilesystemGrants>,
-        primary_environment: Option<&str>,
     ) -> BTreeMap<String, CatalogSkill> {
         let lines = if rendered.skill_root_lines.is_empty() {
             self.unaliased()
@@ -124,26 +102,10 @@ impl<'a> PreparedSkillCatalog<'a> {
                     .and_then(|plan| plan.root_for_locator(locator))
                     .cloned();
                 let shown = shown.as_ref().is_none_or(|ids| ids.contains(&id));
-                let environment = match &entry.authority.kind {
-                    SkillSourceKind::Executor => entry.main_prompt.environment_id(),
-                    SkillSourceKind::Host if entry.prompt_scope() == Some(SkillScope::Repo) => {
-                        primary_environment
-                    }
-                    SkillSourceKind::Host | SkillSourceKind::Cloud | SkillSourceKind::Custom(_) => {
-                        None
-                    }
-                };
-                let granted = environment.is_some_and(|id| {
-                    grants.is_some_and(|grants| grants.environment_ids.contains(id))
-                });
                 (
                     id,
                     CatalogSkill {
-                        snapshot: SkillEntrySnapshot {
-                            fingerprint,
-                            shown,
-                            grant: granted.then_some(GrantStatus::Active),
-                        },
+                        snapshot: SkillEntrySnapshot { fingerprint, shown },
                         line: line.render_full(),
                         root,
                     },

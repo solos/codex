@@ -7,37 +7,16 @@ use super::CodexAuth;
 pub struct AuthChangeState {
     /// Advances on cached credential changes and explicit invalidation of pending reads.
     pub generation: u64,
-    /// Advances on login, logout, or changes of user, workspace, service account, or auth mode.
+    /// Advances on login, logout, or changes of user, workspace, or auth mode.
     /// A verified legacy-to-OAuth credential migration preserves the same owner.
     /// Credential changes with incomplete owner identity also advance this revision.
     /// Losing login metadata alone preserves the account owner.
     pub owner_generation: u64,
     /// Advances on an underlying actor credential/source change, including a new OAuth login.
-    /// Renewal within an identifiable OAuth session or WIF subject preserves this revision.
+    /// Ordinary refresh within an identifiable OAuth session preserves this revision.
     pub source_generation: u64,
     /// Preserves strict login ownership for EMA, including loss of login metadata.
     pub login_generation: u64,
-}
-
-/// Whether request preparation can use the credentials it selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RequestAuthChange {
-    Unchanged,
-    CredentialsChanged,
-    OwnerChanged,
-}
-
-impl AuthChangeState {
-    /// Compare a completed attempt with its original owner and starting credential revision.
-    pub fn compare_for_request(&self, expected_owner: u64, prepared: Self) -> RequestAuthChange {
-        if self.owner_generation != expected_owner {
-            RequestAuthChange::OwnerChanged
-        } else if self.generation != prepared.generation {
-            RequestAuthChange::CredentialsChanged
-        } else {
-            RequestAuthChange::Unchanged
-        }
-    }
 }
 
 pub(super) fn same_owner(previous: Option<&CodexAuth>, current: Option<&CodexAuth>) -> bool {
@@ -46,9 +25,6 @@ pub(super) fn same_owner(previous: Option<&CodexAuth>, current: Option<&CodexAut
     };
     if previous.api_auth_mode() != current.api_auth_mode() {
         return false;
-    }
-    if let Some(subject) = previous.api_workload_identity() {
-        return current.api_workload_identity() == Some(subject);
     }
     let (Some(user), Some(workspace)) = (previous.get_chatgpt_user_id(), previous.get_account_id())
     else {

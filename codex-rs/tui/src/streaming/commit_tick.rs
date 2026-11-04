@@ -26,15 +26,13 @@ use super::chunking::QueueSnapshot;
 use super::controller::PlanStreamController;
 use super::controller::StreamController;
 
-/// Selects how a commit tick drains queued stable lines.
+/// Describes whether a commit tick may run in all modes or only in catch-up mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommitTickScope {
     /// Always run the tick, regardless of current chunking mode.
     AnyMode,
     /// Run model transitions and policy updates, but commit lines only in `CatchUp`.
     CatchUpOnly,
-    /// Commit all stable replay lines before restoring the reader, leaving the live tail open.
-    Replay,
 }
 
 /// Describes what a single commit tick produced.
@@ -80,13 +78,6 @@ pub(crate) fn run_commit_tick(
         plan_stream_controller.as_deref(),
         now,
     );
-    if scope == CommitTickScope::Replay {
-        return apply_commit_tick_plan(
-            DrainPlan::Batch(snapshot.queued_lines),
-            stream_controller,
-            plan_stream_controller,
-        );
-    }
     let decision = resolve_chunking_plan(policy, snapshot, now);
     if scope == CommitTickScope::CatchUpOnly && decision.mode != ChunkingMode::CatchUp {
         return CommitTickOutput::default();

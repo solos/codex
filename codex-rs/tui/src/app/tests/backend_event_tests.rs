@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 async fn foreign_backend_events_leave_thread_cache_and_connection_untouched() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let (server, requests, proxy) =
-        session_lifecycle_requests::start_recording_remote_app_server(&app.config).await?;
+        session_lifecycle_requests::start_recording_cloud_app_server(&app.config).await?;
     let id = ThreadId::new();
     app.primary_thread_id = Some(id);
     app.active_thread_id = Some(id);
@@ -116,7 +116,7 @@ async fn foreign_backend_events_leave_thread_cache_and_connection_untouched() ->
 async fn transport_events_retain_the_session_backend() -> Result<()> {
     let app = make_test_app().await;
     let (mut server, _, proxy) =
-        session_lifecycle_requests::start_recording_remote_app_server(&app.config).await?;
+        session_lifecycle_requests::start_recording_cloud_app_server(&app.config).await?;
     let started = server.start_thread(&app.config).await?;
     server
         .thread_settings_update(codex_app_server_protocol::ThreadSettingsUpdateParams {

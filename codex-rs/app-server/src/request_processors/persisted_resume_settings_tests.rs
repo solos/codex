@@ -38,7 +38,6 @@ fn settings_item(
                 service_tier: None,
                 approval_policy,
                 approvals_reviewer,
-                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::read_only(),
                 active_permission_profile,
                 cwd: cwd(),

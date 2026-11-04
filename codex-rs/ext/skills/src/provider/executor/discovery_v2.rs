@@ -43,7 +43,6 @@ impl ExecutorSkillProvider {
                     ) else {
                         continue;
                     };
-                    entry.remote_plugin_id = plugin.remote_plugin_id.clone();
                     entry.plugin_id = Some(plugin.id.clone());
                     entry.analytics_scope = Some(SkillScope::User);
                     catalog.push_entry(entry);

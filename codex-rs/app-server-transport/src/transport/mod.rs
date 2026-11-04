@@ -9,7 +9,6 @@ use codex_core::config::find_codex_home;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -23,31 +22,16 @@ use tracing::warn;
 /// plenty for an interactive CLI.
 pub const CHANNEL_CAPACITY: usize = 128;
 
-mod remote_control;
 mod stdio;
 mod unix_socket;
 #[cfg(test)]
 mod unix_socket_tests;
 mod websocket;
 
-pub use remote_control::REMOTE_CONTROL_DISABLED_ENV_VAR;
-pub use remote_control::RemoteControlDisabledByRequirements;
-pub use remote_control::RemoteControlEnableError;
-pub use remote_control::RemoteControlHandle;
-pub use remote_control::RemoteControlPolicy;
-pub use remote_control::RemoteControlStartConfig;
-pub use remote_control::RemoteControlStartupMode;
-pub use remote_control::RemoteControlUnavailable;
-pub use remote_control::start_remote_control;
-pub use remote_control::take_remote_control_disabled_env;
 pub use stdio::start_stdio_connection;
 pub use unix_socket::AppServerStartupLock;
-pub use unix_socket::DaemonShutdownAccess;
-pub use unix_socket::DaemonSocketFileGuard;
 pub use unix_socket::acquire_app_server_startup_lock;
-pub use unix_socket::bind_private_daemon_socket;
 pub use unix_socket::start_control_socket_acceptor;
-pub use unix_socket::verified_local_daemon_socket;
 pub use websocket::start_websocket_acceptor;
 
 const INTERNAL_ERROR_CODE: i64 = -32603;
@@ -56,13 +40,6 @@ const OVERLOADED_ERROR_CODE: i64 = -32001;
 const APP_SERVER_CONTROL_SOCKET_DIR_NAME: &str = "app-server-control";
 const APP_SERVER_CONTROL_SOCKET_FILE_NAME: &str = "app-server-control.sock";
 const APP_SERVER_STARTUP_LOCK_FILE_NAME: &str = "app-server-startup.lock";
-const DAEMON_RECOVERY_FILE_NAME: &str = "loaded-threads.json";
-
-pub fn daemon_recovery_file_path(codex_home: &Path) -> PathBuf {
-    codex_home
-        .join("app-server-daemon")
-        .join(DAEMON_RECOVERY_FILE_NAME)
-}
 
 pub fn app_server_control_socket_path(codex_home: &Path) -> std::io::Result<AbsolutePathBuf> {
     AbsolutePathBuf::from_absolute_path(
@@ -100,7 +77,7 @@ impl std::fmt::Display for AppServerTransportParseError {
         match self {
             AppServerTransportParseError::UnsupportedListenUrl(listen_url) => write!(
                 f,
-                "unsupported --listen URL `{listen_url}`; expected `stdio://`, `unix://`, `unix://PATH`, `ws://IP:PORT`, or `off`"
+                "unsupported --listen URL `{listen_url}`; expected `stdio://`, `unix://`, `unix://PATH`, or `off`"
             ),
             AppServerTransportParseError::InvalidUnixSocketPath {
                 listen_url,
@@ -156,13 +133,6 @@ impl AppServerTransport {
             return Ok(Self::Off);
         }
 
-        if let Some(socket_addr) = listen_url.strip_prefix("ws://") {
-            let bind_address = socket_addr.parse::<SocketAddr>().map_err(|_| {
-                AppServerTransportParseError::InvalidWebSocketListenUrl(listen_url.to_string())
-            })?;
-            return Ok(Self::WebSocket { bind_address });
-        }
-
         Err(AppServerTransportParseError::UnsupportedListenUrl(
             listen_url.to_string(),
         ))
@@ -179,8 +149,6 @@ impl FromStr for AppServerTransport {
 
 #[derive(Debug)]
 pub enum TransportEvent {
-    /// Accepted on the managed local control socket, outside JSON-RPC.
-    DaemonShutdown,
     ConnectionOpened {
         connection_id: ConnectionId,
         origin: ConnectionOrigin,
@@ -202,7 +170,6 @@ pub enum ConnectionOrigin {
     Stdio,
     InProcess,
     WebSocket,
-    RemoteControl,
 }
 
 static CONNECTION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);

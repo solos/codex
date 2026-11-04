@@ -1,4 +1,4 @@
-//! Measures published cloud and V2 executor plugin catalogs, excluding cached reads.
+//! Measures published V2 executor plugin catalogs, excluding cached reads.
 
 use codex_core_plugins::PluginCatalog;
 use codex_extension_api::ExtensionMetrics;

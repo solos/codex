@@ -20,22 +20,17 @@
 //! runtime remain bounded; the local consumer event queue is unbounded so
 //! unread notifications cannot prevent request responses from being delivered.
 
-mod cloud;
 mod path;
-mod remote;
-mod remote_websocket;
-pub use cloud::CloudClient;
-pub use cloud::CloudCommand;
-pub use cloud::CloudOperation;
-pub use cloud::CloudRequestHandle;
 mod server_request;
 pub use server_request::AppServerReplyHandle;
 
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 use std::io::Result as IoResult;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,7 +41,6 @@ pub use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server::in_process::LogDbLayer;
 pub use codex_app_server::in_process::StateDbHandle;
-pub use codex_app_server::verified_local_daemon_socket;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
@@ -59,7 +53,6 @@ use codex_app_server_protocol::Result as JsonRpcResult;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_core::config::Config;
@@ -77,9 +70,6 @@ use toml::Value as TomlValue;
 use tracing::warn;
 
 pub use crate::path::AppServerPath;
-pub use crate::remote::RemoteAppServerClient;
-pub use crate::remote::RemoteAppServerConnectArgs;
-pub use crate::remote::RemoteAppServerEndpoint;
 
 /// Transitional access to core-only embedded app-server types.
 ///
@@ -97,8 +87,8 @@ pub mod legacy_core {
 }
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// Covers the embedded drain, its analytics flush, and final task join.
-const IN_PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+// Covers the embedded drain and final task join.
+const IN_PROCESS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Raw app-server request result for typed in-process requests.
 ///
@@ -207,8 +197,6 @@ where
 
 #[derive(Clone)]
 pub struct InProcessClientStartArgs {
-    /// This client collects fresh human decisions for managed command checkpoints.
-    pub required_human_approval: bool,
     /// Resolved argv0 dispatch paths used by command execution internals.
     pub arg0_paths: Arg0DispatchPaths,
     /// Shared config used to initialize app-server runtime.
@@ -219,8 +207,6 @@ pub struct InProcessClientStartArgs {
     pub loader_overrides: LoaderOverrides,
     /// Whether config API paths should reject unknown config fields.
     pub strict_config: bool,
-    /// Preloaded cloud config bundle provider.
-    pub cloud_config_bundle: CloudConfigBundleLoader,
     /// Policy shared with transports created by the embedder before startup.
     pub embedded_network_policy: EmbeddedNetworkPolicy,
     /// Feedback sink used by app-server/core telemetry and logs.
@@ -255,7 +241,6 @@ impl InProcessClientStartArgs {
     /// Builds initialize params from caller-provided metadata.
     pub fn initialize_params(&self) -> InitializeParams {
         let capabilities = InitializeCapabilities {
-            required_human_approval: self.required_human_approval,
             explicit_gateway_oauth: false,
             experimental_api: self.experimental_api,
             request_attestation: false,
@@ -286,7 +271,6 @@ impl InProcessClientStartArgs {
             cli_overrides: self.cli_overrides,
             loader_overrides: self.loader_overrides,
             strict_config: self.strict_config,
-            cloud_config_bundle: self.cloud_config_bundle,
             embedded_network_policy: self.embedded_network_policy,
             thread_config_loader: Arc::new(NoopThreadConfigLoader),
             feedback: self.feedback,
@@ -330,6 +314,34 @@ enum ClientCommand {
     },
 }
 
+/// Test-only hooks for observing and intercepting in-process requests.
+///
+/// These hooks keep TUI fixture coverage while ensuring tests exercise the
+/// same embedded transport as production, without an out-of-process client.
+#[derive(Clone)]
+pub struct InProcessRequestHooks {
+    pub before_request_async: Arc<
+        dyn for<'a> Fn(&'a ClientRequest) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+            + Send
+            + Sync,
+    >,
+    pub before_request:
+        Arc<dyn Fn(&ClientRequest) -> Option<IoResult<RequestResult>> + Send + Sync>,
+    pub after_request: Arc<dyn Fn(&ClientRequest, &mut IoResult<RequestResult>) + Send + Sync>,
+    pub server_request_resolved: Arc<dyn Fn(RequestId, &JsonRpcResult, bool) + Send + Sync>,
+}
+
+impl Default for InProcessRequestHooks {
+    fn default() -> Self {
+        Self {
+            before_request_async: Arc::new(|_| Box::pin(async {})),
+            before_request: Arc::new(|_| None),
+            after_request: Arc::new(|_, _| {}),
+            server_request_resolved: Arc::new(|_, _, _| {}),
+        }
+    }
+}
+
 /// Async facade over the in-process app-server runtime.
 ///
 /// This type owns a worker task that bridges between:
@@ -354,15 +366,11 @@ pub struct InProcessAppServerRequestHandle {
 
 #[derive(Clone)]
 pub enum AppServerRequestHandle {
-    Cloud(CloudRequestHandle),
     InProcess(InProcessAppServerRequestHandle),
-    Remote(crate::remote::RemoteAppServerRequestHandle),
 }
 
 pub enum AppServerClient {
-    Cloud(CloudClient),
     InProcess(InProcessAppServerClient),
-    Remote(RemoteAppServerClient),
 }
 
 impl InProcessAppServerClient {
@@ -371,6 +379,22 @@ impl InProcessAppServerClient {
     /// The returned client is ready for requests and ordered event consumption.
     /// Request queues remain bounded without blocking on unread notifications.
     pub async fn start(args: InProcessClientStartArgs) -> IoResult<Self> {
+        Self::start_inner(args, None).await
+    }
+
+    /// Starts the in-process runtime with test-only request hooks.
+    #[cfg(feature = "test-support")]
+    pub async fn start_with_request_hooks(
+        args: InProcessClientStartArgs,
+        hooks: InProcessRequestHooks,
+    ) -> IoResult<Self> {
+        Self::start_inner(args, Some(hooks)).await
+    }
+
+    async fn start_inner(
+        args: InProcessClientStartArgs,
+        request_hooks: Option<InProcessRequestHooks>,
+    ) -> IoResult<Self> {
         let channel_capacity = args.channel_capacity.max(1);
         let mut handle =
             codex_app_server::in_process::start(args.into_runtime_start_args()).await?;
@@ -378,8 +402,8 @@ impl InProcessAppServerClient {
         let (command_tx, mut command_rx) = mpsc::channel::<ClientCommand>(channel_capacity);
         // e9996ec62a preserved transcript events by awaiting a bounded queue, but that can
         // deadlock a foreground request whose response is behind unread notifications.
-        // Match the remote-client fix in 79ea57715636: only this local consumer queue is
-        // unbounded; commands and the embedded runtime stay bounded and events remain ordered.
+        // Only this local consumer queue is unbounded; commands and the embedded runtime stay
+        // bounded and events remain ordered.
         let (event_tx, event_rx) = mpsc::unbounded_channel::<InProcessServerEvent>();
 
         let worker_handle = tokio::spawn(async move {
@@ -390,6 +414,7 @@ impl InProcessAppServerClient {
                         match command {
                             Some(ClientCommand::Request { request, response_tx }) => {
                                 let request_sender = request_sender.clone();
+                                let request_hooks = request_hooks.clone();
                                 // Request waits happen on a detached task so
                                 // this loop can keep draining runtime events
                                 // while the request is blocked on client input.
@@ -404,7 +429,22 @@ impl InProcessAppServerClient {
                                     let mut response_tx = response_tx;
                                     tokio::select! {
                                         _ = response_tx.closed(), if cancellable => {}
-                                        result = request_sender.request(*request) => {
+                                        result = async {
+                                            let request = *request;
+                                            if let Some(hooks) = request_hooks.as_ref() {
+                                                if let Some(result) =
+                                                    (hooks.before_request)(&request)
+                                                {
+                                                    return result;
+                                                }
+                                                (hooks.before_request_async)(&request).await;
+                                            }
+                                            let mut result = request_sender.request(request.clone()).await;
+                                            if let Some(hooks) = request_hooks.as_ref() {
+                                                (hooks.after_request)(&request, &mut result);
+                                            }
+                                            result
+                                        } => {
                                             let _ = response_tx.send(result);
                                         }
                                     }
@@ -422,6 +462,9 @@ impl InProcessAppServerClient {
                                 result,
                                 response_tx,
                             }) => {
+                                if let Some(hooks) = request_hooks.as_ref() {
+                                    (hooks.server_request_resolved)(request_id.clone(), &result, false);
+                                }
                                 let send_result =
                                     request_sender.respond_to_server_request(request_id, result);
                                 let _ = response_tx.send(send_result);
@@ -431,6 +474,9 @@ impl InProcessAppServerClient {
                                 error,
                                 response_tx,
                             }) => {
+                                if let Some(hooks) = request_hooks.as_ref() {
+                                    (hooks.server_request_resolved)(request_id.clone(), &serde_json::Value::Null, true);
+                                }
                                 let send_result = request_sender.fail_server_request(request_id, error);
                                 let _ = response_tx.send(send_result);
                             }
@@ -718,8 +764,6 @@ impl AppServerRequestHandle {
     ) -> IoResult<()> {
         match self {
             Self::InProcess(handle) => handle.resolve_server_request(request_id, result).await,
-            Self::Remote(handle) => handle.resolve_server_request(request_id, result).await,
-            Self::Cloud(handle) => handle.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -730,16 +774,12 @@ impl AppServerRequestHandle {
     ) -> IoResult<()> {
         match self {
             Self::InProcess(handle) => handle.reject_server_request(request_id, error).await,
-            Self::Remote(handle) => handle.reject_server_request(request_id, error).await,
-            Self::Cloud(handle) => handle.reject_server_request(request_id, error).await,
         }
     }
 
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         match self {
             Self::InProcess(handle) => handle.request(request).await,
-            Self::Remote(handle) => handle.request(request).await,
-            Self::Cloud(handle) => handle.request(request).await,
         }
     }
 
@@ -755,12 +795,9 @@ impl AppServerRequestHandle {
 
 impl AppServerClient {
     /// App-server platform family, which can differ from the executor's platform.
-    /// Older remote servers may omit this metadata.
     pub fn platform_family(&self) -> Option<&str> {
         match self {
             Self::InProcess(_) => Some(std::env::consts::FAMILY),
-            Self::Remote(client) => client.platform_family(),
-            Self::Cloud(_) => None,
         }
     }
 
@@ -768,8 +805,6 @@ impl AppServerClient {
     pub fn platform_os(&self) -> Option<&str> {
         match self {
             Self::InProcess(_) => Some(std::env::consts::OS),
-            Self::Remote(client) => client.platform_os(),
-            Self::Cloud(_) => None,
         }
     }
 
@@ -778,16 +813,12 @@ impl AppServerClient {
             Self::InProcess(_) => Some(AppServerPath::from_app_server(
                 local_codex_home.display().to_string(),
             )),
-            Self::Remote(client) => client.codex_home().map(AppServerPath::from_app_server),
-            Self::Cloud(_) => None,
         }
     }
 
     pub async fn request(&self, request: ClientRequest) -> IoResult<RequestResult> {
         match self {
             Self::InProcess(client) => client.request(request).await,
-            Self::Remote(client) => client.request(request).await,
-            Self::Cloud(client) => client.request(request).await,
         }
     }
 
@@ -803,8 +834,6 @@ impl AppServerClient {
     pub async fn notify(&self, notification: ClientNotification) -> IoResult<()> {
         match self {
             Self::InProcess(client) => client.notify(notification).await,
-            Self::Remote(client) => client.notify(notification).await,
-            Self::Cloud(client) => client.notify(notification).await,
         }
     }
 
@@ -815,8 +844,6 @@ impl AppServerClient {
     ) -> IoResult<()> {
         match self {
             Self::InProcess(client) => client.resolve_server_request(request_id, result).await,
-            Self::Remote(client) => client.resolve_server_request(request_id, result).await,
-            Self::Cloud(client) => client.resolve_server_request(request_id, result).await,
         }
     }
 
@@ -827,47 +854,34 @@ impl AppServerClient {
     ) -> IoResult<()> {
         match self {
             Self::InProcess(client) => client.reject_server_request(request_id, error).await,
-            Self::Remote(client) => client.reject_server_request(request_id, error).await,
-            Self::Cloud(client) => client.reject_server_request(request_id, error).await,
         }
     }
 
     pub async fn next_event(&mut self) -> Option<AppServerEvent> {
         match self {
             Self::InProcess(client) => client.next_event().await.map(Into::into),
-            Self::Remote(client) => client.next_event().await,
-            Self::Cloud(client) => client.next_event().await,
         }
     }
 
     pub async fn shutdown(self) -> IoResult<()> {
         match self {
             Self::InProcess(client) => client.shutdown().await,
-            Self::Remote(client) => client.shutdown().await,
-            Self::Cloud(client) => client.shutdown().await,
         }
     }
 
     pub fn request_handle(&self) -> AppServerRequestHandle {
         match self {
             Self::InProcess(client) => AppServerRequestHandle::InProcess(client.request_handle()),
-            Self::Remote(client) => AppServerRequestHandle::Remote(client.request_handle()),
-            Self::Cloud(client) => AppServerRequestHandle::Cloud(client.request_handle()),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[path = "reply_tests.rs"]
-    mod replies;
     use super::*;
     use codex_app_server_protocol::AccountUpdatedNotification;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::GetAccountResponse;
-    use codex_app_server_protocol::JSONRPCMessage;
-    use codex_app_server_protocol::JSONRPCRequest;
-    use codex_app_server_protocol::JSONRPCResponse;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadSettingsUpdateParams;
@@ -879,24 +893,13 @@ mod tests {
     use codex_core::config::ConfigBuilder;
     use codex_core::init_state_db;
     use codex_protocol::config_types::Personality;
-    use codex_uds::UnixListener;
-    use codex_utils_absolute_path::AbsolutePathBuf;
-    use futures::SinkExt;
-    use futures::StreamExt;
     use futures::poll;
     use pretty_assertions::assert_eq;
     use std::ops::Deref;
     use std::path::Path;
     use tempfile::TempDir;
-    use tokio::net::TcpListener;
     use tokio::time::Duration;
     use tokio::time::timeout;
-    use tokio_tungstenite::accept_async;
-    use tokio_tungstenite::accept_hdr_async;
-    use tokio_tungstenite::tungstenite::Message;
-    use tokio_tungstenite::tungstenite::handshake::server::Request as WebSocketRequest;
-    use tokio_tungstenite::tungstenite::handshake::server::Response as WebSocketResponse;
-    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
     async fn build_test_config() -> Config {
         match ConfigBuilder::default().build().await {
@@ -952,13 +955,11 @@ mod tests {
             .await
             .expect("state db should initialize for in-process test");
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
-            required_human_approval: false,
             arg0_paths: Arg0DispatchPaths::default(),
             config,
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             strict_config: false,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
             embedded_network_policy: Default::default(),
             feedback: CodexFeedback::new(),
             log_db: None,
@@ -986,136 +987,6 @@ mod tests {
     async fn start_test_client(session_source: SessionSource) -> TestClient {
         start_test_client_with_capacity(session_source, DEFAULT_IN_PROCESS_CHANNEL_CAPACITY).await
     }
-
-    async fn start_test_remote_server<F, Fut>(handler: F) -> String
-    where
-        F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
-            + Send
-            + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        start_test_remote_server_with_auth(/*expected_auth_token*/ None, handler).await
-    }
-
-    async fn start_test_remote_server_with_auth<F, Fut>(
-        expected_auth_token: Option<String>,
-        handler: F,
-    ) -> String
-    where
-        F: FnOnce(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>) -> Fut
-            + Send
-            + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("listener address");
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept should succeed");
-            let websocket = accept_hdr_async(
-                stream,
-                move |request: &WebSocketRequest, response: WebSocketResponse| {
-                    let provided_auth_token = request
-                        .headers()
-                        .get(AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_owned);
-                    let expected_auth_token = expected_auth_token
-                        .as_ref()
-                        .map(|token| format!("Bearer {token}"));
-                    assert_eq!(provided_auth_token, expected_auth_token);
-                    Ok(response)
-                },
-            )
-            .await
-            .expect("websocket upgrade should succeed");
-            handler(websocket).await;
-        });
-        format!("ws://{addr}")
-    }
-
-    async fn expect_remote_initialize<S>(websocket: &mut tokio_tungstenite::WebSocketStream<S>)
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        expect_remote_initialize_with_metadata(
-            websocket,
-            serde_json::json!({
-                "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
-                "codexHome": "/server/.codex",
-            }),
-        )
-        .await;
-    }
-
-    async fn expect_remote_initialize_with_metadata<S>(
-        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-        metadata: serde_json::Value,
-    ) where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        let JSONRPCMessage::Request(request) = read_websocket_message(websocket).await else {
-            panic!("expected initialize request");
-        };
-        assert_eq!(request.method, "initialize");
-        write_websocket_message(
-            websocket,
-            JSONRPCMessage::Response(JSONRPCResponse {
-                id: request.id,
-                result: metadata,
-            }),
-        )
-        .await;
-
-        let JSONRPCMessage::Notification(notification) = read_websocket_message(websocket).await
-        else {
-            panic!("expected initialized notification");
-        };
-        assert_eq!(notification.method, "initialized");
-    }
-
-    async fn read_websocket_message<S>(
-        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-    ) -> JSONRPCMessage
-    where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        loop {
-            let frame = websocket
-                .next()
-                .await
-                .expect("frame should be available")
-                .expect("frame should decode");
-            match frame {
-                Message::Text(text) => {
-                    return serde_json::from_str::<JSONRPCMessage>(&text)
-                        .expect("text frame should be valid JSON-RPC");
-                }
-                Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
-                    continue;
-                }
-                Message::Close(_) => panic!("unexpected close frame"),
-            }
-        }
-    }
-
-    async fn write_websocket_message<S>(
-        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
-        message: JSONRPCMessage,
-    ) where
-        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    {
-        websocket
-            .send(Message::Text(
-                serde_json::to_string(&message)
-                    .expect("message should serialize")
-                    .into(),
-            ))
-            .await
-            .expect("message should send");
-    }
-
     fn command_execution_output_delta_notification(delta: &str) -> ServerNotification {
         ServerNotification::CommandExecutionOutputDelta(
             codex_app_server_protocol::CommandExecutionOutputDeltaNotification {
@@ -1173,36 +1044,6 @@ mod tests {
             },
         })
     }
-
-    fn test_remote_connect_args(websocket_url: String) -> RemoteAppServerConnectArgs {
-        RemoteAppServerConnectArgs {
-            required_human_approval: false,
-            endpoint: RemoteAppServerEndpoint::WebSocket {
-                websocket_url,
-                auth_token: None,
-            },
-            client_name: "codex-app-server-client-test".to_string(),
-            client_version: "0.0.0-test".to_string(),
-            experimental_api: true,
-            mcp_server_openai_form_elicitation: false,
-            opt_out_notification_methods: Vec::new(),
-            channel_capacity: 8,
-        }
-    }
-
-    #[test]
-    fn remote_initialize_params_forward_openai_form_capability() {
-        let mut args = test_remote_connect_args("ws://localhost/rpc".to_string());
-        args.mcp_server_openai_form_elicitation = true;
-
-        assert!(
-            args.initialize_params()
-                .capabilities
-                .expect("initialize capabilities")
-                .mcp_server_openai_form_elicitation
-        );
-    }
-
     #[tokio::test]
     async fn typed_request_drop_cancels_waiting_send_and_reply() {
         let (command_tx, mut commands) = mpsc::channel(/*buffer*/ 1);
@@ -1424,693 +1265,6 @@ mod tests {
 
         client.shutdown().await.expect("shutdown should complete");
     }
-
-    #[tokio::test]
-    async fn remote_platform_metadata_preserves_reported_and_missing_values() {
-        for (family, os) in [
-            (Some("windows"), Some("windows")),
-            (Some("unix"), Some("linux")),
-            (Some("future-family"), Some("future-os")),
-            (Some("unix"), None),
-            (None, Some("linux")),
-            (None, None),
-        ] {
-            let websocket_url = start_test_remote_server(move |mut websocket| async move {
-                let mut metadata = serde_json::json!({});
-                if let Some(family) = family {
-                    metadata["platformFamily"] = family.into();
-                }
-                if let Some(os) = os {
-                    metadata["platformOs"] = os.into();
-                }
-                expect_remote_initialize_with_metadata(&mut websocket, metadata).await;
-                websocket.close(None).await.expect("close should succeed");
-            })
-            .await;
-            let client = AppServerClient::Remote(
-                RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-                    .await
-                    .expect("remote client should connect"),
-            );
-            assert_eq!(
-                (client.platform_family(), client.platform_os()),
-                (family, os)
-            );
-            client.shutdown().await.expect("shutdown should complete");
-        }
-    }
-
-    #[tokio::test]
-    async fn remote_typed_request_roundtrip_works() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected account/read request");
-            };
-            assert_eq!(request.method, "account/read");
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::to_value(GetAccountResponse {
-                        workspace_routing: None,
-                        account: None,
-                        requires_openai_auth: false,
-                    })
-                    .expect("response should serialize"),
-                }),
-            )
-            .await;
-            websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        assert_eq!(client.server_version(), Some("9.8.7-test"));
-        assert_eq!(client.codex_home(), Some("/server/.codex"));
-        let client = AppServerClient::Remote(client);
-        let response: GetAccountResponse = client
-            .request_typed(ClientRequest::GetAccount {
-                request_id: RequestId::Integer(1),
-                params: codex_app_server_protocol::GetAccountParams {
-                    refresh_token: false,
-                },
-            })
-            .await
-            .expect("typed request should succeed");
-        assert_eq!(response.account, None);
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_unix_socket_typed_request_roundtrip_works() {
-        let socket_dir = TempDir::new().expect("socket dir");
-        let socket_path = AbsolutePathBuf::from_absolute_path(socket_dir.path().join("codex.sock"))
-            .expect("socket path should resolve");
-        let mut listener = UnixListener::bind(socket_path.as_path())
-            .await
-            .expect("listener should bind");
-        tokio::spawn(async move {
-            let stream = listener.accept().await.expect("accept should succeed");
-            let mut websocket = accept_async(stream)
-                .await
-                .expect("websocket upgrade should succeed");
-            expect_remote_initialize(&mut websocket).await;
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected account/read request");
-            };
-            assert_eq!(request.method, "account/read");
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::to_value(GetAccountResponse {
-                        workspace_routing: None,
-                        account: None,
-                        requires_openai_auth: false,
-                    })
-                    .expect("response should serialize"),
-                }),
-            )
-            .await;
-            websocket.close(None).await.expect("close should succeed");
-        });
-        let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            required_human_approval: false,
-            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-            client_name: "codex-app-server-client-test".to_string(),
-            client_version: "0.0.0-test".to_string(),
-            experimental_api: true,
-            mcp_server_openai_form_elicitation: false,
-            opt_out_notification_methods: Vec::new(),
-            channel_capacity: 8,
-        })
-        .await
-        .expect("remote client should connect");
-
-        let response: GetAccountResponse = client
-            .request_typed(ClientRequest::GetAccount {
-                request_id: RequestId::Integer(1),
-                params: codex_app_server_protocol::GetAccountParams {
-                    refresh_token: false,
-                },
-            })
-            .await
-            .expect("typed request should succeed");
-        assert_eq!(response.account, None);
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_typed_request_accepts_large_single_frame_response() {
-        let padding = "x".repeat((17 << 20) + 1024);
-        let websocket_url = start_test_remote_server(move |mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected account/read request");
-            };
-            assert_eq!(request.method, "account/read");
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::json!({
-                        "account": null,
-                        "requiresOpenaiAuth": false,
-                        "padding": padding,
-                    }),
-                }),
-            )
-            .await;
-            websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let response: GetAccountResponse = client
-            .request_typed(ClientRequest::GetAccount {
-                request_id: RequestId::Integer(1),
-                params: codex_app_server_protocol::GetAccountParams {
-                    refresh_token: false,
-                },
-            })
-            .await
-            .expect("large typed request should succeed");
-        assert_eq!(
-            response,
-            GetAccountResponse {
-                workspace_routing: None,
-                account: None,
-                requires_openai_auth: false,
-            }
-        );
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_connect_includes_auth_header_when_configured() {
-        let auth_token = "remote-bearer-token".to_string();
-        let websocket_url = start_test_remote_server_with_auth(
-            Some(auth_token.clone()),
-            |mut websocket| async move {
-                expect_remote_initialize(&mut websocket).await;
-                websocket.close(None).await.expect("close should succeed");
-            },
-        )
-        .await;
-        let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            required_human_approval: false,
-            endpoint: RemoteAppServerEndpoint::WebSocket {
-                websocket_url,
-                auth_token: Some(auth_token),
-            },
-            client_name: "codex-app-server-client-test".to_string(),
-            client_version: "0.0.0-test".to_string(),
-            experimental_api: true,
-            mcp_server_openai_form_elicitation: false,
-            opt_out_notification_methods: Vec::new(),
-            channel_capacity: 8,
-        })
-        .await
-        .expect("remote client should connect");
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_connect_rejects_non_loopback_ws_when_auth_configured() {
-        let result = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            required_human_approval: false,
-            endpoint: RemoteAppServerEndpoint::WebSocket {
-                websocket_url: "ws://example.com:4500".to_string(),
-                auth_token: Some("remote-bearer-token".to_string()),
-            },
-            client_name: "codex-app-server-client-test".to_string(),
-            client_version: "0.0.0-test".to_string(),
-            experimental_api: true,
-            mcp_server_openai_form_elicitation: false,
-            opt_out_notification_methods: Vec::new(),
-            channel_capacity: 8,
-        })
-        .await;
-        let err = match result {
-            Ok(_) => panic!("non-loopback ws should be rejected before connect"),
-            Err(err) => err,
-        };
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
-        assert!(
-            err.to_string()
-                .contains("remote auth tokens require `wss://` or loopback `ws://` URLs")
-        );
-    }
-
-    #[test]
-    fn remote_auth_token_transport_policy_allows_wss_and_loopback_ws() {
-        assert!(crate::remote::websocket_url_supports_auth_token(
-            &url::Url::parse("wss://example.com:443").expect("wss URL should parse")
-        ));
-        assert!(crate::remote::websocket_url_supports_auth_token(
-            &url::Url::parse("ws://127.0.0.1:4500").expect("loopback ws URL should parse")
-        ));
-        assert!(!crate::remote::websocket_url_supports_auth_token(
-            &url::Url::parse("ws://example.com:4500").expect("non-loopback ws URL should parse")
-        ));
-    }
-
-    #[tokio::test]
-    async fn remote_duplicate_request_id_keeps_original_waiter() {
-        let (first_request_seen_tx, first_request_seen_rx) = tokio::sync::oneshot::channel();
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected account/read request");
-            };
-            assert_eq!(request.method, "account/read");
-            first_request_seen_tx
-                .send(request.id.clone())
-                .expect("request id should send");
-            assert!(
-                timeout(
-                    Duration::from_millis(100),
-                    read_websocket_message(&mut websocket)
-                )
-                .await
-                .is_err(),
-                "duplicate request should not be forwarded to the server"
-            );
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::to_value(GetAccountResponse {
-                        workspace_routing: None,
-                        account: None,
-                        requires_openai_auth: false,
-                    })
-                    .expect("response should serialize"),
-                }),
-            )
-            .await;
-            let _ = websocket.next().await;
-        })
-        .await;
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-        let first_request_handle = client.request_handle();
-        let second_request_handle = first_request_handle.clone();
-
-        let first_request = tokio::spawn(async move {
-            first_request_handle
-                .request_typed::<GetAccountResponse>(ClientRequest::GetAccount {
-                    request_id: RequestId::Integer(1),
-                    params: codex_app_server_protocol::GetAccountParams {
-                        refresh_token: false,
-                    },
-                })
-                .await
-        });
-
-        let first_request_id = first_request_seen_rx
-            .await
-            .expect("server should observe the first request");
-        assert_eq!(first_request_id, RequestId::Integer(1));
-
-        let second_err = second_request_handle
-            .request_typed::<GetAccountResponse>(ClientRequest::GetAccount {
-                request_id: RequestId::Integer(1),
-                params: codex_app_server_protocol::GetAccountParams {
-                    refresh_token: false,
-                },
-            })
-            .await
-            .expect_err("duplicate request id should be rejected");
-        assert_eq!(
-            second_err.to_string(),
-            "account/read transport error: duplicate remote app-server request id `1`"
-        );
-
-        let first_response = first_request
-            .await
-            .expect("first request task should join")
-            .expect("first request should succeed");
-        assert_eq!(
-            first_response,
-            GetAccountResponse {
-                workspace_routing: None,
-                account: None,
-                requires_openai_auth: false,
-            }
-        );
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_notifications_arrive_over_websocket() {
-        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let notification = JSONRPCMessage::Notification(
-                serde_json::from_value(
-                    serde_json::to_value(ServerNotification::AccountUpdated(
-                        AccountUpdatedNotification {
-                            auth_mode: None,
-                            plan_type: None,
-                        },
-                    ))
-                    .expect("notification should serialize"),
-                )
-                .expect("notification should convert to JSON-RPC"),
-            );
-            // Only the first notification is consumed; the other can arrive during shutdown.
-            write_websocket_message(&mut websocket, notification.clone()).await;
-            write_websocket_message(&mut websocket, notification).await;
-            let _ = close_tx.send(websocket.next().await);
-        })
-        .await;
-        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let event = client.next_event().await.expect("event should arrive");
-        assert!(matches!(
-            event,
-            AppServerEvent::ServerNotification(notification)
-                if matches!(notification.as_ref(), ServerNotification::AccountUpdated(_))
-        ));
-
-        client.shutdown().await.expect("shutdown should complete");
-        assert_eq!(
-            close_rx
-                .await
-                .expect("server should observe shutdown")
-                .expect("server should receive a frame")
-                .expect("websocket should close cleanly"),
-            Message::Close(None),
-        );
-    }
-
-    #[tokio::test]
-    async fn remote_backpressure_preserves_transcript_notifications() {
-        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            for notification in [
-                command_execution_output_delta_notification("stdout-1"),
-                command_execution_output_delta_notification("stdout-2"),
-                agent_message_delta_notification("hello"),
-                item_completed_notification("hello"),
-                turn_completed_notification(),
-            ] {
-                write_websocket_message(
-                    &mut websocket,
-                    JSONRPCMessage::Notification(
-                        serde_json::from_value(
-                            serde_json::to_value(notification)
-                                .expect("notification should serialize"),
-                        )
-                        .expect("notification should convert to JSON-RPC"),
-                    ),
-                )
-                .await;
-            }
-            let _ = done_rx.await;
-        })
-        .await;
-        let mut client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
-            channel_capacity: 1,
-            ..test_remote_connect_args(websocket_url)
-        })
-        .await
-        .expect("remote client should connect");
-
-        let first_event = timeout(Duration::from_secs(2), client.next_event())
-            .await
-            .expect("first event should arrive before timeout")
-            .expect("event stream should stay open");
-        assert!(matches!(
-            first_event,
-            AppServerEvent::ServerNotification(notification)
-                if matches!(
-                    notification.as_ref(),
-                    ServerNotification::CommandExecutionOutputDelta(notification)
-                        if notification.delta == "stdout-1"
-                )
-        ));
-
-        let mut remaining_events = Vec::new();
-        for _ in 0..4 {
-            remaining_events.push(
-                timeout(Duration::from_secs(2), client.next_event())
-                    .await
-                    .expect("event should arrive before timeout")
-                    .expect("event stream should stay open"),
-            );
-        }
-
-        let mut transcript_event_names = Vec::new();
-        for event in &remaining_events {
-            match event {
-                AppServerEvent::Lagged { skipped: 1 } => {}
-                AppServerEvent::ServerNotification(notification) => match notification.as_ref() {
-                    ServerNotification::CommandExecutionOutputDelta(notification)
-                        if notification.delta == "stdout-2" => {}
-                    ServerNotification::AgentMessageDelta(notification)
-                        if notification.delta == "hello" =>
-                    {
-                        transcript_event_names.push("agent_message_delta");
-                    }
-                    ServerNotification::ItemCompleted(notification)
-                        if matches!(
-                            &notification.item.payload,
-                            codex_app_server_protocol::ThreadItemPayload::AgentMessage { text, .. }
-                                if text == "hello"
-                        ) =>
-                    {
-                        transcript_event_names.push("item_completed");
-                    }
-                    ServerNotification::TurnCompleted(notification)
-                        if notification.turn.status
-                            == codex_app_server_protocol::TurnStatus::Completed =>
-                    {
-                        transcript_event_names.push("turn_completed");
-                    }
-                    _ => panic!("unexpected remaining event: {event:?}"),
-                },
-                _ => panic!("unexpected remaining event: {event:?}"),
-            }
-        }
-        assert_eq!(
-            transcript_event_names,
-            vec!["agent_message_delta", "item_completed", "turn_completed"]
-        );
-
-        done_tx
-            .send(())
-            .expect("server completion signal should send");
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_server_request_resolution_roundtrip_works() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let request_id = RequestId::String("srv-1".to_string());
-            let server_request = JSONRPCRequest {
-                id: request_id.clone(),
-                method: "item/tool/requestUserInput".to_string(),
-                params: Some(
-                    serde_json::to_value(ToolRequestUserInputParams {
-                        thread_id: "thread-1".to_string(),
-                        turn_id: "turn-1".to_string(),
-                        item_id: "call-1".to_string(),
-                        questions: vec![ToolRequestUserInputQuestion {
-                            id: "question-1".to_string(),
-                            header: "Mode".to_string(),
-                            question: "Pick one".to_string(),
-                            is_other: false,
-                            is_secret: false,
-                            options: Some(vec![]),
-                        }],
-                        is_blocking: true,
-                        auto_resolution_ms: None,
-                    })
-                    .expect("params should serialize"),
-                ),
-                trace: None,
-            };
-            write_websocket_message(&mut websocket, JSONRPCMessage::Request(server_request)).await;
-
-            let JSONRPCMessage::Response(response) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected server request response");
-            };
-            assert_eq!(response.id, request_id);
-        })
-        .await;
-        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let AppServerEvent::ServerRequest(request) = client
-            .next_event()
-            .await
-            .expect("request event should arrive")
-        else {
-            panic!("expected server request event");
-        };
-        client
-            .resolve_server_request(request.id().clone(), serde_json::json!({}))
-            .await
-            .expect("server request should resolve");
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_server_request_received_during_initialize_is_delivered() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected initialize request");
-            };
-            assert_eq!(request.method, "initialize");
-
-            let request_id = RequestId::String("srv-init".to_string());
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Request(JSONRPCRequest {
-                    id: request_id.clone(),
-                    method: "item/tool/requestUserInput".to_string(),
-                    params: Some(
-                        serde_json::to_value(ToolRequestUserInputParams {
-                            thread_id: "thread-1".to_string(),
-                            turn_id: "turn-1".to_string(),
-                            item_id: "call-1".to_string(),
-                            questions: vec![ToolRequestUserInputQuestion {
-                                id: "question-1".to_string(),
-                                header: "Mode".to_string(),
-                                question: "Pick one".to_string(),
-                                is_other: false,
-                                is_secret: false,
-                                options: Some(vec![]),
-                            }],
-                            is_blocking: true,
-                            auto_resolution_ms: None,
-                        })
-                        .expect("params should serialize"),
-                    ),
-                    trace: None,
-                }),
-            )
-            .await;
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Response(JSONRPCResponse {
-                    id: request.id,
-                    result: serde_json::json!({}),
-                }),
-            )
-            .await;
-
-            let JSONRPCMessage::Notification(notification) =
-                read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected initialized notification");
-            };
-            assert_eq!(notification.method, "initialized");
-
-            let JSONRPCMessage::Response(response) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected server request response");
-            };
-            assert_eq!(response.id, request_id);
-        })
-        .await;
-        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let AppServerEvent::ServerRequest(request) = client
-            .next_event()
-            .await
-            .expect("request event should arrive")
-        else {
-            panic!("expected server request event");
-        };
-        client
-            .resolve_server_request(request.id().clone(), serde_json::json!({}))
-            .await
-            .expect("server request should resolve");
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_unknown_server_request_is_rejected() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            let request_id = RequestId::String("srv-unknown".to_string());
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Request(JSONRPCRequest {
-                    id: request_id.clone(),
-                    method: "thread/unknown".to_string(),
-                    params: None,
-                    trace: None,
-                }),
-            )
-            .await;
-
-            let JSONRPCMessage::Error(response) = read_websocket_message(&mut websocket).await
-            else {
-                panic!("expected JSON-RPC error response");
-            };
-            assert_eq!(response.id, request_id);
-            assert_eq!(response.error.code, -32601);
-            assert_eq!(
-                response.error.message,
-                "unsupported remote app-server request `thread/unknown`"
-            );
-        })
-        .await;
-        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        client.shutdown().await.expect("shutdown should complete");
-    }
-
-    #[tokio::test]
-    async fn remote_disconnect_surfaces_as_event() {
-        let websocket_url = start_test_remote_server(|mut websocket| async move {
-            expect_remote_initialize(&mut websocket).await;
-            websocket.close(None).await.expect("close should succeed");
-        })
-        .await;
-        let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
-            .await
-            .expect("remote client should connect");
-
-        let event = client
-            .next_event()
-            .await
-            .expect("disconnect event should arrive");
-        assert!(matches!(event, AppServerEvent::Disconnected { .. }));
-    }
-
     #[test]
     fn typed_request_error_exposes_sources() {
         let transport = TypedRequestError::Transport {
@@ -2186,13 +1340,11 @@ mod tests {
         );
 
         let runtime_args = InProcessClientStartArgs {
-            required_human_approval: false,
             arg0_paths: Arg0DispatchPaths::default(),
             config: config.clone(),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             strict_config: false,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
             embedded_network_policy: Default::default(),
             feedback: CodexFeedback::new(),
             log_db: None,

@@ -29,7 +29,6 @@ use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::GeneratedImageRef;
-use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -134,6 +133,7 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::FileTimes;
 use std::io::Write;
 use std::path::Path;
@@ -150,16 +150,6 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
-
-use super::analytics::assert_basic_thread_initialized_event;
-use super::analytics::mount_analytics_capture;
-use super::analytics::thread_initialized_event;
-use super::analytics::wait_for_analytics_payload;
-use super::analytics::wait_for_goal_event;
-use super::analytics::wait_for_matching_analytics_event;
-
-#[path = "thread_resume_account_tests.rs"]
-mod account_tests;
 
 #[cfg(target_os = "linux")]
 #[path = "thread_resume_network_tests.rs"]
@@ -258,14 +248,6 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     )
     .await??;
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
-
-    assert!(
-        !codex_rollout::read_session_meta_line(&path)
-            .await?
-            .meta
-            .account_scoped,
-        "resuming legacy history must keep its cross-account visibility"
-    );
 
     let mut secondary = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1198,24 +1180,11 @@ async fn cold_resume_workspace_roots_validate_foreign_startup_paths() -> Result<
     Ok(())
 }
 
-#[test_case(ApprovalsReviewer::AutoReview, "", ApprovalsReviewer::AutoReview; "explicit auto review")]
-#[test_case(ApprovalsReviewer::User, "", ApprovalsReviewer::User; "requirement removed")]
-#[test_case(ApprovalsReviewer::User, "allowed_approvals_reviewers = [\"auto_review\"]", ApprovalsReviewer::AutoReview; "allowlist tightened")]
 #[tokio::test]
-async fn thread_resume_preserves_persisted_approvals_reviewer(
-    requested_reviewer: ApprovalsReviewer,
-    resumed_requirements: &str,
-    expected_reviewer: ApprovalsReviewer,
-) -> Result<()> {
+async fn thread_resume_preserves_persisted_approvals_reviewer() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
-
-    let requirements_path = codex_home.path().join("requirements.toml");
-    std::fs::write(
-        &requirements_path,
-        "[auto_review]\nrequired_on_models = [\"gpt-5.4\"]\n",
-    )?;
 
     let thread_id = {
         let mut mcp = TestAppServer::builder()
@@ -1227,16 +1196,12 @@ async fn thread_resume_preserves_persisted_approvals_reviewer(
         let start_id = mcp
             .send_thread_start_request(ThreadStartParams {
                 model: Some("gpt-5.4".to_string()),
-                approvals_reviewer: Some(requested_reviewer),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
                 ..Default::default()
             })
             .await?;
-        let ThreadStartResponse {
-            thread,
-            approvals_reviewer,
-            ..
-        } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-        assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
+        let ThreadStartResponse { thread, .. } =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
 
         let turn_id = mcp
             .send_turn_start_request(TurnStartParams {
@@ -1263,7 +1228,6 @@ async fn thread_resume_preserves_persisted_approvals_reviewer(
         thread.id
     };
 
-    std::fs::write(requirements_path, resumed_requirements)?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
@@ -1289,7 +1253,7 @@ async fn thread_resume_preserves_persisted_approvals_reviewer(
         approvals_reviewer, ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
 
-    assert_eq!(approvals_reviewer, expected_reviewer);
+    assert_eq!(approvals_reviewer, ApprovalsReviewer::AutoReview);
 
     Ok(())
 }
@@ -2637,145 +2601,6 @@ async fn goal_first_live_thread_appears_in_state_db_thread_list() -> Result<()> 
     Ok(())
 }
 
-#[tokio::test]
-async fn thread_resume_tracks_thread_initialized_analytics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
-    let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let conversation_id = create_fake_rollout(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        "2025-01-05T12:00:00Z",
-        "Saved user message",
-        Some("mock_provider"),
-        /*git_info*/ None,
-    )?;
-    set_session_meta_on_fake_rollout(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        &conversation_id,
-        "user",
-        "codex_work_desktop",
-    )?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
-
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: conversation_id,
-            ..Default::default()
-        })
-        .await?;
-    let ThreadResumeResponse { thread, .. } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert!(
-        !thread.session_id.is_empty(),
-        "session id should not be empty"
-    );
-    assert_eq!(thread.thread_source, Some(ThreadSource::User));
-
-    let payload = wait_for_analytics_payload(&server, DEFAULT_READ_TIMEOUT).await?;
-    let event = thread_initialized_event(&payload)?;
-    assert_basic_thread_initialized_event(
-        event,
-        &thread.id,
-        &thread.session_id,
-        "codex_work_desktop",
-        "gpt-5.4",
-        "resumed",
-        "user",
-    );
-    assert_eq!(event["event_params"]["thread_source"], "user");
-    Ok(())
-}
-
-#[tokio::test]
-async fn thread_resume_running_thread_tracks_thread_originator_in_analytics() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-
-    let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
-
-    let start_id = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            thread_source: Some(ThreadSource::User),
-            service_name: Some("codex_work_desktop".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadStartResponse { thread, .. } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-
-    let turn_id = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id.clone(),
-            client_user_message_id: None,
-            input: vec![UserInput::Text {
-                text: "materialize rollout".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
-    )
-    .await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread.id.clone(),
-            exclude_turns: true,
-            ..Default::default()
-        })
-        .await?;
-    let ThreadResumeResponse {
-        thread: resumed, ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-
-    let event = wait_for_matching_analytics_event(&server, DEFAULT_READ_TIMEOUT, |event| {
-        event["event_type"] == "codex_thread_initialized"
-            && event["event_params"]["thread_id"] == resumed.id
-            && event["event_params"]["initialization_mode"] == "resumed"
-    })
-    .await?;
-    assert_basic_thread_initialized_event(
-        &event,
-        &resumed.id,
-        &resumed.session_id,
-        "codex_work_desktop",
-        "mock-model",
-        "resumed",
-        "user",
-    );
-    Ok(())
-}
-
 fn set_session_meta_on_fake_rollout(
     codex_home: &std::path::Path,
     filename_ts: &str,
@@ -3986,211 +3811,6 @@ fn ungated_goal_response(body: String) -> Vec<StreamingSseChunk> {
 }
 
 #[tokio::test]
-async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(vec![
-        responses::sse(vec![
-            responses::ev_response_created("materialize-thread"),
-            responses::ev_completed("materialize-thread"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("goal-continuation"),
-            responses::ev_completed_with_tokens("goal-continuation", /*total_tokens*/ 200),
-        ]),
-    ])
-    .await;
-    let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri())
-        .enable_feature(Feature::Goals)
-        .with_root_config(&format!(r#"chatgpt_base_url = "{}""#, server.uri()))
-        .write(codex_home.path())?;
-    mount_analytics_capture(&server, codex_home.path()).await?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT.saturating_mul(2))
-        .await?;
-
-    let start_id = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams {
-            model: Some("gpt-5.2-codex".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadStartResponse { thread, .. } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
-
-    let turn_id = mcp
-        .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id.clone(),
-            client_user_message_id: None,
-            input: vec![UserInput::Text {
-                text: "materialize this thread".to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let _turn_resp: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
-    )
-    .await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-
-    let goal_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "objective": "do not serialize this objective",
-                "tokenBudget": 100,
-            })),
-        )
-        .await?;
-    let _goal: ThreadGoalSetResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_id)).await??;
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/goal/updated"),
-    )
-    .await??;
-
-    let created = wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "created", "active").await?;
-    let persisted_goal_id = created["event_params"]["goal_id"]
-        .as_str()
-        .expect("created goal id");
-    assert_eq!(created["event_params"]["thread_id"], thread.id);
-    assert_eq!(created["event_params"]["turn_id"], serde_json::Value::Null);
-    assert_eq!(created["event_params"]["has_token_budget"], true);
-    assert!(created["event_params"]["session_id"].is_string());
-    assert!(created["event_params"]["app_server_client"].is_object());
-    assert!(created["event_params"]["runtime"].is_object());
-    assert!(created["event_params"].get("objective").is_none());
-    assert!(created["event_params"].get("token_budget").is_none());
-
-    let usage = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "usage_accounted",
-        "budget_limited",
-    )
-    .await?;
-    let causal_turn_id = usage["event_params"]["turn_id"]
-        .as_str()
-        .expect("accounted usage turn id");
-    assert_eq!(usage["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(usage["event_params"]["cumulative_tokens_accounted"], 200);
-    assert!(
-        usage["event_params"]["cumulative_time_accounted_seconds"]
-            .as_i64()
-            .is_some()
-    );
-
-    let requests = server
-        .received_requests()
-        .await
-        .expect("wiremock should record response requests");
-    let response_requests = requests
-        .iter()
-        .filter(|request| request.url.path().ends_with("/responses"))
-        .collect::<Vec<_>>();
-    assert_eq!(response_requests.len(), 2);
-    let metadata_header = response_requests[1]
-        .headers
-        .get("x-codex-turn-metadata")
-        .expect("goal continuation should include turn metadata")
-        .to_str()?;
-    let metadata: serde_json::Value = serde_json::from_str(metadata_header)?;
-    assert_eq!(metadata["turn_trigger"].as_str(), Some("goal"));
-
-    let status = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "status_changed",
-        "budget_limited",
-    )
-    .await?;
-    assert_eq!(status["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(status["event_params"]["turn_id"], causal_turn_id);
-    assert_eq!(
-        status["event_params"]["cumulative_tokens_accounted"],
-        serde_json::Value::Null
-    );
-    assert_eq!(
-        status["event_params"]["cumulative_time_accounted_seconds"],
-        serde_json::Value::Null
-    );
-
-    let requests = server.received_requests().await.expect("wiremock requests");
-    let goal_request = requests
-        .iter()
-        .filter(|request| request.url.path().ends_with("/responses"))
-        .nth(1)
-        .expect("externally created goal continuation request");
-    let goal_request_body = goal_request.body_json::<serde_json::Value>()?;
-    assert_eq!(
-        goal_request_body["client_metadata"]["turn_id"],
-        causal_turn_id
-    );
-    responses::assert_root_turn(&goal_request_body, Some(causal_turn_id))?;
-    responses::assert_parent_turn(&goal_request_body, /*expected*/ None)?;
-
-    let clear_id = mcp
-        .send_raw_request(
-            "thread/goal/clear",
-            Some(json!({
-                "threadId": thread.id,
-            })),
-        )
-        .await?;
-    let clear: ThreadGoalClearResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_id)).await??;
-    assert!(clear.cleared);
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/goal/cleared"),
-    )
-    .await??;
-
-    let cleared =
-        wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "cleared", "budget_limited").await?;
-    assert_eq!(cleared["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(cleared["event_params"]["turn_id"], serde_json::Value::Null);
-
-    let get_id = mcp
-        .send_raw_request(
-            "thread/goal/get",
-            Some(json!({
-                "threadId": thread.id,
-            })),
-        )
-        .await?;
-    let get: codex_app_server_protocol::ThreadGoalGetResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(get_id)).await??;
-    assert_eq!(None, get.goal);
-
-    let clear_again_id = mcp
-        .send_raw_request(
-            "thread/goal/clear",
-            Some(json!({
-                "threadId": thread.id,
-            })),
-        )
-        .await?;
-    let clear_again: ThreadGoalClearResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_again_id)).await??;
-    assert!(!clear_again.cleared);
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn thread_resume_emits_restored_token_usage_before_next_turn() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -4819,7 +4439,6 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
     let rollout_dir = rollout_path.parent().expect("rollout parent directory");
     std::fs::create_dir_all(rollout_dir)?;
     let session_meta = SessionMeta {
-        account_scoped: false,
         attached_thread: false,
         creator_user_id: None,
         creator_account_id: None,
@@ -5542,8 +5161,6 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
                 gate: None,
                 body: responses::sse(vec![
                     responses::ev_response_created("resp-2"),
-                    responses::ev_message_item_added("earlier", ""),
-                    responses::ev_assistant_message("earlier", "First progress update"),
                     responses::ev_message_item_added("progress", ""),
                     responses::ev_assistant_message("progress", "Checking"),
                     responses::ev_message_item_added("msg-2", ""),
@@ -5620,18 +5237,20 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
         primary.read_stream_until_notification_message("turn/started"),
     )
     .await??;
-    // The final item is gated. Record exactly what subscribers saw before reconnecting.
-    let mut live_items = Vec::new();
-    for _ in 0..3 {
-        let completed: ItemCompletedNotification = timeout(
-            DEFAULT_READ_TIMEOUT,
-            primary.read_notification("item/completed"),
-        )
-        .await??;
-        assert_eq!(completed.turn_id, running_turn.id);
-        live_items.push(completed.item);
-    }
-    let summary_items = [live_items[0].clone(), live_items[2].clone()];
+    // Starting the gated reply means the prompt and the progress message have completed.
+    let mut message_starts = HashMap::new();
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let started: ItemStartedNotification =
+                primary.read_notification("item/started").await?;
+            assert_eq!(started.turn_id, running_turn.id);
+            if started.item.id() == "msg-2" {
+                return Ok::<(), anyhow::Error>(());
+            }
+            message_starts.insert(started.item.id().to_owned(), started.started_at_ms);
+        }
+    })
+    .await??;
 
     let resume_id = primary
         .send_thread_resume_request(ThreadResumeParams {
@@ -5703,10 +5322,6 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
         "hot paginated resume should wait for a real token usage update"
     );
 
-    let history_db = codex_state::open_thread_history_db(
-        &codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
-    )
-    .await?;
     for (exclude_turns, items_view) in [
         (true, None),
         (true, Some(TurnItemsView::Full)),
@@ -5734,50 +5349,25 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
             page.data[0].items_view,
             items_view.unwrap_or(TurnItemsView::Summary)
         );
-        let page_turn = &page.data[0];
-        let expected = if page_turn.items_view == TurnItemsView::Full {
-            live_items.as_slice()
-        } else {
-            &summary_items
-        };
-        assert_eq!(page_turn.items, expected);
-        if page_turn.items_view == TurnItemsView::Full {
-            // Simulate a prepared page that does not yet include the live turn.
-            let deleted = sqlx::query("DELETE FROM thread_turns WHERE turn_id = ?")
-                .bind(&running_turn.id)
-                .execute(&history_db)
-                .await?;
-            assert_eq!(deleted.rows_affected(), 1);
-        }
+        assert!(matches!(
+            page.data[0].items.as_slice(),
+            [codex_app_server_protocol::ThreadItem { payload: ThreadItemPayload::UserMessage { .. }, .. }, codex_app_server_protocol::ThreadItem { payload: ThreadItemPayload::AgentMessage { text, .. }, .. }] if text == "Checking"
+        ));
+        assert_eq!(
+            page.data[0]
+                .items
+                .iter()
+                .filter_map(|item| Some((item.id().to_owned(), item.started_at_ms?)))
+                .collect::<std::collections::HashMap<_, _>>(),
+            message_starts
+        );
         if !exclude_turns {
             let full_turn = resumed.thread.turns.last().expect("full active turn");
             assert_eq!(full_turn.id, running_turn.id);
             assert_eq!(full_turn.items_view, TurnItemsView::Full);
-            assert_eq!(full_turn.items, live_items);
+            assert!(!full_turn.items.is_empty());
         }
     }
-
-    // An unreadable item only fails requests that need its text.
-    sqlx::query("UPDATE thread_items SET item_json = json_set(item_json, '$.text', '') WHERE turn_id = ? AND item_id = 'earlier'")
-        .bind(&running_turn.id).execute(&history_db).await?;
-    let missing_id = primary
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread.id.clone(),
-            ..Default::default()
-        })
-        .await?;
-    let error = timeout(
-        DEFAULT_READ_TIMEOUT,
-        primary.read_stream_until_error_message(RequestId::Integer(missing_id)),
-    )
-    .await??;
-    assert_eq!(
-        error.error.message,
-        format!(
-            "saved history is missing completed assistant items for turn {}",
-            running_turn.id
-        )
-    );
 
     let asc_resume_id = primary
         .send_thread_resume_request(ThreadResumeParams {
@@ -5786,7 +5376,7 @@ async fn thread_resume_rejoins_running_paginated_thread_with_initial_page() -> R
             initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
                 limit: Some(1),
                 sort_direction: Some(SortDirection::Asc),
-                items_view: Some(TurnItemsView::Full),
+                items_view: Some(TurnItemsView::NotLoaded),
             }),
             ..Default::default()
         })
@@ -6365,95 +5955,6 @@ required = true"#,
         err.error.message.contains("required_broken"),
         "unexpected error message: {}",
         err.error.message
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn thread_resume_surfaces_cloud_config_bundle_load_errors() -> Result<()> {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/config/bundle"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .insert_header("content-type", "text/html")
-                .set_body_string("<html>nope</html>"),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "error": { "code": "refresh_token_invalidated" }
-        })))
-        .mount(&server)
-        .await;
-
-    let codex_home = TempDir::new()?;
-    let model_server = create_mock_responses_server_repeating_assistant("Done").await;
-    let chatgpt_base_url = format!("{}/backend-api", server.uri());
-    mock_responses_config(&model_server.uri())
-        .with_root_config(&format!(r#"chatgpt_base_url = "{chatgpt_base_url}""#))
-        .write(codex_home.path())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .refresh_token("stale-refresh-token")
-            .plan_type("business")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123")
-            .account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    let conversation_id = create_fake_rollout_with_text_elements(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        "2025-01-05T12:00:00Z",
-        "Saved user message",
-        Vec::new(),
-        Some("mock_provider"),
-        /*git_info*/ None,
-    )?;
-    let refresh_token_url = format!("{}/oauth/token", server.uri());
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[
-            ("OPENAI_API_KEY", None),
-            (
-                REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
-                Some(refresh_token_url.as_str()),
-            ),
-        ])
-        .build_initialized()
-        .await?;
-
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: conversation_id,
-            ..Default::default()
-        })
-        .await?;
-    let err: JSONRPCError = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(resume_id)),
-    )
-    .await??;
-
-    assert!(
-        err.error.message.contains("failed to load configuration"),
-        "unexpected error message: {}",
-        err.error.message
-    );
-    assert_eq!(
-        err.error.data,
-        Some(json!({
-            "reason": "cloudConfigBundle",
-            "errorCode": "Auth",
-            "action": "relogin",
-            "statusCode": 401,
-            "detail": "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
-        }))
     );
 
     Ok(())

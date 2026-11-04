@@ -13,7 +13,7 @@ impl AppServerSession {
         params: ExternalAgentConfigDetectParams,
     ) -> Result<ExternalAgentConfigDetectResponse> {
         let request_id = self.next_request_id();
-        self.request_handle
+        self.client
             .request_typed(ClientRequest::ExternalAgentConfigDetect { request_id, params })
             .await
             .wrap_err("externalAgentConfig/detect failed during external agent import")
@@ -29,7 +29,7 @@ impl AppServerSession {
         }
         let request_id = self.next_request_id();
         let response: ExternalAgentConfigImportResponse = self
-            .request_handle
+            .client
             .request_typed(ClientRequest::ExternalAgentConfigImport {
                 request_id,
                 params: ExternalAgentConfigImportParams {
@@ -42,7 +42,7 @@ impl AppServerSession {
             .await
             .wrap_err("externalAgentConfig/import failed during external agent import")?;
         // Notifications remain queued until the event loop regains this mutable session.
-        // Shared daemons also broadcast completions for imports started by other clients.
+        // Shared app servers also broadcast completions for imports started by other clients.
         *self
             .external_agent_config_import_id
             .get_mut()
@@ -69,7 +69,3 @@ impl AppServerSession {
         true
     }
 }
-
-#[cfg(test)]
-#[path = "external_agent_config_tests.rs"]
-mod tests;

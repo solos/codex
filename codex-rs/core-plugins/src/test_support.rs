@@ -11,7 +11,6 @@ use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use crate::PluginsConfigInput;
 use crate::PluginsManager;
 use crate::http_client_selector::HttpClientSelector;
-use crate::remote::RemotePluginServiceConfig;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_config::loader::load_config_layers_state;
@@ -231,91 +230,6 @@ impl SkillRootLoader<PluginSkillRoot> for TestSkillRootLoader {
     }
 }
 
-fn load_test_skill_root(root: &PluginSkillRoot) -> LoadedSkillRoot {
-    let canonical_root = fs::canonicalize(root.path.as_path())
-        .ok()
-        .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
-        .unwrap_or_else(|| root.path.clone());
-    let mut skills = Vec::new();
-    let mut errors = Vec::new();
-    let mut discovery_paths = HashMap::new();
-    let mut directories = vec![root.path.clone()];
-    while let Some(directory) = directories.pop() {
-        let Ok(entries) = fs::read_dir(directory.as_path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if (root.discovery_mode == SkillDiscoveryMode::Recursive || directory == root.path)
-                    && let Ok(path) = AbsolutePathBuf::from_absolute_path_checked(path)
-                {
-                    directories.push(path);
-                }
-                continue;
-            }
-            if path.file_name().is_none_or(|name| name != "SKILL.md")
-                || (root.discovery_mode == SkillDiscoveryMode::DirectChildren
-                    && directory == root.path)
-            {
-                continue;
-            }
-            let Ok(path) = AbsolutePathBuf::from_absolute_path_checked(path) else {
-                continue;
-            };
-            let canonical_path = fs::canonicalize(path.as_path())
-                .ok()
-                .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
-                .unwrap_or_else(|| path.clone());
-            let parsed = fs::read_to_string(path.as_path())
-                .map_err(|error| error.to_string())
-                .and_then(|contents| {
-                    parse_skill_frontmatter_metadata(&contents, || {
-                        directory
-                            .as_path()
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    })
-                    .map_err(|error| error.to_string())
-                });
-            match parsed {
-                Ok(parsed) => {
-                    discovery_paths.insert(
-                        PathUri::from_abs_path(&canonical_path),
-                        PathUri::from_abs_path(&path),
-                    );
-                    skills.push(SkillMetadata {
-                        name: format!("{}:{}", root.plugin_namespace, parsed.name),
-                        description: parsed.description,
-                        short_description: parsed.short_description,
-                        interface: None,
-                        dependencies: None,
-                        policy: None,
-                        path_to_skills_md: PathUri::from_abs_path(&canonical_path),
-                        scope: SkillScope::User,
-                        plugin_id: Some(root.plugin_identity.plugin_id.clone()),
-                        remote_plugin_id: root.plugin_identity.remote_plugin_id.clone(),
-                    });
-                }
-                Err(message) => errors.push(SkillError {
-                    path: canonical_path,
-                    message,
-                }),
-            }
-        }
-    }
-
-    LoadedSkillRoot {
-        root: canonical_root,
-        skills,
-        skill_discovery_path_by_path: Arc::new(discovery_paths),
-        errors,
-        is_agent_plugin: root.discovery_mode == SkillDiscoveryMode::DirectChildren,
-    }
-}
-
 pub(crate) fn test_http_client_factory() -> HttpClientFactory {
     HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
 }
@@ -354,20 +268,6 @@ impl HttpClientSelector for RecordingHttpClientSelector {
     fn outbound_proxy_policy(&self) -> OutboundProxyPolicy {
         self.delegate.outbound_proxy_policy()
     }
-}
-
-pub(crate) fn recording_remote_plugin_service_config(
-    chatgpt_base_url: String,
-) -> (RemotePluginServiceConfig, Arc<Mutex<Vec<String>>>) {
-    let (http_clients, selected_urls) = RecordingHttpClientSelector::new();
-    (
-        RemotePluginServiceConfig {
-            chatgpt_base_url,
-            product_sku: crate::remote::CODEX_PRODUCT_SKU.to_string(),
-            http_clients,
-        },
-        selected_urls,
-    )
 }
 
 pub(crate) fn recorded_http_client_urls(selected_urls: &Mutex<Vec<String>>) -> Vec<String> {
@@ -520,14 +420,6 @@ pub(crate) async fn load_plugins_config(codex_home: &Path, cwd: &Path) -> Plugin
             .plugins,
         model_provider_id,
         feature_enabled(&effective_config, "plugins", /*default_enabled*/ true),
-        feature_enabled(
-            &effective_config,
-            "remote_plugin",
-            /*default_enabled*/ true,
-        ),
-        "https://chatgpt.com/backend-api/".to_string(),
-        test_http_client_factory(),
-        /*product_sku*/ None,
     )
 }
 

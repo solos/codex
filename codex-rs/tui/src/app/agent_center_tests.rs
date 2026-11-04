@@ -84,14 +84,13 @@ async fn live_center_keeps_status_order_across_progress_refreshes() {
             .map(|thread| (ThreadId::from_string(&thread.id).unwrap(), Some(thread)))
             .collect();
         app.repaint_agents_overview();
-        assert_eq!(app.agents_overview.visible_thread_ids[1], id);
+        assert_eq!(app.agents_overview.visible_thread_ids, expected);
         let selected = app
             .chat_widget
             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
             .unwrap();
         assert_eq!(app.agents_overview.visible_thread_ids[selected], ids[0]);
     }
-    app.agents_overview.pinned_thread_ids = Some(vec![ids[3], ids[2]]);
     for parent in [ids[0], ids[3]] {
         threads.push(overview_thread(
             ThreadId::new(),
@@ -144,7 +143,7 @@ async fn failed_background_worker_only_needs_attention_for_a_pending_request() {
 }
 
 #[tokio::test]
-async fn live_center_sorts_arrivals_and_status_transitions_by_update_time() {
+async fn live_center_appends_arrivals_and_status_transitions() {
     let app = make_test_app().await;
     let [alpha, bravo, charlie, delta, child] = [1, 2, 3, 4, 5].map(ThreadId::from_u128);
     let working = ThreadStatus::Active {
@@ -189,11 +188,11 @@ async fn live_center_sorts_arrivals_and_status_transitions_by_update_time() {
     assert_eq!(
         app.agents_overview_view(threads.clone(), Some(bravo))
             .thread_ids(),
-        vec![delta, alpha, bravo, charlie]
+        vec![alpha, bravo, delta, charlie]
     );
     threads[1].status = ThreadStatus::Idle;
     let view = app.agents_overview_view(threads.clone(), Some(bravo));
-    assert_eq!(view.thread_ids(), vec![delta, alpha, bravo, charlie]);
+    assert_eq!(view.thread_ids(), vec![alpha, delta, charlie, bravo]);
     let selected = &view.rows[view.selected_index().unwrap()];
     assert_eq!(selected.group, AgentsOverviewGroup::Ready);
     assert!(selected.details.lines.is_empty());
@@ -204,28 +203,28 @@ async fn live_center_sorts_arrivals_and_status_transitions_by_update_time() {
     assert_eq!(
         app.agents_overview_view(threads.clone(), Some(bravo))
             .thread_ids(),
-        vec![bravo, delta, alpha, charlie]
+        vec![bravo, alpha, delta, charlie]
     );
     threads.pop();
     let view = app.agents_overview_view(threads.clone(), Some(bravo));
-    assert_eq!(view.thread_ids(), vec![delta, alpha, bravo, charlie]);
+    assert_eq!(view.thread_ids(), vec![alpha, delta, charlie, bravo]);
     assert_eq!(view.rows[view.selected_index().unwrap()].thread_id, bravo);
-    // Rediscovery restores the task to its position by update time.
+    // Removed roots lose their rank, so rediscovery behaves like a new arrival.
     let removed = threads.remove(/*index*/ 0);
     assert_eq!(
         app.agents_overview_view(threads.clone(), Some(bravo))
             .thread_ids(),
-        vec![delta, bravo, charlie]
+        vec![delta, charlie, bravo]
     );
     threads.push(removed);
     assert_eq!(
         app.agents_overview_view(threads, Some(bravo)).thread_ids(),
-        vec![delta, alpha, bravo, charlie]
+        vec![delta, alpha, charlie, bravo]
     );
 }
 
 #[tokio::test]
-async fn live_center_status_order_tracks_updates_while_filtered_and_pinned() {
+async fn live_center_stable_order_preserves_filters_and_pins() {
     let mut app = make_test_app().await;
     app.agents_overview.view_state.lock().unwrap().grouping = AgentsOverviewGrouping::Status;
     let ids = [1, 2, 3].map(ThreadId::from_u128);
@@ -248,7 +247,6 @@ async fn live_center_status_order_tracks_updates_while_filtered_and_pinned() {
             .lines()
             .filter_map(|line| {
                 let (_, task_column) = line.split('│').next()?.split_once("● ")?;
-                let task_column = task_column.trim_start_matches('📌').trim_start();
                 ["Alpha", "Bravo", "Charlie"]
                     .into_iter()
                     .find(|title| task_column.starts_with(title))
@@ -256,29 +254,29 @@ async fn live_center_status_order_tracks_updates_while_filtered_and_pinned() {
             .collect::<Vec<_>>()
     };
     let mut view = app.agents_overview_view(threads.clone(), Some(ids[1]));
-    // Hidden rows also pick up timestamp changes when the filter is cleared.
+    // Searching only changes visibility, not the retained order of hidden rows.
     view.handle_key_event(KeyCode::Char('/').into());
     view.handle_paste("Bravo".into());
     threads[2].updated_at += 100;
     view = app.agents_overview_view(threads.clone(), Some(ids[1]));
     assert_eq!(rendered_titles(&view), vec!["Bravo"]);
     view.handle_key_event(KeyCode::Esc.into());
-    assert_eq!(rendered_titles(&view), vec!["Charlie", "Alpha", "Bravo"]);
-    // Update another working task while the empty Needs input tab is selected.
+    assert_eq!(view.thread_ids(), ids.to_vec());
+    // A refresh while another status tab is empty must not discard the Working order.
     view.handle_key_event(KeyCode::Tab.into());
     assert!(rendered_titles(&view).is_empty());
     threads[1].updated_at += 200;
     view = app.agents_overview_view(threads.clone(), /*selected_thread_id*/ None);
     view.handle_key_event(KeyCode::Tab.into());
-    assert_eq!(rendered_titles(&view), vec!["Bravo", "Charlie", "Alpha"]);
+    assert_eq!(rendered_titles(&view), vec!["Alpha", "Bravo", "Charlie"]);
     view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
     view.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    app.agents_overview.pinned_thread_ids = Some(vec![ids[0], ids[2]]);
+    app.agents_overview.pinned_thread_ids = Some(vec![ids[2], ids[0]]);
     view = app.agents_overview_view(threads.clone(), Some(ids[1]));
-    assert_eq!(rendered_titles(&view), vec!["Alpha", "Charlie", "Bravo"]);
+    assert_eq!(rendered_titles(&view), vec!["Charlie", "Alpha", "Bravo"]);
     app.agents_overview.pinned_thread_ids = Some(vec![]);
     view = app.agents_overview_view(threads, Some(ids[1]));
-    assert_eq!(rendered_titles(&view), vec!["Bravo", "Charlie", "Alpha"]);
+    assert_eq!(rendered_titles(&view), vec!["Alpha", "Bravo", "Charlie"]);
 }
 
 #[tokio::test]
@@ -334,11 +332,7 @@ async fn live_center_columns() {
     ));
     crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, child);
     app.agents_overview.pinned_thread_ids = Some(vec![current, ThreadId::from_u128(/*value*/ 44)]);
-    app.agents_overview
-        .unread
-        .insert(ThreadId::from_u128(/*value*/ 47));
     let mut view = app.agents_overview_view(threads, Some(current));
-    assert!(screen(&view, /*width*/ 50, /*height*/ 24).contains("● Error: Failed task"));
     insta::assert_snapshot!(screen(&view, /*width*/ 160, /*height*/ 22));
     view.pinned_thread_ranks = None;
     let mut selected_status_styles = Vec::new();
@@ -357,6 +351,10 @@ async fn live_center_columns() {
             .iter()
             .position(|cell| cell.symbol() == "›")
             .unwrap();
+        assert_eq!(
+            selected_row[marker + 2].style(),
+            selected_row[marker].style()
+        );
         selected_status_styles.push(format!(
             "{} | {:?}",
             selected_row[marker + 2].symbol(),
@@ -684,21 +682,11 @@ async fn live_center_fixed_shortcuts_yield_to_configured_actions() {
             assert!(!screen(&view, /*width*/ 100, /*height*/ 24).contains("enter open"));
             view.handle_key_event(KeyCode::Char('?').into());
             assert!(!screen(&view, /*width*/ 100, /*height*/ 24).contains("enter open"));
-            app.agents_overview
-                .view_state
-                .lock()
-                .unwrap()
-                .server_version_notice = Some("Version notice".into());
             assert!(screen(&view, /*width*/ 100, /*height*/ 24).contains("f9 back"));
             view.handle_key_event(KeyCode::Esc.into());
             assert!(screen(&view, /*width*/ 100, /*height*/ 24).contains("Task shortcuts"));
             view.handle_key_event(KeyCode::F(9).into());
             assert!(!screen(&view, /*width*/ 100, /*height*/ 24).contains("Task shortcuts"));
-            app.agents_overview
-                .view_state
-                .lock()
-                .unwrap()
-                .server_version_notice = None;
             view.handle_key_event(KeyCode::Char('/').into());
             assert!(!screen(&view, /*width*/ 100, /*height*/ 24).contains("enter open"));
         }

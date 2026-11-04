@@ -172,27 +172,6 @@ pub async fn login_with_chatgpt(
     server.block_until_done().await
 }
 
-/// Signs into the config server if needed, then reloads configuration.
-async fn sign_in_to_config_server_and_reload_config(
-    config: &mut Config,
-    cli_config_overrides: &CliConfigOverrides,
-) -> std::io::Result<()> {
-    let requirements = config.config_layer_stack.requirements_toml();
-    let network = codex_app_server::in_process::EmbeddedNetworkPolicy::load(
-        &codex_config::LoaderOverrides::default(),
-    )
-    .await;
-    let bootstrap_auth = network.bind_bootstrap_auth(config.auth_config());
-    let auth_route_config = bootstrap_auth.auth_route_config.clone();
-    codex_cloud_config::ensure_config_server_login(bootstrap_auth, requirements).await?;
-    *config = crate::cloud_config::load_config(cli_config_overrides, Default::default())
-        .await
-        .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-    network.activate(config);
-    config.application_auth_route_config = Some(auth_route_config);
-    Ok(())
-}
-
 fn finish_login(result: std::io::Result<()>) -> ! {
     match result {
         Ok(_) => {
@@ -213,20 +192,9 @@ async fn run_interactive_login<F>(
 where
     F: std::future::Future<Output = std::io::Result<()>>,
 {
-    let mut config = load_config_or_exit(cli_config_overrides.clone()).await;
-    if !config
-        .config_layer_stack
-        .requirements_toml()
-        .requires_remote_config()
-    {
-        let _login_log_guard = init_login_file_logging(&config);
-        finish_login(chatgpt_login(config).await);
-    }
-
-    let result =
-        sign_in_to_config_server_and_reload_config(&mut config, &cli_config_overrides).await;
+    let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
-    finish_login(result)
+    finish_login(chatgpt_login(config).await)
 }
 
 pub async fn run_login_with_browser(cli_config_overrides: CliConfigOverrides) -> ! {
@@ -553,28 +521,9 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     }
 }
 
-async fn logout_config_server(config: &Config) -> std::io::Result<bool> {
-    match codex_cloud_config::managed_config_auth_manager(
-        config.auth_config(),
-        config.config_layer_stack.requirements_toml(),
-    )? {
-        Some(manager) => manager.logout().await,
-        None => Ok(false),
-    }
-}
-
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let auth_route_config = config.auth_route_config();
-    let config_server_logout = if config
-        .config_layer_stack
-        .requirements_toml()
-        .requires_remote_config()
-    {
-        logout_config_server(&config).await
-    } else {
-        Ok(false)
-    };
 
     // Cleanup is independent of the current feature gate. Retain the grant lock
     // through account removal so another process cannot commit a late login.
@@ -641,14 +590,7 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
             false
         };
 
-    let config_server_logged_out = match config_server_logout {
-        Ok(removed) => removed,
-        Err(error) => {
-            eprintln!("Error logging out: {error}");
-            std::process::exit(1);
-        }
-    };
-    if logged_out || config_server_logged_out || cleared_bedrock_config {
+    if logged_out || cleared_bedrock_config {
         eprintln!("Successfully logged out");
     } else {
         eprintln!("Not logged in");
@@ -657,17 +599,7 @@ pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
 }
 
 async fn load_managed_login_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config {
-    let mut config = load_config_or_exit(cli_config_overrides.clone()).await;
-    if config
-        .config_layer_stack
-        .requirements_toml()
-        .requires_remote_config()
-        && let Err(error) =
-            sign_in_to_config_server_and_reload_config(&mut config, &cli_config_overrides).await
-    {
-        finish_login(Err(error));
-    }
-    config
+    load_config_or_exit(cli_config_overrides).await
 }
 
 async fn load_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config {

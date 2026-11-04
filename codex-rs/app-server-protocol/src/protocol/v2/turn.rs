@@ -9,7 +9,6 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::models::AudioReference as CoreAudioReference;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference as CoreImageReference;
@@ -453,21 +452,6 @@ pub enum ImageReference {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
-#[serde(untagged)]
-#[ts(untagged)]
-#[ts(export_to = "v2/")]
-pub enum AudioReference {
-    Inline {
-        url: String,
-    },
-    File {
-        #[serde(rename = "fileId")]
-        #[ts(rename = "fileId")]
-        file_id: String,
-    },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 #[ts(tag = "type")]
 #[ts(export_to = "v2/")]
@@ -492,8 +476,7 @@ pub enum UserInput {
         path: PathBuf,
     },
     Audio {
-        #[serde(flatten)]
-        audio: AudioReference,
+        url: String,
     },
     LocalAudio {
         path: PathBuf,
@@ -526,12 +509,7 @@ impl UserInput {
                 detail,
             },
             UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
-            UserInput::Audio { audio } => CoreUserInput::Audio {
-                audio: match audio {
-                    AudioReference::Inline { url } => CoreAudioReference::Inline { audio_url: url },
-                    AudioReference::File { file_id } => CoreAudioReference::File { file_id },
-                },
-            },
+            UserInput::Audio { url } => CoreUserInput::Audio { audio_url: url },
             UserInput::LocalAudio { path } => CoreUserInput::LocalAudio { path },
             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
             UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
@@ -559,14 +537,7 @@ impl From<CoreUserInput> for UserInput {
                 detail,
             },
             CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },
-            CoreUserInput::Audio { audio } => UserInput::Audio {
-                audio: match audio {
-                    CoreAudioReference::Inline { audio_url } => {
-                        AudioReference::Inline { url: audio_url }
-                    }
-                    CoreAudioReference::File { file_id } => AudioReference::File { file_id },
-                },
-            },
+            CoreUserInput::Audio { audio_url } => UserInput::Audio { url: audio_url },
             CoreUserInput::LocalAudio { path } => UserInput::LocalAudio { path },
             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
             CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },

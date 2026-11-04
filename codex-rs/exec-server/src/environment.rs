@@ -41,7 +41,6 @@ use crate::environment_provider::EnvironmentProvider;
 use crate::environment_provider::EnvironmentProviderEntry;
 use crate::environment_provider::EnvironmentProviderSnapshot;
 use crate::environment_provider::normalize_exec_server_url;
-use crate::environment_toml::environment_provider_from_codex_home;
 use crate::local_file_system::LocalFileSystem;
 use crate::local_process::LocalProcess;
 use crate::process::ExecBackend;
@@ -191,20 +190,13 @@ impl EnvironmentManager {
         }
     }
 
-    /// Discovers configured environments without starting remote connections.
-    ///
-    /// If `CODEX_HOME/environments.toml` is present, it defines the configured
-    /// environments. Otherwise this preserves the legacy
-    /// `CODEX_EXEC_SERVER_URL` behavior.
+    /// Prepares the process-local execution environment.
     pub async fn prepare_from_codex_home(
-        codex_home: impl AsRef<std::path::Path>,
+        _codex_home: impl AsRef<std::path::Path>,
     ) -> Result<PreparedEnvironmentManager, ExecServerError> {
-        let source = if let Some(config) = noise_environment_config_from_env()? {
-            PreparedEnvironmentSource::Noise(config)
-        } else {
-            let provider = environment_provider_from_codex_home(codex_home.as_ref())?;
-            PreparedEnvironmentSource::Snapshot(provider.snapshot().await?)
-        };
+        let source = PreparedEnvironmentSource::Snapshot(
+            DefaultEnvironmentProvider::new(None).snapshot_inner(),
+        );
         Ok(PreparedEnvironmentManager { source })
     }
 
@@ -219,14 +211,11 @@ impl EnvironmentManager {
             .build(local_runtime_paths, http_client_factory)
     }
 
-    /// Discovers environment-variable environments without starting connections.
+    /// Prepares the process-local execution environment.
     pub async fn prepare_from_env() -> Result<PreparedEnvironmentManager, ExecServerError> {
-        let source = if let Some(config) = noise_environment_config_from_env()? {
-            PreparedEnvironmentSource::Noise(config)
-        } else {
-            let provider = DefaultEnvironmentProvider::from_env();
-            PreparedEnvironmentSource::Snapshot(provider.snapshot().await?)
-        };
+        let source = PreparedEnvironmentSource::Snapshot(
+            DefaultEnvironmentProvider::from_env().snapshot_inner(),
+        );
         Ok(PreparedEnvironmentManager { source })
     }
 
@@ -1071,15 +1060,6 @@ impl Environment {
                 let connection_state = client.subscribe_connection_state();
                 let client = client.get().await?;
                 let discover = || async {
-                    if params.roots.iter().any(|root| {
-                        root.sandbox.as_ref().is_some_and(|sandbox| {
-                            sandbox.windows_sandbox_selection == crate::WindowsSandboxSelection::Mxc
-                        })
-                    }) {
-                        let info = client.environment_info().await?;
-                        crate::sandbox_selection::validate_remote_mxc(&info)
-                            .map_err(|error| ExecServerError::Protocol(error.to_string()))?;
-                    }
                     if params.roots.iter().any(|root| {
                         root.sandbox
                             .as_ref()

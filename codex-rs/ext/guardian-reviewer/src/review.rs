@@ -237,7 +237,6 @@ impl<H: ReviewHost> SynchronousApprovalReviewer for ReviewRequest<'_, H> {
                                 ErrorEvent {
                                     message,
                                     codex_error_info: Some(CodexErrorInfo::TooManyDenials),
-                                    rejected_audio_file_ids: Vec::new(),
                                     misalignment: None,
                                 },
                             )

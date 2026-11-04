@@ -80,7 +80,6 @@ impl EmaAuth {
             bail!(EmaAuthFailure::ReauthenticationRequired);
         }
         let cancellation = config.mcp_ema_cancellation.clone();
-        let policy = config.config_layer_stack.cloud_config_binding().cloned();
         let authority = EmaRequestAuthority::new(cancellation.token(), {
             let cancellation = cancellation.clone();
             let changes = changes.clone();
@@ -88,19 +87,12 @@ impl EmaAuth {
                 !cancellation.is_cancelled()
                     && changes.borrow().login_generation == login_generation
             }
-        })
-        .with_policy(policy.clone());
+        });
         authority.check_new_request()?;
         let revocation = tokio::spawn(async move {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {}
-                () = async {
-                    match policy {
-                        Some(policy) => policy.invalidated().await,
-                        None => std::future::pending().await,
-                    }
-                } => {}
                 () = async {
                     while changes.changed().await.is_ok() {
                         if changes.borrow().login_generation != login_generation {

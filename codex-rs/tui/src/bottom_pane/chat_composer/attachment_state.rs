@@ -17,9 +17,15 @@ use crate::bottom_pane::textarea::TextArea;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::user_input::TextElement;
 
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AttachedImage {
+    pub(super) placeholder: String,
+    pub(super) path: PathBuf,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct AttachmentState {
-    pub(super) local_images: Vec<LocalImageAttachment>,
+    pub(super) local_images: Vec<AttachedImage>,
     pub(super) remote_image_urls: Vec<String>,
     pub(super) selected_remote_image_index: Option<usize>,
 }
@@ -33,6 +39,16 @@ impl AttachmentState {
         self.local_images
             .iter()
             .map(|image| image.path.clone())
+            .collect()
+    }
+
+    pub(super) fn local_images(&self) -> Vec<LocalImageAttachment> {
+        self.local_images
+            .iter()
+            .map(|image| LocalImageAttachment {
+                placeholder: image.placeholder.clone(),
+                path: image.path.clone(),
+            })
             .collect()
     }
 
@@ -68,7 +84,7 @@ impl AttachmentState {
             local_image_paths
                 .into_iter()
                 .enumerate()
-                .map(|(index, path)| LocalImageAttachment {
+                .map(|(index, path)| AttachedImage {
                     placeholder: local_image_label_text(self.remote_image_urls.len() + index + 1),
                     path,
                 }),
@@ -81,8 +97,7 @@ impl AttachmentState {
         let image_number = self.remote_image_urls.len() + self.local_images.len() + 1;
         let placeholder = local_image_label_text(image_number);
         textarea.insert_element(&placeholder);
-        self.local_images
-            .push(LocalImageAttachment { placeholder, path });
+        self.local_images.push(AttachedImage { placeholder, path });
     }
 
     pub(super) fn prune_local_images_for_submission(
@@ -107,6 +122,18 @@ impl AttachmentState {
         std::mem::take(&mut self.local_images)
             .into_iter()
             .map(|image| image.path)
+            .collect()
+    }
+
+    pub(super) fn take_recent_submission_images_with_placeholders(
+        &mut self,
+    ) -> Vec<LocalImageAttachment> {
+        std::mem::take(&mut self.local_images)
+            .into_iter()
+            .map(|image| LocalImageAttachment {
+                placeholder: image.placeholder,
+                path: image.path,
+            })
             .collect()
     }
 

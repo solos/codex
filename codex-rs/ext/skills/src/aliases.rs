@@ -13,7 +13,6 @@ use crate::step_state::SkillToolAuthoritySelector;
 
 fn alias_prefix(source: &SkillSourceKind) -> Option<&'static str> {
     match source {
-        SkillSourceKind::Cloud => Some("c"),
         SkillSourceKind::Executor => Some("e"),
         SkillSourceKind::Host => Some("r"),
         SkillSourceKind::Custom(_) => None,
@@ -41,13 +40,9 @@ impl From<String> for SkillLocator {
                 return None;
             }
             index.parse::<usize>().ok()?;
-            [
-                SkillSourceKind::Cloud,
-                SkillSourceKind::Executor,
-                SkillSourceKind::Host,
-            ]
-            .into_iter()
-            .find(|source| alias_prefix(source) == Some(prefix))
+            [SkillSourceKind::Executor, SkillSourceKind::Host]
+                .into_iter()
+                .find(|source| alias_prefix(source) == Some(prefix))
         });
         Self {
             value,
@@ -89,7 +84,6 @@ impl SkillAliasState {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (kind, root) in roots {
             let selector = match kind {
-                SkillSourceKind::Cloud => SkillToolAuthoritySelector::Cloud,
                 SkillSourceKind::Executor => SkillToolAuthoritySelector::Executor,
                 SkillSourceKind::Host | SkillSourceKind::Custom(_) => continue,
             };
@@ -102,7 +96,6 @@ impl SkillAliasState {
 /// Thread-wide assignments, captured alongside each step's catalog.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SkillCatalogAliases {
-    cloud: Arc<AliasPlan>,
     executor: Arc<AliasPlan>,
     budget: AliasBudget,
 }
@@ -110,7 +103,6 @@ pub(crate) struct SkillCatalogAliases {
 impl SkillCatalogAliases {
     pub(crate) fn resolve(&self, locator: &SkillLocator) -> Option<String> {
         let plan = match locator.alias_source() {
-            Some(SkillSourceKind::Cloud) => &self.cloud,
             Some(SkillSourceKind::Executor) => &self.executor,
             Some(SkillSourceKind::Host | SkillSourceKind::Custom(_)) | None => return None,
         };
@@ -123,7 +115,6 @@ impl SkillCatalogAliases {
         roots: impl IntoIterator<Item = &'a str>,
     ) {
         let (plan, prefix) = match selector {
-            SkillToolAuthoritySelector::Cloud => (&mut self.cloud, "c"),
             SkillToolAuthoritySelector::Executor => (&mut self.executor, "e"),
         };
         plan.extend_alias_plan(prefix, roots, &mut self.budget);
@@ -131,7 +122,6 @@ impl SkillCatalogAliases {
 
     pub(crate) fn for_authority(&self, selector: SkillToolAuthoritySelector) -> &AliasPlan {
         match selector {
-            SkillToolAuthoritySelector::Cloud => &self.cloud,
             SkillToolAuthoritySelector::Executor => &self.executor,
         }
     }
@@ -140,7 +130,7 @@ impl SkillCatalogAliases {
 const MAX_ALIAS_ROOTS: usize = 2_048;
 const MAX_ALIAS_BYTES: usize = 16 * 1024;
 
-/// Shared bound on thread-local Cloud/executor alias assignments and their rendered mappings.
+/// Shared bound on thread-local executor alias assignments and their rendered mappings.
 #[derive(Clone, Debug, Default)]
 struct AliasBudget {
     roots: usize,

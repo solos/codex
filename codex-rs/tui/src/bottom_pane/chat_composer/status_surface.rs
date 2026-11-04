@@ -43,7 +43,9 @@ impl ChatComposer {
         props.is_task_running = false;
         let line = passive_footer_status_line(&props);
         let full = self.mode_indicator_line(show_cycle_hint);
-        let left_width = line.as_ref().map_or(/*default*/ 0, FooterContent::width);
+        let left_width = line
+            .as_ref()
+            .map_or(/*default*/ 0, |line| line.width() as u16);
         let full_width = full
             .as_ref()
             .map_or(/*default*/ 0, |line| line.width() as u16);
@@ -63,25 +65,23 @@ impl ChatComposer {
             .effort_status_line_transition
             .as_ref()
             .filter(|transition| !transition.is_finished());
-        let content = if let Some(transition) = transition {
-            let current = line.map(FooterContent::into_hyperlink_line);
-            transition
-                .render_line(current, width)
-                .map(FooterContent::HyperlinkLine)
+        let line = if let Some(transition) = transition {
+            transition.render_line(line.as_ref(), width)
         } else {
             line
         };
-        if let Some(content) = content {
-            content.render(
-                Rect {
-                    width,
-                    ..inset_footer_hint_area(area)
-                },
+        if let Some(line) = line {
+            render_footer_line(
+                area,
                 buf,
+                truncate_line_with_ellipsis_if_overflow(line, usize::from(width)),
             );
         }
         if let Some(right) = right {
             render_context_right(area, buf, &right);
+        }
+        if let Some(url) = self.footer.status_line_hyperlink_url.as_deref() {
+            mark_underlined_hyperlink(buf, area, url);
         }
         if transition.is_some()
             && let Some(frame_requester) = &self.frame_requester

@@ -31,7 +31,9 @@ async fn client_preserves_supplied_factory_and_typed_policy_denial() {
         client.http.outbound_proxy_policy(),
         OutboundProxyPolicy::RespectSystemProxy
     );
-    let denied = client.get_config_bundle().await;
+    let denied = client
+        .exec_bootstrap_get("https://example.test/api/codex/accounts/check")
+        .await;
     assert!(matches!(denied, Err(RequestError::Policy(_))));
 }
 
@@ -119,8 +121,7 @@ async fn migrated_requests_preserve_query_auth_and_json_body() {
     )
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "request-token".to_string(),
-    )))
-    .unwrap();
+    )));
 
     let tasks = client
         .list_tasks(
@@ -196,7 +197,6 @@ fn fallback_client(base_url: &str) -> Client {
     .with_auth_provider(Arc::new(codex_model_provider::BearerAuthProvider::new(
         "bootstrap-token".to_string(),
     )))
-    .unwrap()
     .with_chatgpt_account_id("workspace-123")
     .with_user_agent("bootstrap-test")
 }
@@ -209,32 +209,24 @@ async fn bootstrap_gets_resolve_each_fallback_destination_and_preserve_headers()
         return;
     }
     for (base_suffix, api_prefix) in [("", "/api/codex"), ("/backend-api", "/wham")] {
-        let bundle_proxy = MockServer::start().await;
         let accounts_proxy = MockServer::start().await;
         let base_url = format!("{BLOCKED_ORIGIN}{base_suffix}");
         let client = fallback_client(&base_url);
-        for (endpoint, proxy) in [
-            ("config/bundle", &bundle_proxy),
-            ("accounts/check", &accounts_proxy),
-        ] {
-            let endpoint_path = format!("{base_suffix}{api_prefix}/{endpoint}");
-            cache_system_proxy_route_for_test(
-                &format!("{base_url}{api_prefix}/{endpoint}"),
-                proxy.uri(),
-            );
-            Mock::given(method("GET"))
-                .and(path(endpoint_path))
-                .and(header("authorization", "Bearer bootstrap-token"))
-                .and(header("chatgpt-account-id", "workspace-123"))
-                .and(header("user-agent", "bootstrap-test"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-                .expect(1)
-                .mount(proxy)
-                .await;
-        }
-        client.get_config_bundle().await.expect("cloud bundle");
+        let endpoint = "accounts/check";
+        cache_system_proxy_route_for_test(
+            &format!("{base_url}{api_prefix}/{endpoint}"),
+            accounts_proxy.uri(),
+        );
+        Mock::given(method("GET"))
+            .and(path(format!("{base_suffix}{api_prefix}/{endpoint}")))
+            .and(header("authorization", "Bearer bootstrap-token"))
+            .and(header("chatgpt-account-id", "workspace-123"))
+            .and(header("user-agent", "bootstrap-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&accounts_proxy)
+            .await;
         client.get_accounts_check().await.expect("accounts check");
-        bundle_proxy.verify().await;
         accounts_proxy.verify().await;
     }
 }
@@ -249,30 +241,23 @@ async fn bootstrap_gets_keep_default_responses_without_proxy_retry() {
     for status in [200, 401, 403, 407, 429, 503] {
         let issuer = MockServer::start().await;
         let proxy = MockServer::start().await;
-        for endpoint in ["config/bundle", "accounts/check"] {
-            cache_system_proxy_route_for_test(
-                &format!("{}/api/codex/{endpoint}", issuer.uri()),
-                proxy.uri(),
-            );
-        }
+        cache_system_proxy_route_for_test(
+            &format!("{}/api/codex/accounts/check", issuer.uri()),
+            proxy.uri(),
+        );
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({})))
-            .expect(2)
+            .expect(1)
             .mount(&issuer)
             .await;
         let client = fallback_client(&issuer.uri());
-        let bundle = client.get_config_bundle().await;
         let accounts = client.get_accounts_check().await;
         if status == 200 {
-            bundle.expect("default cloud route succeeds");
             accounts.expect("default accounts route succeeds");
         } else {
             assert_eq!(
-                [
-                    bundle.expect_err("cloud status error").status(),
-                    accounts.expect_err("accounts status error").status(),
-                ],
-                [Some(http::StatusCode::from_u16(status).expect("valid test status")); 2]
+                accounts.expect_err("accounts status error").status(),
+                Some(http::StatusCode::from_u16(status).expect("valid test status"))
             );
         }
         issuer.verify().await;
@@ -289,14 +274,11 @@ async fn bootstrap_gets_honor_disabled_fallback() {
     }
     let proxy = MockServer::start().await;
     let base_url = BLOCKED_ORIGIN;
-    for endpoint in ["config/bundle", "accounts/check"] {
-        cache_system_proxy_route_for_test(&format!("{base_url}/api/codex/{endpoint}"), proxy.uri());
-    }
+    cache_system_proxy_route_for_test(&format!("{base_url}/api/codex/accounts/check"), proxy.uri());
     let client = Client::new(
         base_url,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     );
-    assert!(client.get_config_bundle().await.is_err());
     assert!(client.get_accounts_check().await.is_err());
     assert_eq!(proxy.received_requests().await.unwrap_or_default().len(), 0);
 }
@@ -305,12 +287,10 @@ async fn bootstrap_gets_honor_disabled_fallback() {
 async fn bootstrap_gets_preserve_network_policy_with_fallback_enabled() {
     let issuer = MockServer::start().await;
     let proxy = MockServer::start().await;
-    for endpoint in ["config/bundle", "accounts/check"] {
-        cache_system_proxy_route_for_test(
-            &format!("{}/api/codex/{endpoint}", issuer.uri()),
-            proxy.uri(),
-        );
-    }
+    cache_system_proxy_route_for_test(
+        &format!("{}/api/codex/accounts/check", issuer.uri()),
+        proxy.uri(),
+    );
     let controller = codex_http_client::NetworkPolicyController::default();
     let client = Client::new(
         issuer.uri(),
@@ -318,10 +298,6 @@ async fn bootstrap_gets_preserve_network_policy_with_fallback_enabled() {
             .with_system_proxy_fallback()
             .with_network_policy(controller.policy()),
     );
-    assert!(matches!(
-        client.get_config_bundle().await,
-        Err(RequestError::Policy(_))
-    ));
     assert!(matches!(
         client.get_accounts_check().await,
         Err(RequestError::Policy(_))
@@ -340,7 +316,7 @@ async fn bootstrap_gets_retry_post_connect_failure_with_system_proxy() {
     ) {
         return;
     }
-    for endpoint in ["accounts/check", "config/bundle"] {
+    for endpoint in ["accounts/check"] {
         let issuer = TcpListener::bind(("127.0.0.1", 0)).expect("bind dropping issuer");
         let issuer_url = format!("http://{}", issuer.local_addr().expect("issuer address"));
         let issuer_thread = std::thread::spawn(move || {
@@ -390,9 +366,9 @@ async fn bootstrap_gets_retry_post_connect_failure_with_system_proxy() {
 }
 
 #[tokio::test]
-async fn bootstrap_get_recovers_from_stalled_body_before_cloud_startup_timeout() {
+async fn bootstrap_get_recovers_from_stalled_body_before_startup_timeout() {
     if run_without_environment_proxies(
-        "client::request_tests::bootstrap_get_recovers_from_stalled_body_before_cloud_startup_timeout",
+        "client::request_tests::bootstrap_get_recovers_from_stalled_body_before_startup_timeout",
     ) {
         return;
     }
@@ -419,7 +395,7 @@ async fn bootstrap_get_recovers_from_stalled_body_before_cloud_startup_timeout()
     });
     let proxy = MockServer::start().await;
     cache_system_proxy_route_for_test(
-        &format!("{issuer_url}/api/codex/config/bundle"),
+        &format!("{issuer_url}/api/codex/accounts/check"),
         proxy.uri(),
     );
     Mock::given(method("GET"))
@@ -429,13 +405,14 @@ async fn bootstrap_get_recovers_from_stalled_body_before_cloud_startup_timeout()
         .await;
     let result = tokio::time::timeout(
         Duration::from_secs(15),
-        fallback_client(&issuer_url).get_config_bundle(),
+        fallback_client(&issuer_url)
+            .exec_bootstrap_get(&format!("{issuer_url}/api/codex/accounts/check")),
     )
     .await;
     finish.send(()).expect("release stalled issuer");
     issuer_thread.join().expect("issuer finishes");
     result
-        .expect("proxy retry must fit inside the cloud startup budget")
-        .expect("cloud bundle via proxy");
+        .expect("proxy retry must fit inside the startup budget")
+        .expect("bootstrap GET via proxy");
     proxy.verify().await;
 }

@@ -25,8 +25,6 @@
 //!
 //! Preset submenu hints borrow slots and reflow with the composer.
 //!
-//! Shell mode starts when input inserts a leading `!`, never when deletion exposes one.
-//! Literal leading bangs remain ordinary messages on submission and during same-draft restoration.
 //! Vim Replace preserves the overwritten leading grapheme until Backspace removes an absorbed `!`.
 //! The plain-text preset keeps command prefixes literal, including `!`, so Enter and Tab
 //! submit ordinary text without enabling shell mode.
@@ -40,7 +38,7 @@
 //!
 //! # Key Event Routing
 //!
-//! Plain Left opens agents from an empty, active composer connected to a local daemon or remote App Server.
+//! Plain Left opens agents from an empty, active composer.
 //! Explicit editor remaps take precedence.
 //! Most key handling goes through [`ChatComposer::handle_key_event`], which dispatches to a
 //! popup-specific handler if a popup is visible and otherwise to
@@ -232,10 +230,6 @@
 //! - When all placeholders for a size are cleared or deleted, the next paste of that size reuses
 //!   the base label without a suffix.
 //!
-//! On supported terminals the local draft references also have a strip of thumbnails.
-//! It shows the first attachments that fit and a count of those hidden. Removing a
-//! reference removes its preview through the same attachment bookkeeping used for submission.
-//!
 //! # Remote Image Rows (Up/Down/Delete)
 //!
 //! Remote image URLs are rendered as non-editable `[Image #N]` rows above the textarea (inside the
@@ -305,6 +299,8 @@ use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::ShortcutHint;
 use crate::key_hint::has_ctrl_or_alt;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::ui_consts::FOOTER_INDENT_COLS;
 use codex_message_history::HistoryBatchCursor;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -375,7 +371,6 @@ use super::skill_popup::SkillPopup;
 use super::slash_commands::ServiceTierCommand;
 use super::slash_commands::SlashCommandItem;
 use super::voice_strip::VoiceStrip;
-use crate::bottom_pane::footer_content::FooterContent;
 use crate::history_cell::sanitize_user_text;
 use crate::key_hint::KeyBindingListExt;
 use crate::keymap::EditorKeymap;
@@ -384,12 +379,12 @@ use crate::keymap::KeymapContextSet;
 use crate::keymap::RuntimeKeymap;
 use crate::keymap::VimNormalKeymap;
 use crate::keymap::user_bindings;
+use crate::onboarding::mark_underlined_hyperlink;
 use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::style::user_message_style;
-use crate::ui_consts::FOOTER_INDENT_COLS;
 use codex_protocol::ThreadId;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
@@ -545,7 +540,6 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Hooks
                 | SlashCommand::Status
                 | SlashCommand::Warnings
-                | SlashCommand::Daemon
                 | SlashCommand::Usage
                 | SlashCommand::Ide
                 | SlashCommand::DebugConfig
@@ -631,8 +625,7 @@ pub(crate) struct ChatComposer {
     app_event_tx: AppEventSender,
     history: ChatComposerHistory,
     pub(super) command_center_enabled: bool,
-    // Keep the footer payload out of the composer's stack frame during session navigation.
-    footer: Box<FooterState>,
+    footer: FooterState,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
     sparkle: sparkle::Sparkle,
@@ -689,15 +682,8 @@ struct MentionCompletionTarget {
     prebuilt_mentions: Option<Vec<MentionItem>>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ShellPrefixHandling {
-    Interpret,
-    Literal,
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct ComposerDraft {
-    is_bash_mode: bool,
     pub(super) text: String,
     text_elements: Vec<TextElement>,
     local_image_paths: Vec<PathBuf>,
@@ -711,7 +697,6 @@ pub(super) struct ComposerDraft {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ComposerDraftSnapshot {
     pub(crate) text: String,
-    pub(crate) shell_mode: Option<bool>,
     pub(crate) cursor: usize,
     pub(crate) text_elements: Vec<TextElement>,
     pub(crate) local_images: Vec<LocalImageAttachment>,
@@ -774,7 +759,7 @@ impl ChatComposer {
             app_event_tx,
             history: ChatComposerHistory::new(),
             command_center_enabled: false,
-            footer: Box::new(FooterState {
+            footer: FooterState {
                 quit_shortcut_expires_at: None,
                 quit_shortcut_key: key_hint::ctrl(KeyCode::Char('c')),
                 esc_backtrack_hint: false,
@@ -789,6 +774,7 @@ impl ChatComposer {
                 goal_status_indicator: None,
                 ide_context_active: false,
                 status_line_value: None,
+                status_line_hyperlink_url: None,
                 status_line_enabled: false,
                 side_conversation_context_label: None,
                 active_agent_label: None,
@@ -819,7 +805,7 @@ impl ChatComposer {
                 reasoning_up_key: default_keymap
                     .primary_hint(KeymapContext::Chat, "increase_reasoning_effort"),
                 toggle_voice_key: default_keymap.primary_hint(KeymapContext::Chat, "toggle_voice"),
-            }),
+            },
             has_focus: has_input_focus,
             frame_requester: None,
             sparkle: sparkle::Sparkle::default(),
@@ -904,10 +890,8 @@ impl ChatComposer {
             if self.footer.status_line_enabled
                 && let Some(previous) = passive_footer_status_line(&self.footer_props())
             {
-                self.effort_status_line_transition = Some(EffortStatusLineTransition::new(
-                    tier,
-                    previous.into_hyperlink_line(),
-                ));
+                self.effort_status_line_transition =
+                    Some(EffortStatusLineTransition::new(tier, previous));
             }
             if let Some(frame_requester) = &self.frame_requester {
                 frame_requester.schedule_frame();
@@ -1590,23 +1574,6 @@ impl ChatComposer {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
-        self.set_text_content_with_shell_prefix(
-            text,
-            text_elements,
-            local_image_paths,
-            mention_bindings,
-            ShellPrefixHandling::Interpret,
-        );
-    }
-
-    pub(super) fn set_text_content_with_shell_prefix(
-        &mut self,
-        text: String,
-        text_elements: Vec<TextElement>,
-        local_image_paths: Vec<PathBuf>,
-        mention_bindings: Vec<MentionBinding>,
-        shell_prefix: ShellPrefixHandling,
-    ) {
         if !self.sparkle.history_preview {
             if local_image_paths.is_empty() {
                 self.note_sparkle_replaced_text(&text);
@@ -1623,10 +1590,7 @@ impl ChatComposer {
         self.draft.pending_pastes.clear();
         self.draft.mention_bindings.clear();
 
-        let (text, text_elements) = match shell_prefix {
-            ShellPrefixHandling::Interpret => self.imported_text_for_textarea(text, text_elements),
-            ShellPrefixHandling::Literal => (text, text_elements),
-        };
+        let (text, text_elements) = self.imported_text_for_textarea(text, text_elements);
         self.draft
             .textarea
             .set_text_with_elements(&text, &text_elements);
@@ -1694,7 +1658,6 @@ impl ChatComposer {
     pub(super) fn snapshot_draft(&self) -> ComposerDraft {
         let (mention_bindings, mention_ranges) = self.snapshot_mention_bindings_with_ranges();
         ComposerDraft {
-            is_bash_mode: self.draft.is_bash_mode,
             text: self.current_text(),
             text_elements: self.current_text_elements(),
             local_image_paths: self.attachments.local_image_paths(),
@@ -1708,7 +1671,6 @@ impl ChatComposer {
 
     pub(super) fn restore_draft(&mut self, draft: ComposerDraft) {
         let ComposerDraft {
-            is_bash_mode,
             text,
             text_elements,
             local_image_paths,
@@ -1719,16 +1681,11 @@ impl ChatComposer {
             cursor,
         } = draft;
         self.set_remote_image_urls(remote_image_urls);
-        self.set_text_content_with_shell_prefix(
+        self.set_text_content_with_mention_bindings(
             text,
             text_elements,
             local_image_paths,
             Vec::new(),
-            if is_bash_mode {
-                ShellPrefixHandling::Interpret
-            } else {
-                ShellPrefixHandling::Literal
-            },
         );
         for (binding, range) in mention_bindings.into_iter().zip(mention_ranges) {
             if let Some(id) = self.draft.textarea.element_id_for_exact_range(range) {
@@ -1858,7 +1815,7 @@ impl ChatComposer {
         );
         self.set_pending_pastes(pending_pastes);
         if !self.config.image_paste_enabled {
-            for image in &self.attachments.local_images {
+            for image in self.attachments.local_images() {
                 if let Some(element) = self.draft.textarea.text_elements().into_iter().find(|e| {
                     e.placeholder(self.draft.textarea.text()) == Some(image.placeholder.as_str())
                 }) {
@@ -1878,16 +1835,18 @@ impl ChatComposer {
         self.current_text_elements()
     }
 
+    #[cfg(test)]
     pub(crate) fn local_image_paths(&self) -> Vec<PathBuf> {
         self.attachments.local_image_paths()
     }
 
-    pub(crate) fn status_line_content(&self) -> Option<&FooterContent> {
-        self.footer.status_line_value.as_ref()
+    #[cfg(test)]
+    pub(crate) fn status_line_text(&self) -> Option<String> {
+        self.footer.status_line_text()
     }
 
-    pub(crate) fn local_images(&self) -> &[LocalImageAttachment] {
-        &self.attachments.local_images
+    pub(crate) fn local_images(&self) -> Vec<LocalImageAttachment> {
+        self.attachments.local_images()
     }
 
     #[cfg(test)]
@@ -1928,7 +1887,8 @@ impl ChatComposer {
     }
 
     pub fn take_recent_submission_images_with_placeholders(&mut self) -> Vec<LocalImageAttachment> {
-        std::mem::take(&mut self.attachments.local_images)
+        self.attachments
+            .take_recent_submission_images_with_placeholders()
     }
 
     /// Flushes any due paste-burst state.
@@ -3326,7 +3286,6 @@ impl ChatComposer {
             return (result, true);
         }
 
-        let visible_shell_command = self.is_bang_shell_command();
         let original_input = self.current_text();
         let original_text_elements = self.current_text_elements();
         let original_mention_bindings = self.snapshot_mention_bindings();
@@ -3339,7 +3298,10 @@ impl ChatComposer {
         if let Some((text, text_elements)) =
             self.prepare_submission_text(/*record_history*/ true)
         {
-            if self.slash_commands_enabled() && text.starts_with('!') && !visible_shell_command {
+            if self.slash_commands_enabled()
+                && text.starts_with('!')
+                && !original_input.trim_start().starts_with('!')
+            {
                 let text = original_input.trim().to_string();
                 let text_elements =
                     Self::trim_text_elements(&original_input, &text, original_text_elements);
@@ -3674,7 +3636,7 @@ impl ChatComposer {
     }
 
     fn is_bang_shell_command(&self) -> bool {
-        self.config.shell_commands_enabled && self.draft.is_bash_mode
+        self.config.shell_commands_enabled && self.current_text().trim_start().starts_with('!')
     }
 
     fn shell_mode_footer_line(&self) -> Option<Line<'static>> {
@@ -3839,7 +3801,6 @@ impl ChatComposer {
             return (InputResult::None, true);
         }
 
-        let prefix_insertion_revision = self.draft.textarea.prefix_insertion_revision();
         self.begin_vim_edit(input);
         if self.draft.textarea.is_vim_normal_mode()
             && !self.draft.textarea.is_vim_operator_pending()
@@ -3849,15 +3810,11 @@ impl ChatComposer {
             if let Some(edits) = self.draft.textarea.begin_vim_repeat() {
                 for edit in edits {
                     let elements = self.draft.textarea.element_payloads();
-                    let prefix_insertion_revision = self.draft.textarea.prefix_insertion_revision();
                     if !self.draft.textarea.apply_vim_edit(&edit) {
                         break;
                     }
                     vim_register::sync(self);
-                    if self.draft.textarea.prefix_insertion_revision() != prefix_insertion_revision
-                    {
-                        self.sync_bash_mode_from_text();
-                    }
+                    self.sync_bash_mode_from_text();
                     self.reconcile_deleted_elements(elements);
                 }
                 self.draft.textarea.finish_vim_repeat();
@@ -3866,9 +3823,7 @@ impl ChatComposer {
             self.draft.textarea.input(input);
             vim_register::sync(self);
         }
-        if self.draft.textarea.prefix_insertion_revision() != prefix_insertion_revision {
-            self.sync_bash_mode_from_text();
-        }
+        self.sync_bash_mode_from_text();
         if let Some(elements_before) = elements_before {
             self.reconcile_deleted_elements(elements_before);
         }
@@ -4433,11 +4388,19 @@ impl ChatComposer {
         }
     }
 
-    pub(crate) fn set_status_line(&mut self, status_line: Option<FooterContent>) -> bool {
+    pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) -> bool {
         if self.footer.status_line_value == status_line {
             return false;
         }
         self.footer.status_line_value = status_line;
+        true
+    }
+
+    pub(crate) fn set_status_line_hyperlink(&mut self, url: Option<String>) -> bool {
+        if self.footer.status_line_hyperlink_url == url {
+            return false;
+        }
+        self.footer.status_line_hyperlink_url = url;
         true
     }
 
@@ -4636,7 +4599,6 @@ impl ChatComposer {
             status,
             composer: composer_rect,
             remote_images: remote_images_rect,
-            thumbnails,
             textarea: textarea_rect,
             popup: popup_rect,
             footer: footer_rect,
@@ -4646,14 +4608,11 @@ impl ChatComposer {
             && options.command_popup_placement != CommandPopupPlacement::Hidden
         {
             let popup_rect = if options.command_popup_placement == CommandPopupPlacement::Overlay {
-                let rows_above_composer = composer_rect
-                    .y
-                    .saturating_sub(options.overlay_top.max(buf.area.y));
                 let height = self
                     .popups
                     .active
                     .required_height(composer_rect.width, /*footer_total_height*/ 0)
-                    .min(rows_above_composer);
+                    .min(composer_rect.y.saturating_sub(buf.area.y));
                 // Command and unified mention menus can render in a single row.
                 let height = if matches!(
                     self.popups.active,
@@ -4735,32 +4694,39 @@ impl ChatComposer {
                 } else if let Some(line) = self.history_search_footer_line() {
                     render_footer_line(hint_rect, buf, line);
                 } else {
-                    let mut status_line_width =
-                        hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16);
+                    let available_width =
+                        hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16) as usize;
                     let status_line_active = uses_passive_footer_status_layout(&footer_props);
                     let combined_status_line = if status_line_active {
                         passive_footer_status_line(&footer_props)
                     } else {
                         None
                     };
-                    let status_line_visible = status_line_active
+                    let transition_visible = status_line_active
                         && !self.footer.flash_visible()
                         && self.footer.hint_override.is_none();
-                    let transition_active = status_line_visible
+                    let transition_active = transition_visible
                         && self
                             .effort_status_line_transition
                             .as_ref()
                             .is_some_and(|transition| !transition.is_finished());
-                    let combined_status_line = if status_line_visible
+                    let combined_status_line = if transition_visible
                         && let Some(transition) = &self.effort_status_line_transition
                         && !transition.is_finished()
                     {
-                        let current = combined_status_line.map(FooterContent::into_hyperlink_line);
-                        transition
-                            .render_line(current, status_line_width)
-                            .map(FooterContent::HyperlinkLine)
+                        transition.render_line(
+                            combined_status_line.as_ref(),
+                            hint_rect.width.saturating_sub(FOOTER_INDENT_COLS as u16),
+                        )
                     } else {
                         combined_status_line
+                    };
+                    let mut truncated_status_line = if status_line_active {
+                        combined_status_line.as_ref().map(|line| {
+                            truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
+                        })
+                    } else {
+                        None
                     };
                     let left_mode_indicator =
                         if status_line_active || self.status_surface_height(options) > 0 {
@@ -4778,9 +4744,10 @@ impl ChatComposer {
                     } else if let Some(items) = active_footer_hint_override {
                         footer_hint_items_width(items)
                     } else if status_line_active {
-                        combined_status_line
+                        truncated_status_line
                             .as_ref()
-                            .map_or(/*default*/ 0, FooterContent::width)
+                            .map(|line| line.width() as u16)
+                            .unwrap_or(0)
                     } else {
                         footer_line_width(
                             &footer_props,
@@ -4810,11 +4777,15 @@ impl ChatComposer {
                             Some(self.right_footer_line_with_context())
                         };
                     let right_width = right_line.as_ref().map(|l| l.width() as u16).unwrap_or(0);
-                    if status_line_visible
+                    if status_line_active
                         && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
+                        && left_width > max_left
+                        && let Some(line) = combined_status_line.as_ref().map(|line| {
+                            truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
+                        })
                     {
-                        status_line_width = max_left;
-                        left_width = left_width.min(max_left);
+                        left_width = line.width() as u16;
+                        truncated_status_line = Some(line);
                     }
                     let can_show_left_and_context =
                         can_show_left_with_context(hint_rect, left_width, right_width);
@@ -4863,15 +4834,31 @@ impl ChatComposer {
                     if let Some((summary_left, _)) = single_line_layout {
                         match summary_left {
                             SummaryLeft::Default => {
-                                render_footer_from_props(
-                                    hint_rect,
-                                    buf,
-                                    &footer_props,
-                                    left_mode_indicator,
-                                    show_cycle_hint,
-                                    show_shortcuts_hint,
-                                    show_queue_hint,
-                                );
+                                if status_line_active {
+                                    if let Some(line) = truncated_status_line.clone() {
+                                        render_footer_line(hint_rect, buf, line);
+                                    } else {
+                                        render_footer_from_props(
+                                            hint_rect,
+                                            buf,
+                                            &footer_props,
+                                            left_mode_indicator,
+                                            show_cycle_hint,
+                                            show_shortcuts_hint,
+                                            show_queue_hint,
+                                        );
+                                    }
+                                } else {
+                                    render_footer_from_props(
+                                        hint_rect,
+                                        buf,
+                                        &footer_props,
+                                        left_mode_indicator,
+                                        show_cycle_hint,
+                                        show_shortcuts_hint,
+                                        show_queue_hint,
+                                    );
+                                }
                             }
                             SummaryLeft::Custom(line) => {
                                 render_footer_line(hint_rect, buf, line);
@@ -4885,14 +4872,8 @@ impl ChatComposer {
                     } else if let Some(items) = active_footer_hint_override {
                         render_footer_hint_items(hint_rect, buf, items);
                     } else if status_line_active {
-                        if let Some(content) = combined_status_line {
-                            content.render(
-                                Rect {
-                                    width: status_line_width,
-                                    ..inset_footer_hint_area(hint_rect)
-                                },
-                                buf,
-                            );
+                        if let Some(line) = truncated_status_line {
+                            render_footer_line(hint_rect, buf, line);
                         }
                     } else {
                         render_footer_from_props(
@@ -4908,7 +4889,12 @@ impl ChatComposer {
                     if show_right && let Some(line) = &right_line {
                         render_context_right(hint_rect, buf, line);
                     }
-                    if status_line_visible
+                    if status_line_active
+                        && let Some(url) = self.footer.status_line_hyperlink_url.as_deref()
+                    {
+                        mark_underlined_hyperlink(buf, hint_rect, url);
+                    }
+                    if transition_visible
                         && let Some(transition) = &self.effort_status_line_transition
                         && !transition.is_finished()
                         && let Some(frame_requester) = &self.frame_requester
@@ -4933,16 +4919,7 @@ impl ChatComposer {
             selection.register(footer_rect.intersection(buf.area), changed);
         }
         let style = user_message_style();
-        let background = composer_layout::background_rect(composer_rect, buf.area, options);
-        Block::default().style(style).render(background, buf);
-        if let Some(previews) = options.image_previews {
-            previews.render(
-                thumbnails,
-                buf,
-                &self.attachments.local_images,
-                &self.draft.textarea,
-            );
-        }
+        Block::default().style(style).render(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             let first = self
                 .attachments
@@ -5127,6 +5104,7 @@ mod mentions_layout_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::attachment_state::AttachedImage;
     use super::*;
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
@@ -5489,9 +5467,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 composer.set_status_line_enabled(/*enabled*/ true);
-                composer.set_status_line(Some(
-                    Line::from("gpt-5.4 high fast · ~/code/codex-1 · Context 0% used").into(),
-                ));
+                composer.set_status_line(Some(Line::from(
+                    "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+                )));
                 composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
             },
         );
@@ -5501,9 +5479,9 @@ mod tests {
             /*enhanced_keys_supported*/ true,
             |composer| {
                 composer.set_status_line_enabled(/*enabled*/ true);
-                composer.set_status_line(Some(
-                    Line::from("gpt-5.4 high fast · ~/code/codex-1 · Context 0% used").into(),
-                ));
+                composer.set_status_line(Some(Line::from(
+                    "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+                )));
                 composer.set_text_content("!".to_string(), Vec::new(), Vec::new());
                 let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             },
@@ -5544,9 +5522,9 @@ mod tests {
             /*disable_paste_burst*/ false,
         );
         composer.set_status_line_enabled(/*enabled*/ true);
-        composer.set_status_line(Some(
-            Line::from("gpt-5.4 high fast · ~/code/codex-1 · Context 0% used").into(),
-        ));
+        composer.set_status_line(Some(Line::from(
+            "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+        )));
         composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
 
         let area = Rect::new(0, 0, 100, 9);
@@ -5719,18 +5697,11 @@ mod tests {
         );
         let url = "https://github.com/openai/codex/pull/20252";
         composer.set_status_line_enabled(/*enabled*/ true);
-        composer.set_status_line(
-            crate::bottom_pane::status_line_from_segments(
-                [(
-                    crate::bottom_pane::status_line_setup::StatusLineItem::PullRequestNumber,
-                    "PR #20252".to_string(),
-                )],
-                /*use_theme_colors*/ false,
-                /*thread_id*/ None,
-                Some(url),
-            )
-            .map(Into::into),
-        );
+        composer.set_status_line(Some(Line::from(Span::styled(
+            "PR #20252",
+            Style::default().cyan().underlined(),
+        ))));
+        composer.set_status_line_hyperlink(Some(url.to_string()));
 
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
@@ -5740,72 +5711,10 @@ mod tests {
             .flat_map(|y| (area.left()..area.right()).map(move |x| (x, y)))
             .filter(|&(x, y)| buf[(x, y)].symbol().contains(url))
             .count();
-        assert_eq!(marked_cells, "PR #20252".chars().count());
-    }
-
-    #[test]
-    fn deleting_prefix_keeps_bang_literal_on_submission() {
-        for disable_paste_burst in [false, true] {
-            for should_queue in [false, true] {
-                let (mut composer, _rx) = new_test_composer();
-                composer.set_disable_paste_burst(disable_paste_burst);
-                composer.set_task_running(should_queue);
-                type_chars_humanlike(&mut composer, &"Yes! I agree.".chars().collect::<Vec<_>>());
-                composer.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-                for _ in 0..3 {
-                    composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-                }
-                assert!(!composer.draft.is_bash_mode);
-                assert_eq!(composer.current_text(), "! I agree.");
-                // Moving and inserting elsewhere must not reinterpret the exposed bang either.
-                composer.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-                type_chars_humanlike(&mut composer, &['!']);
-                assert!(!composer.draft.is_bash_mode);
-                assert_eq!(
-                    composer
-                        .handle_key_event(KeyEvent::new(
-                            if should_queue {
-                                KeyCode::Tab
-                            } else {
-                                KeyCode::Enter
-                            },
-                            KeyModifiers::NONE,
-                        ))
-                        .0,
-                    InputResult::Queued {
-                        text: "! I agree.!".to_owned(),
-                        text_elements: Vec::new(),
-                        action: QueuedInputAction::Literal,
-                        pending_pastes: Vec::new(),
-                    }
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn deleting_prefix_keeps_bang_editable_snapshot() {
-        snapshot_composer_state_with_width(
-            "deleting_prefix_keeps_bang_literal",
-            /*width*/ 60,
-            /*enhanced_keys_supported*/ false,
-            |composer| {
-                composer.set_disable_paste_burst(/*disabled*/ true);
-                composer.handle_paste("Yes! I agree.".to_owned());
-                composer.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-                for _ in 0..3 {
-                    composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-                }
-            },
+        assert_eq!(
+            marked_cells,
+            "PR #20252".chars().filter(|ch| !ch.is_whitespace()).count()
         );
-        let (mut composer, _rx) = new_test_composer();
-        composer.handle_paste("Yes! I agree.".to_owned());
-        composer.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        for _ in 0..4 {
-            composer.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-        }
-        assert_eq!(composer.current_text(), " I agree.");
-        assert!(!composer.draft.is_bash_mode);
     }
 
     #[test]
@@ -10075,11 +9984,7 @@ mod tests {
         use crossterm::event::KeyEvent;
         use crossterm::event::KeyModifiers;
 
-        fn assert_queued_bang_input(
-            input: &str,
-            expected_text: &str,
-            expected_action: QueuedInputAction,
-        ) {
+        fn assert_queued_shell(input: &str, expected_text: &str) {
             let (tx, mut rx) = unbounded_channel::<AppEvent>();
             let sender = AppEventSender::new(tx);
             let mut composer = ChatComposer::new(
@@ -10090,7 +9995,7 @@ mod tests {
                 /*disable_paste_burst*/ false,
             );
             composer.set_task_running(/*running*/ true);
-            composer.handle_paste(input.to_owned());
+            composer.draft.textarea.set_text_clearing_elements(input);
 
             let (result, _needs_redraw) =
                 composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -10104,7 +10009,7 @@ mod tests {
                 } => {
                     assert_eq!(text, expected_text);
                     assert!(text_elements.is_empty());
-                    assert_eq!(action, expected_action);
+                    assert_eq!(action, QueuedInputAction::RunShell);
                 }
                 other => panic!("expected bang shell input to queue, got {other:?}"),
             }
@@ -10115,9 +10020,9 @@ mod tests {
             );
         }
 
-        assert_queued_bang_input("!echo hi", "!echo hi", QueuedInputAction::RunShell);
-        assert_queued_bang_input("!", "!", QueuedInputAction::RunShell);
-        assert_queued_bang_input(" !echo hi", "!echo hi", QueuedInputAction::Literal);
+        assert_queued_shell("!echo hi", "!echo hi");
+        assert_queued_shell("!", "!");
+        assert_queued_shell(" !echo hi", "!echo hi");
     }
 
     #[test]
@@ -11811,7 +11716,7 @@ mod tests {
             "remaining placeholder relabeled to #1"
         );
         assert_eq!(
-            vec![LocalImageAttachment {
+            vec![AttachedImage {
                 path: path2,
                 placeholder: "[Image #1]".to_string()
             }],
@@ -11874,7 +11779,7 @@ mod tests {
             format!("Test {placeholder1} test ")
         );
         assert_eq!(
-            vec![LocalImageAttachment {
+            vec![AttachedImage {
                 path: path2,
                 placeholder: placeholder1
             }],
@@ -12486,13 +12391,10 @@ mod tests {
 
         let placeholder = local_image_label_text(/*label_number*/ 1);
         composer.draft.textarea.insert_element(&placeholder);
-        composer
-            .attachments
-            .local_images
-            .push(LocalImageAttachment {
-                placeholder: placeholder.clone(),
-                path: PathBuf::from("img.png"),
-            });
+        composer.attachments.local_images.push(AttachedImage {
+            placeholder: placeholder.clone(),
+            path: PathBuf::from("img.png"),
+        });
         composer
             .draft
             .pending_pastes
@@ -12590,13 +12492,10 @@ mod tests {
 
         let placeholder = local_image_label_text(/*label_number*/ 1);
         composer.draft.textarea.insert_element(&placeholder);
-        composer
-            .attachments
-            .local_images
-            .push(LocalImageAttachment {
-                placeholder: placeholder.clone(),
-                path: PathBuf::from("img.png"),
-            });
+        composer.attachments.local_images.push(AttachedImage {
+            placeholder: placeholder.clone(),
+            path: PathBuf::from("img.png"),
+        });
 
         composer.apply_external_edit("No images here".to_string());
 
@@ -12705,13 +12604,10 @@ mod tests {
 
         let placeholder = local_image_label_text(/*label_number*/ 1);
         composer.draft.textarea.insert_element(&placeholder);
-        composer
-            .attachments
-            .local_images
-            .push(LocalImageAttachment {
-                placeholder: placeholder.clone(),
-                path: PathBuf::from("img.png"),
-            });
+        composer.attachments.local_images.push(AttachedImage {
+            placeholder: placeholder.clone(),
+            path: PathBuf::from("img.png"),
+        });
 
         composer.apply_external_edit(format!("{placeholder} extra {placeholder}"));
 

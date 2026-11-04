@@ -14,13 +14,11 @@ use codex_app_server_protocol::FsRemoveParams;
 use codex_app_server_protocol::FsRemoveResponse;
 use codex_app_server_protocol::FsWriteFileParams;
 use codex_app_server_protocol::FsWriteFileResponse;
-use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use serde::de::DeserializeOwned;
-use serde_json::json;
 use uuid::Uuid;
 
 impl AppServerSession {
@@ -47,7 +45,6 @@ impl AppServerFileSystem {
                     recursive: Some(true),
                 },
             },
-            || json!({ "path": path.as_str(), "recursive": true }),
         )
         .await
         .map(drop)
@@ -59,33 +56,27 @@ impl AppServerFileSystem {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let data_base64 = STANDARD.encode(bytes);
-        self.request_fs_path::<FsWriteFileResponse>(
-            "fs/writeFile",
-            path,
-            |request_id, path| ClientRequest::FsWriteFile {
+        self.request_fs_path::<FsWriteFileResponse>("fs/writeFile", path, |request_id, path| {
+            ClientRequest::FsWriteFile {
                 request_id,
                 params: FsWriteFileParams {
                     path,
                     data_base64: data_base64.clone(),
                 },
-            },
-            || json!({ "path": path.as_str(), "dataBase64": data_base64 }),
-        )
+            }
+        })
         .await
         .map(drop)
     }
 
     pub(crate) async fn fs_read_file_path(&self, path: &AppServerPath) -> Result<Vec<u8>> {
         let response: FsReadFileResponse = self
-            .request_fs_path(
-                "fs/readFile",
-                path,
-                |request_id, path| ClientRequest::FsReadFile {
+            .request_fs_path("fs/readFile", path, |request_id, path| {
+                ClientRequest::FsReadFile {
                     request_id,
                     params: FsReadFileParams { path },
-                },
-                || json!({ "path": path.as_str() }),
-            )
+                }
+            })
             .await?;
         STANDARD
             .decode(response.data_base64)
@@ -93,19 +84,16 @@ impl AppServerFileSystem {
     }
 
     pub(crate) async fn fs_remove_path(&self, path: &AppServerPath) -> Result<()> {
-        self.request_fs_path::<FsRemoveResponse>(
-            "fs/remove",
-            path,
-            |request_id, path| ClientRequest::FsRemove {
+        self.request_fs_path::<FsRemoveResponse>("fs/remove", path, |request_id, path| {
+            ClientRequest::FsRemove {
                 request_id,
                 params: FsRemoveParams {
                     path,
                     recursive: None,
                     force: None,
                 },
-            },
-            || json!({ "path": path.as_str() }),
-        )
+            }
+        })
         .await
         .map(drop)
     }
@@ -115,28 +103,9 @@ impl AppServerFileSystem {
         method: &str,
         path: &AppServerPath,
         local_request: impl FnOnce(RequestId, AbsolutePathBuf) -> ClientRequest,
-        remote_params: impl FnOnce() -> serde_json::Value,
     ) -> Result<T> {
         let request_id = RequestId::String(format!("tui-fs-{}", Uuid::new_v4()));
         match &self.request_handle {
-            AppServerRequestHandle::Cloud(_) => Err(color_eyre::eyre::eyre!(
-                "{method} is unavailable for this backend"
-            )),
-            AppServerRequestHandle::Remote(handle) => {
-                let response = handle
-                    .request_json_rpc(JSONRPCRequest {
-                        id: request_id,
-                        method: method.to_string(),
-                        params: Some(remote_params()),
-                        trace: None,
-                    })
-                    .await
-                    .wrap_err_with(|| format!("{method} failed in TUI"))?;
-                serde_json::from_value(response.map_err(|source| {
-                    color_eyre::eyre::eyre!("{method} failed in TUI: {}", source.message)
-                })?)
-                .wrap_err_with(|| format!("{method} returned invalid data"))
-            }
             AppServerRequestHandle::InProcess(_) => {
                 let path = AbsolutePathBuf::from_absolute_path_checked(path.as_str())
                     .wrap_err_with(|| format!("invalid local app-server fs path {path}"))?;

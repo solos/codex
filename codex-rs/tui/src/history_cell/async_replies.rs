@@ -85,9 +85,8 @@ pub(super) fn render(
             .into_iter()
             .flat_map(|row| wrap(row, width, ""))
             .map(|row| {
-                let mut style = surface.patch(row.line.style);
-                style.bg = surface.bg;
-                row.style(style).resolve_span_styles()
+                let style = row.line.style.patch(surface);
+                row.style(style)
             })
             .collect();
         lines.extend(prefix_hyperlink_lines(answer, "  ".into(), "  ".into()));

@@ -91,12 +91,8 @@ private_startup_value = "unselected-private-value"
                     base_dir: PathUri::from_abs_path(&dot_codex),
                     toml: toml::to_string(&projected_toml)?,
                 }],
-                cloud_insertion_index: 0,
             },
-            requirements: EnvironmentConfigLayerStack {
-                layers: Vec::new(),
-                cloud_insertion_index: 0,
-            },
+            requirements: EnvironmentConfigLayerStack { layers: Vec::new() },
         }
     );
 
@@ -128,7 +124,6 @@ private_startup_value = "unselected-private-value"
             requirements_paths: Vec::new(),
         })
         .await?;
-    assert_eq!(preference.config.cloud_insertion_index, 0);
     assert_eq!(preference.config.layers.len(), 2);
     let configured = &preference.config.layers[0];
     let startup = &preference.config.layers[1];

@@ -534,7 +534,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
     );
     let spawned = codex_utils_pty::spawn_pty_process(
         fixture.program.to_str().unwrap(),
-        &["--no-daemon".to_string()],
+        &[],
         &fixture.workspace,
         &env,
         /*arg0*/ &None,
@@ -579,8 +579,8 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             output.chars().take(/*n*/ 4000).collect::<String>()
         )
     })??;
-    // The first Ctrl+C leaves the untrusted workspace for the command center.
-    // Keep sending Ctrl+C so the TUI exits even if the first draw discarded input.
+    // The trust screen discards pending input after its first draw. Retry the quit key
+    // until that drain has finished, and keep consuming output during normal shutdown.
     let mut quit_retry = tokio::time::interval(Duration::from_millis(/*millis*/ 250));
     let mut exit_rx = spawned.exit_rx;
     timeout(Duration::from_secs(/*secs*/ 10), async {
@@ -588,7 +588,7 @@ async fn interactive_tmux_startup_does_not_execute_workspace_helpers() -> Result
             tokio::select! {
                 result = &mut exit_rx => return result,
                 _ = quit_retry.tick() => {
-                    let _ = writer.send(b"\x03".to_vec()).await;
+                    let _ = writer.send(b"2".to_vec()).await;
                 }
                 Some(_) = output_rx.recv() => {}
             }

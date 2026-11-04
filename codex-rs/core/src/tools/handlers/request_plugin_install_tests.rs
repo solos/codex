@@ -16,6 +16,9 @@ use codex_config::types::ToolSuggestDiscoverableType;
 use codex_core_plugins::PluginInstallRequest;
 use codex_core_plugins::startup_sync::curated_plugins_repo_path;
 use codex_login::test_support::auth_manager_from_optional_auth;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_rmcp_client::ElicitationResponse;
 use codex_tools::DiscoverablePluginInfo;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -30,9 +33,15 @@ use tokio::sync::Mutex;
 #[test_case(ToolSuggestPresentation::ListTool; "legacy install")]
 #[test_case(ToolSuggestPresentation::RecommendationContext; "recommended plugin")]
 #[tokio::test]
-async fn request_plugin_install_rejects_restricted_threads(presentation: ToolSuggestPresentation) {
+async fn request_plugin_install_rejects_subagent_threads(presentation: ToolSuggestPresentation) {
     let (session, mut turn) = make_session_and_context().await;
-    turn.root_capabilities_restricted = true;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
     let turn = Arc::new(turn);
     let arguments = match presentation {
         ToolSuggestPresentation::ListTool => json!({
@@ -57,7 +66,6 @@ async fn request_plugin_install_rejects_restricted_threads(presentation: ToolSug
             call_id: "call-1".to_string(),
             tool_name: codex_tools::ToolName::plain(REQUEST_PLUGIN_INSTALL_TOOL_NAME),
             source: crate::tools::context::ToolCallSource::Direct,
-            native_call: None,
             environments: Default::default(),
             payload: ToolPayload::Function {
                 arguments: arguments.to_string(),
@@ -66,7 +74,7 @@ async fn request_plugin_install_rejects_restricted_threads(presentation: ToolSug
         .await;
 
     let Err(err) = result else {
-        panic!("restricted request_plugin_install should fail");
+        panic!("subagent request_plugin_install should fail");
     };
     assert_eq!(
         err,
@@ -124,17 +132,6 @@ async fn verified_plugin_install_completed_requires_installed_plugin() {
         &refreshed_config,
         &plugins_manager,
     ));
-}
-
-#[test]
-fn remote_plugin_install_suggestions_skip_core_installed_verification() {
-    assert!(is_remote_plugin_install_suggestion(
-        "snowflake@openai-curated-remote"
-    ));
-    assert!(!is_remote_plugin_install_suggestion(
-        "snowflake@openai-curated"
-    ));
-    assert!(!is_remote_plugin_install_suggestion("Plugin_123"));
 }
 
 #[test]
@@ -208,35 +205,6 @@ async fn persist_disabled_install_request_writes_connector_config() {
         Some(ToolSuggestConfig {
             discoverables: Vec::new(),
             disabled_tools: vec![ToolSuggestDisabledTool::connector("connector_calendar")],
-        })
-    );
-}
-
-#[tokio::test]
-async fn persist_disabled_install_request_writes_plugin_config() {
-    let codex_home = tempdir().expect("tempdir should succeed");
-    let tool = DiscoverableTool::Plugin(Box::new(DiscoverablePluginInfo {
-        id: "slack@openai-curated".to_string(),
-        remote_plugin_id: None,
-        name: "Slack".to_string(),
-        description: None,
-        has_skills: true,
-        mcp_server_names: Vec::new(),
-        app_connector_ids: Vec::new(),
-    }));
-
-    persist_disabled_install_request(&codex_home.path().abs(), &tool)
-        .await
-        .expect("persist plugin disable");
-
-    let contents =
-        std::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).expect("read config");
-    let parsed: ConfigToml = toml::from_str(&contents).expect("parse config");
-    assert_eq!(
-        parsed.tool_suggest,
-        Some(ToolSuggestConfig {
-            discoverables: Vec::new(),
-            disabled_tools: vec![ToolSuggestDisabledTool::plugin("slack@openai-curated")],
         })
     );
 }

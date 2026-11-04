@@ -51,7 +51,7 @@ async fn reasoning_defaults_reach_responses() -> Result<()> {
             "model_reasoning_summary = 'detailed'\nmodel_verbosity = 'high'\nweb_search = 'live'",
             json!("detailed"),
             json!(null),
-            ThreadParamsMode::Remote,
+            ThreadParamsMode::Embedded,
         ),
     ] {
         let server = responses::start_mock_server().await;
@@ -92,7 +92,7 @@ stream_max_retries = 0
             .default_reasoning_summary = codex_protocol::config_types::ReasoningSummary::Concise;
         server_config.model_catalog = Some(catalog);
         let client_home = tempfile::tempdir()?;
-        let config = if mode == ThreadParamsMode::Remote {
+        let config = if mode == ThreadParamsMode::Embedded {
             std::fs::write(
                 client_home.path().join("config.toml"),
                 "model_reasoning_summary = 'concise'\nmodel_verbosity = 'low'\nweb_search = 'disabled'",
@@ -109,7 +109,7 @@ stream_max_retries = 0
         let started = app_server.start_thread(&config).await?;
         for resume in [false, true] {
             if resume {
-                if mode != ThreadParamsMode::Remote {
+                if mode != ThreadParamsMode::Embedded {
                     break;
                 }
                 app_server.shutdown().await?;
@@ -176,7 +176,7 @@ stream_max_retries = 0
                 json!({"summary": summary, "stream_options": stream_options}),
                 "settings: {settings}"
             );
-            if mode == ThreadParamsMode::Remote {
+            if mode == ThreadParamsMode::Embedded {
                 assert_eq!(body["text"]["verbosity"], json!("high"));
                 let web_search = body["tools"]
                     .as_array()

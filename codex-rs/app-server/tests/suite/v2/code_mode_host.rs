@@ -269,7 +269,7 @@ async fn app_server_shares_flag_selected_grpc_code_mode_host_across_threads() ->
                 responses::ev_custom_tool_call(
                     "first-remote-cell",
                     "exec",
-                    "text('remote app-server host')",
+                    "text('code-mode host')",
                 ),
                 responses::ev_completed("resp-1"),
             ]),
@@ -282,7 +282,7 @@ async fn app_server_shares_flag_selected_grpc_code_mode_host_across_threads() ->
                 responses::ev_custom_tool_call(
                     "second-remote-cell",
                     "exec",
-                    "text('remote app-server host')",
+                    "text('code-mode host')",
                 ),
                 responses::ev_completed("resp-3"),
             ]),
@@ -340,7 +340,7 @@ async fn app_server_shares_flag_selected_grpc_code_mode_host_across_threads() ->
                 .cloned(),
             Some(json!({
                 "type": "input_text",
-                "text": "remote app-server host",
+                "text": "code-mode host",
             }))
         );
     }

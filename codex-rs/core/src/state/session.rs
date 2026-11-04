@@ -5,7 +5,6 @@ use codex_protocol::models::BaseInstructionsProvenance;
 #[cfg(test)]
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
-use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -78,8 +77,6 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
-    /// Newly recorded files awaiting best-effort lookup after the input batch is durable.
-    pub(crate) pending_audio_duration_ids: BTreeSet<String>,
     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
@@ -135,7 +132,6 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
-            pending_audio_duration_ids: BTreeSet::new(),
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
@@ -299,14 +295,9 @@ impl SessionState {
         usage: &TokenUsage,
         model_context_window: Option<i64>,
         includes_reasoning: bool,
-        input_item_count: usize,
     ) {
-        self.history.update_token_info(
-            usage,
-            model_context_window,
-            includes_reasoning,
-            input_item_count,
-        );
+        self.history
+            .update_token_info(usage, model_context_window, includes_reasoning);
     }
 
     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(

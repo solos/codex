@@ -7,11 +7,9 @@ use super::plugin_catalog::marketplace_is_user_configured_git;
 use super::plugin_catalog::marketplace_tab_id;
 use super::plugin_catalog::marketplace_tab_id_from_path;
 use super::plugin_catalog::marketplace_tab_id_matching_saved_id;
-use super::plugin_catalog::merge_remote_marketplaces;
 use super::plugin_catalog::plugin_detail_hint_line;
 use crate::app_event::AppEvent;
 use crate::app_event::PluginLocation;
-use crate::app_event::PluginRemoteSectionError;
 use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -42,7 +40,6 @@ pub(super) const ADD_MARKETPLACE_TAB_ID: &str = "add-marketplace";
 pub(super) struct PluginListFetchState {
     pub(super) cache_cwd: Option<PathBuf>,
     pub(super) in_flight_cwd: Option<PathBuf>,
-    pub(super) vertical_section_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -120,11 +117,6 @@ impl ChatWidget {
         match result {
             Ok(response) => {
                 self.plugins_fetch_state.cache_cwd = Some(cwd);
-                self.plugin_remote_sections_loading = request_was_in_flight;
-                if request_was_in_flight {
-                    self.plugin_remote_sections_loaded = false;
-                }
-                self.plugin_remote_section_errors.clear();
                 let active_tab_id = self
                     .plugins_active_tab_id
                     .as_deref()
@@ -146,9 +138,6 @@ impl ChatWidget {
                 self.newly_installed_marketplace_tab_id = None;
             }
             Err(err) => {
-                self.plugin_remote_sections_loading = false;
-                self.plugin_remote_sections_loaded = false;
-                self.plugins_fetch_state.vertical_section_requested = false;
                 if should_refresh_plugins_popup {
                     self.plugins_fetch_state.cache_cwd = None;
                     self.plugins_cache = PluginsCacheState::Failed(err.clone());
@@ -158,44 +147,6 @@ impl ChatWidget {
                     );
                 }
             }
-        }
-    }
-
-    pub(crate) fn on_plugin_remote_sections_loaded(
-        &mut self,
-        cwd: PathBuf,
-        marketplaces: Vec<PluginMarketplaceEntry>,
-        section_errors: Vec<PluginRemoteSectionError>,
-    ) {
-        if self.config.cwd.as_path() != cwd.as_path() {
-            return;
-        }
-
-        let should_refresh_plugins_popup = self
-            .bottom_pane
-            .active_tab_id_for_active_view(PLUGINS_SELECTION_VIEW_ID)
-            .is_some();
-        self.plugin_remote_sections_loading = false;
-        self.plugin_remote_sections_loaded = true;
-        self.plugins_fetch_state.vertical_section_requested = false;
-        let refreshed_response = match &mut self.plugins_cache {
-            PluginsCacheState::Ready(response)
-                if self.plugins_fetch_state.cache_cwd.as_deref() == Some(cwd.as_path()) =>
-            {
-                merge_remote_marketplaces(response, marketplaces);
-                self.plugin_remote_section_errors = section_errors;
-                Some(response.clone())
-            }
-            _ => {
-                self.plugin_remote_section_errors = section_errors;
-                None
-            }
-        };
-
-        if let Some(response) = refreshed_response
-            && should_refresh_plugins_popup
-        {
-            self.refresh_plugins_popup_if_open(&response);
         }
     }
 
@@ -215,8 +166,6 @@ impl ChatWidget {
         }
 
         self.plugins_fetch_state.in_flight_cwd = Some(cwd.clone());
-        self.plugins_fetch_state.vertical_section_requested =
-            !self.config.features.enabled(Feature::RemotePlugin);
         if self.plugins_fetch_state.cache_cwd.as_deref() != Some(cwd.as_path()) {
             self.plugins_cache = PluginsCacheState::Loading;
         }

@@ -12,8 +12,6 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use super::StateRuntime;
-use crate::sqlite::SqlitePoolWriteExt;
-use crate::sqlite::SqliteWriteQueryExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReadState {
@@ -65,7 +63,7 @@ impl StateRuntime {
         .bind(Uuid::new_v4().to_string())
         .bind(turn_id)
         .bind(id.to_string())
-        .execute_with_busy_retry(self.pool.as_ref())
+        .execute(self.pool.as_ref())
         .await?
         .rows_affected() != 0;
         Ok(changed)
@@ -79,7 +77,7 @@ impl StateRuntime {
         expected_revision: &str,
         operation: ReadStateOperation,
     ) -> anyhow::Result<ReadStateUpdate> {
-        let mut tx = self.pool.begin_immediate().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(before) = read_states(&mut tx, &[id]).await?.remove(&id) else {
             return Ok(ReadStateUpdate::Unavailable);
         };

@@ -382,7 +382,6 @@ pub struct SkillInvocation {
     pub skill_name: String,
     pub location: SkillInvocationLocation,
     pub plugin_id: Option<String>,
-    pub remote_plugin_id: Option<String>,
     pub invocation_type: InvocationType,
 }
 
@@ -719,7 +718,6 @@ pub struct PluginInstallRequested {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginInstallRequestedPlugin {
     pub plugin_id: String,
-    pub remote_plugin_id: Option<String>,
     pub plugin_name: String,
     pub connector_ids: Vec<String>,
 }

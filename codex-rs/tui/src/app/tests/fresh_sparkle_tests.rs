@@ -135,55 +135,6 @@ async fn only_a_confirmed_empty_new_task_shows_the_sparkle() -> Result<()> {
     }
     Ok(())
 }
-
-#[tokio::test]
-async fn disconnected_sparkle_input_routed_by_app_consumes_the_opportunity_without_drawing()
--> Result<()> {
-    for model in ["gpt-5.5", "gpt-6-astra"] {
-        for edited in [false, true] {
-            let (mut app, _events, _ops) = make_test_app_with_channels().await;
-            app.local_settings.tui.animations = true;
-            app.local_settings.tui.effects.starfield = true;
-            let mut server = start_config_write_test_app_server(&app).await?;
-            let mut tui = crate::tui::test_support::make_test_tui()?;
-            app.replace_chat_widget_with_app_server_thread(
-                &mut tui,
-                started(model),
-                ThreadAttachPresentation::Fresh,
-                /*initial_user_message*/ None,
-            )
-            .await?;
-            assert_eq!(visible(&app.chat_widget), model == "gpt-6-astra");
-            app.app_server_target = AppServerTarget::Remote {
-                endpoint: crate::resolve_remote_addr("ws://127.0.0.1:9")?,
-            };
-            assert!(app.begin_reconnect());
-            if edited {
-                for code in [KeyCode::Char('?'), KeyCode::Backspace] {
-                    app.handle_tui_event(
-                        &mut tui,
-                        &mut server,
-                        TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
-                    )
-                    .await?;
-                }
-            }
-            assert_eq!(app.chat_widget.composer_text_with_pending(), "");
-            app.chat_widget.set_footer_hint_override(/*items*/ None);
-            app.chat_widget.pause_unavailable_thread();
-            app.chat_widget.set_model("gpt-6-astra");
-            app.chat_widget
-                .on_sparkle_model_selected_from_picker("gpt-6-astra");
-            assert_eq!(
-                visible(&app.chat_widget),
-                !edited,
-                "{model}, edited: {edited}"
-            );
-        }
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn commands_can_precede_the_sparkle_but_inserted_or_typed_drafts_cannot() -> Result<()> {
     for earlier_input in [

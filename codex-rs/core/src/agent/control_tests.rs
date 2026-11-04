@@ -49,7 +49,6 @@ use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
-use codex_models_manager::manager::ModelCatalogSettings;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
@@ -124,9 +123,6 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
-
-#[path = "control/spawn_publication_tests.rs"]
-mod spawn_publication;
 
 impl LocalAgentControl {
     /// Create a child fixture through the production spawn entry point.
@@ -622,7 +618,6 @@ async fn on_event_updates_status_from_task_complete() {
                 misalignment: None,
                 message: "denied".to_string(),
                 codex_error_info: None,
-                rejected_audio_file_ids: Vec::new(),
             }),
             AgentStatus::Errored("denied".to_string()),
         ),
@@ -647,7 +642,6 @@ async fn on_event_updates_status_from_error() {
         misalignment: None,
         message: "boom".to_string(),
         codex_error_info: None,
-        rejected_audio_file_ids: Vec::new(),
     }));
 
     let expected = AgentStatus::Errored("boom".to_string());
@@ -790,12 +784,11 @@ async fn spawn_failure_context_survives_manager_and_fork_errors() {
 async fn spawn_failure_context_preserves_shutdown_during_child_startup() {
     let harness = AgentControlHarness::new().await;
     let state = harness.control.runtime.upgrade().expect("live manager");
-    let parent_id = ThreadId::new();
     let spawn = harness.control.spawn_agent(
         harness.config.clone(),
         text_input("hello"),
         Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: parent_id,
+            parent_thread_id: ThreadId::new(),
             depth: 1,
             agent_path: None,
             agent_nickname: None,
@@ -834,22 +827,6 @@ async fn spawn_failure_context_preserves_shutdown_during_child_startup() {
         .wait()
         .await
         .expect("spawn releases its membership");
-    let closed_children = harness
-        .state_db
-        .as_ref()
-        .expect("manager should retain state db")
-        .list_thread_spawn_children_with_status(
-            parent_id,
-            codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
-        )
-        .await
-        .expect("closed child edges should load");
-    assert_eq!(
-        closed_children.len(),
-        1,
-        "failed startup closes its published edge"
-    );
-    assert_thread_not_loaded(&harness.manager, closed_children[0]).await;
 }
 
 #[tokio::test]
@@ -913,20 +890,6 @@ async fn cancelled_spawn_after_input_admission_discards_child() {
         .wait()
         .await
         .expect("provisional cleanup releases tree membership");
-    assert_eq!(
-        harness
-            .state_db
-            .as_ref()
-            .expect("manager should retain state db")
-            .list_thread_spawn_children_with_status(
-                parent_id,
-                codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
-            )
-            .await
-            .expect("closed child edge should load"),
-        vec![child_id],
-        "cancelled startup must close its published edge"
-    );
 }
 
 #[tokio::test]
@@ -1172,13 +1135,10 @@ async fn cancelled_v2_send_finishes_reload_registration() {
             .is_some()
     );
 
-    let mut sender_config = harness.config.clone();
-    sender_config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-    sender_config.requested_approvals_reviewer = Some(ApprovalsReviewer::AutoReview);
     let followup_request = |message: &str| SendRequest {
         caller: parent_id,
         target: AgentTarget::Id(child_id),
-        resume_config: sender_config.clone(),
+        resume_config: harness.config.clone(),
         input: AgentInput::Message {
             message: AgentMessage::Plaintext(message.to_string()),
             mode: MessageDeliveryMode::TriggerTurn,
@@ -1225,11 +1185,6 @@ async fn cancelled_v2_send_finishes_reload_registration() {
             .registry
             .evicted_environments(child_id)
             .is_none()
-    );
-    assert_eq!(
-        reloaded.config_snapshot().await.approvals_reviewer,
-        ApprovalsReviewer::User,
-        "reload must preserve the worker's reviewer instead of inheriting its sender's request",
     );
     // Evict and reload again with the single child slot. This also catches a leaked
     // pin or pending residency reservation left behind by the cancelled sender.
@@ -2446,7 +2401,6 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                 internal_chat_message_metadata_passthrough: None,
             }),
             RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
-                content_token_count: None,
                 thread_id: parent_thread_id,
                 turn_id: "parent-turn".to_string(),
                 item: TurnItem::UserMessage(UserMessageItem {
@@ -2467,7 +2421,6 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                         service_tier: None,
                         approval_policy: AskForApproval::Never,
                         approvals_reviewer: ApprovalsReviewer::User,
-                        requested_approvals_reviewer: None,
                         permission_profile: PermissionProfile::workspace_write(),
                         active_permission_profile: None,
                         cwd: harness.config.cwd.clone(),
@@ -2712,7 +2665,6 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
 
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     let parent_resume_metadata = codex_history::CompactionResumeMetadata {
-        rejected_audio_file_ids: Default::default(),
         dynamic_tools: None,
         multi_agent_version: Some(MultiAgentVersion::V2),
         last_started_turn_id: Some("parent-turn".to_string()),
@@ -3798,14 +3750,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
         harness.manager = ThreadManager::new(
             &parent_config,
-            crate::build_startup_models(
-                &parent_config,
-                auth_manager.clone(),
-                uuid::Uuid::new_v4().to_string(),
-                Arc::new(ModelCatalogSettings::disk(
-                    parent_config.codex_home.to_path_buf(),
-                )),
-            ),
+            auth_manager.clone(),
+            crate::thread_manager::build_models_manager(&parent_config, auth_manager),
             crate::CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -3813,9 +3759,12 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             Arc::new(crate::test_support::EmptyUserInstructionsProvider),
             /*analytics_events_client*/ None,
             crate::thread_manager::passthrough_image_store(),
-            crate::ThreadStoreBuilder::from_config(&parent_config, harness.state_db.clone())
-                .build(),
+            crate::thread_manager::thread_store_from_config(
+                &parent_config,
+                harness.state_db.clone(),
+            ),
             crate::thread_manager::local_agent_graph_store_from_state_db(harness.state_db.as_ref()),
+            uuid::Uuid::new_v4().to_string(),
             /*attestation_provider*/ None,
             /*external_time_provider*/ None,
         );
@@ -3874,7 +3823,6 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 compaction_response_id: None,
                 latest_token_usage_record: None,
                 resume_metadata: Some(codex_history::CompactionResumeMetadata {
-                    rejected_audio_file_ids: Default::default(),
                     dynamic_tools: None,
                     multi_agent_version: Some(MultiAgentVersion::V2),
                     last_started_turn_id: None,
@@ -4010,7 +3958,6 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         assert_eq!(
             inherited_state,
             Some(codex_history::CompactionResumeMetadata {
-                rejected_audio_file_ids: Default::default(),
                 dynamic_tools: None,
                 multi_agent_version: Some(MultiAgentVersion::V2),
                 last_started_turn_id: None,
@@ -4961,12 +4908,8 @@ async fn resume_thread_subagent_restores_stored_metadata() {
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
         &config,
-        crate::build_startup_models(
-            &config,
-            auth_manager.clone(),
-            uuid::Uuid::new_v4().to_string(),
-            Arc::new(ModelCatalogSettings::disk(config.codex_home.to_path_buf())),
-        ),
+        auth_manager.clone(),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
@@ -4976,6 +4919,7 @@ async fn resume_thread_subagent_restores_stored_metadata() {
         crate::thread_manager::passthrough_image_store(),
         thread_store.clone(),
         /*agent_graph_store*/ None,
+        uuid::Uuid::new_v4().to_string(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );

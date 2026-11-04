@@ -54,7 +54,7 @@ async fn remote_resume_restores_saved_server_profile_without_permission_override
         .expect("create source rollout"),
     )?;
     let mut server = crate::start_embedded_app_server_for_picker(&config).await?;
-    server.thread_params_mode = ThreadParamsMode::Remote;
+    server.thread_params_mode = ThreadParamsMode::Embedded;
     let local_settings = crate::local_settings::LocalSettings::from(&client_config);
     let initial = server
         .resume_thread(
@@ -102,8 +102,8 @@ async fn remote_resume_restores_saved_server_profile_without_permission_override
     server.shutdown().await?;
 
     let mut server = crate::start_embedded_app_server_for_picker(&config).await?;
-    server.thread_params_mode = ThreadParamsMode::Remote;
-    for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
+    server.thread_params_mode = ThreadParamsMode::Embedded;
+    for mode in [ThreadParamsMode::Embedded] {
         server.thread_params_mode = mode;
         let resumed = server
             .resume_thread_with_permission_overrides(
@@ -414,7 +414,7 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
         )
         .await?;
 
-    assert_eq!(app_server.next_request_id, next_request_id + 4);
+    assert_eq!(app_server.next_request_id, next_request_id + 3);
     assert_eq!(resumed.session.thread_id, thread_id);
     assert_eq!(
         app_server

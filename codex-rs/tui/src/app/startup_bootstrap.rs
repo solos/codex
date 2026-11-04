@@ -7,16 +7,11 @@ use super::*;
 use crate::app_server_session::StartupLaunchChoices;
 
 pub(crate) fn uses_server_owned_fresh_bootstrap(
-    target: &AppServerTarget,
-    selection: &SessionSelection,
-    loader_overrides: &LoaderOverrides,
+    _target: &AppServerTarget,
+    _selection: &SessionSelection,
+    _loader_overrides: &LoaderOverrides,
 ) -> bool {
-    !matches!(target, AppServerTarget::Embedded)
-        && matches!(
-            selection,
-            SessionSelection::StartFresh | SessionSelection::Exit
-        )
-        && loader_overrides.user_config_profile.is_none()
+    false
 }
 
 pub(super) async fn bootstrap_server_owned_start(

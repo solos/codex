@@ -579,6 +579,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -608,7 +609,6 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
-        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -854,6 +854,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         visibility: ModelVisibility::List,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -886,7 +887,6 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
-        web_search_provider: None,
         truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -1443,6 +1443,7 @@ fn test_remote_model_with_policy(
         visibility,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
@@ -1472,7 +1473,6 @@ fn test_remote_model_with_policy(
         availability_nux: None,
         apply_patch_tool_type: None,
         web_search_tool_type: Default::default(),
-        web_search_provider: None,
         truncation_policy,
         supports_image_detail_original: false,
         context_window: Some(272_000),
@@ -1538,7 +1538,7 @@ async fn model_catalog_url_supplies_conversation_model_and_instructions() -> Res
     model.visibility = ModelVisibility::List;
     model.supported_in_api = true;
     model.support_verbosity = false;
-
+    model.used_fallback_model_metadata = false;
     model
         .model_messages
         .as_mut()
@@ -1597,7 +1597,7 @@ async fn failed_catalog_refresh_preserves_tool_search_on_the_next_turn() -> Resu
     let mut model = codex_models_manager::model_info::model_info_from_slug("gateway-model");
     model.visibility = ModelVisibility::List;
     model.supports_search_tool = true;
-
+    model.used_fallback_model_metadata = false;
     let catalog = ModelsResponse {
         models: vec![model],
     };

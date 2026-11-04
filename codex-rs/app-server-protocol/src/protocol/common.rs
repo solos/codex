@@ -907,13 +907,6 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadItemsReadResponse,
     },
-    #[experimental("thread/guardianReview")]
-    /// Review the idle thread's final injected exec_command without executing it.
-    ThreadGuardianReview => "thread/guardianReview" {
-        params: v2::ThreadGuardianReviewParams,
-        serialization: thread_id(params.thread_id),
-        response: v2::ThreadGuardianReviewResponse,
-    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,
@@ -955,56 +948,15 @@ client_request_definitions! {
         serialization: None,
         response: v2::PluginListResponse,
     },
-    #[experimental("plugin/search")]
-    PluginSearch => "plugin/search" {
-        params: v2::PluginSearchParams,
-        serialization: None,
-        response: v2::PluginSearchResponse,
-    },
     PluginInstalled => "plugin/installed" {
         params: v2::PluginInstalledParams,
         serialization: None,
         response: v2::PluginInstalledResponse,
     },
-    PluginReconcile => "plugin/reconcile" {
-        params: v2::PluginReconcileParams,
-        serialization: None,
-        response: v2::PluginReconcileResponse,
-    },
     PluginRead => "plugin/read" {
         params: v2::PluginReadParams,
         serialization: None,
         response: v2::PluginReadResponse,
-    },
-    PluginSkillRead => "plugin/skill/read" {
-        params: v2::PluginSkillReadParams,
-        serialization: global("config"),
-        response: v2::PluginSkillReadResponse,
-    },
-    PluginShareSave => "plugin/share/save" {
-        params: v2::PluginShareSaveParams,
-        serialization: global("config"),
-        response: v2::PluginShareSaveResponse,
-    },
-    PluginShareUpdateTargets => "plugin/share/updateTargets" {
-        params: v2::PluginShareUpdateTargetsParams,
-        serialization: global("config"),
-        response: v2::PluginShareUpdateTargetsResponse,
-    },
-    PluginShareList => "plugin/share/list" {
-        params: v2::PluginShareListParams,
-        serialization: global("config"),
-        response: v2::PluginShareListResponse,
-    },
-    PluginShareCheckout => "plugin/share/checkout" {
-        params: v2::PluginShareCheckoutParams,
-        serialization: global("config"),
-        response: v2::PluginShareCheckoutResponse,
-    },
-    PluginShareDelete => "plugin/share/delete" {
-        params: v2::PluginShareDeleteParams,
-        serialization: global("config"),
-        response: v2::PluginShareDeleteResponse,
     },
     AppsRead => "app/read" {
         params: v2::AppsReadParams,
@@ -1022,7 +974,7 @@ client_request_definitions! {
         response: v2::AppsInstalledResponse,
     },
     // File system requests are intentionally concurrent. Desktop already treats local
-    // file system operations as concurrent, and app-server remote fs mirrors that model.
+    // file system operations as concurrent, and app-server fs mirrors that model.
     FsReadFile => "fs/readFile" {
         params: v2::FsReadFileParams,
         serialization: None,
@@ -1174,16 +1126,6 @@ client_request_definitions! {
         serialization: None,
         response: v2::GatewayOAuthCancelResponse,
     },
-    ModelProviderList => "modelProvider/list" {
-        params: v2::ModelProviderListParams,
-        serialization: global_shared_read("config"),
-        response: v2::ModelProviderListResponse,
-    },
-    ModelProviderConfigWrite => "modelProvider/config/write" {
-        params: v2::ModelProviderConfigWriteParams,
-        serialization: global("config"),
-        response: v2::ModelProviderConfigWriteResponse,
-    },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
         serialization: None,
@@ -1203,48 +1145,6 @@ client_request_definitions! {
         params: v2::ExperimentalFeatureEnablementSetParams,
         serialization: global("config"),
         response: v2::ExperimentalFeatureEnablementSetResponse,
-    },
-    #[experimental("remoteControl/enable")]
-    RemoteControlEnable => "remoteControl/enable" {
-        params: #[serde(skip_serializing_if = "Option::is_none")] v2::NullableRemoteControlEnableParams,
-        serialization: global("remote-control"),
-        response: v2::RemoteControlEnableResponse,
-    },
-    #[experimental("remoteControl/disable")]
-    RemoteControlDisable => "remoteControl/disable" {
-        params: #[serde(skip_serializing_if = "Option::is_none")] v2::NullableRemoteControlDisableParams,
-        serialization: global("remote-control"),
-        response: v2::RemoteControlDisableResponse,
-    },
-    #[experimental("remoteControl/status/read")]
-    RemoteControlStatusRead => "remoteControl/status/read" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global_shared_read("remote-control"),
-        response: v2::RemoteControlStatusReadResponse,
-    },
-    #[experimental("remoteControl/pairing/start")]
-    RemoteControlPairingStart => "remoteControl/pairing/start" {
-        params: v2::RemoteControlPairingStartParams,
-        serialization: global("remote-control-pairing"),
-        response: v2::RemoteControlPairingStartResponse,
-    },
-    #[experimental("remoteControl/pairing/status")]
-    RemoteControlPairingStatus => "remoteControl/pairing/status" {
-        params: v2::RemoteControlPairingStatusParams,
-        serialization: global_shared_read("remote-control-pairing"),
-        response: v2::RemoteControlPairingStatusResponse,
-    },
-    #[experimental("remoteControl/client/list")]
-    RemoteControlClientsList => "remoteControl/client/list" {
-        params: v2::RemoteControlClientsListParams,
-        serialization: global_shared_read("remote-control-clients"),
-        response: v2::RemoteControlClientsListResponse,
-    },
-    #[experimental("remoteControl/client/revoke")]
-    RemoteControlClientsRevoke => "remoteControl/client/revoke" {
-        params: v2::RemoteControlClientsRevokeParams,
-        serialization: global("remote-control-clients"),
-        response: v2::RemoteControlClientsRevokeResponse,
     },
     #[experimental("collaborationMode/list")]
     /// Lists collaboration mode presets.
@@ -2027,7 +1927,6 @@ server_notification_definitions! {
     ThreadReverted => "thread/reverted" (v2::ThreadRevertedNotification),
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
-    ThreadSectionChanged => "thread/section/changed" (v2::ThreadSectionChangedNotification),
     ThreadAttachmentUpdated => "thread/attachment/updated" (v2::ThreadAttachmentUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     #[experimental("thread/prediction/updated")]
@@ -2088,7 +1987,6 @@ server_notification_definitions! {
     GatewayOAuthChanged => "account/gatewayOAuth/changed" (v2::GatewayOAuthChangedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
-    RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),
     ExternalAgentConfigImportCompleted => "externalAgentConfig/import/completed" (v2::ExternalAgentConfigImportCompletedNotification),
     FsChanged => "fs/changed" (v2::FsChangedNotification),
@@ -2467,7 +2365,6 @@ mod tests {
             request_id: request_id(),
             params: v2::PluginInstallParams {
                 marketplace_path: Some(absolute_path("/tmp/marketplace")),
-                remote_marketplace_name: None,
                 install_attempt_id: None,
                 plugin_name: "plugin-a".to_string(),
             },
@@ -2514,7 +2411,6 @@ mod tests {
             params: v2::PluginListParams {
                 cwds: None,
                 marketplace_kinds: None,
-                force_refetch: false,
             },
         };
         assert_eq!(plugin_list.serialization_scope(), None);
@@ -2523,7 +2419,6 @@ mod tests {
             request_id: request_id(),
             params: v2::PluginReadParams {
                 marketplace_path: Some(absolute_path("/tmp/marketplace")),
-                remote_marketplace_name: None,
                 plugin_name: "plugin-a".to_string(),
             },
         };
@@ -2772,53 +2667,6 @@ mod tests {
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
-
-        let remote_control_pairing_start = ClientRequest::RemoteControlPairingStart {
-            request_id: request_id(),
-            params: v2::RemoteControlPairingStartParams::default(),
-        };
-        assert_eq!(
-            remote_control_pairing_start.serialization_scope(),
-            Some(ClientRequestSerializationScope::Global(
-                "remote-control-pairing"
-            ))
-        );
-        let remote_control_pairing_status = ClientRequest::RemoteControlPairingStatus {
-            request_id: request_id(),
-            params: v2::RemoteControlPairingStatusParams {
-                pairing_code: Some("pairing-code".to_string()),
-                manual_pairing_code: None,
-            },
-        };
-        assert_eq!(
-            remote_control_pairing_status.serialization_scope(),
-            Some(ClientRequestSerializationScope::GlobalSharedRead(
-                "remote-control-pairing"
-            ))
-        );
-        let remote_control_clients_list = ClientRequest::RemoteControlClientsList {
-            request_id: request_id(),
-            params: v2::RemoteControlClientsListParams::default(),
-        };
-        assert_eq!(
-            remote_control_clients_list.serialization_scope(),
-            Some(ClientRequestSerializationScope::GlobalSharedRead(
-                "remote-control-clients"
-            ))
-        );
-        let remote_control_clients_revoke = ClientRequest::RemoteControlClientsRevoke {
-            request_id: request_id(),
-            params: v2::RemoteControlClientsRevokeParams {
-                environment_id: "environment-id".to_string(),
-                client_id: "client-id".to_string(),
-            },
-        };
-        assert_eq!(
-            remote_control_clients_revoke.serialization_scope(),
-            Some(ClientRequestSerializationScope::Global(
-                "remote-control-clients"
-            ))
-        );
     }
 
     #[test]
@@ -2853,7 +2701,6 @@ mod tests {
                     version: "0.1.0".to_string(),
                 },
                 capabilities: Some(v1::InitializeCapabilities {
-                    required_human_approval: false,
                     explicit_gateway_oauth: false,
                     experimental_api: true,
                     request_attestation: true,
@@ -2942,7 +2789,6 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capabilities: Some(v1::InitializeCapabilities {
-                        required_human_approval: false,
                         explicit_gateway_oauth: false,
                         experimental_api: true,
                         request_attestation: true,

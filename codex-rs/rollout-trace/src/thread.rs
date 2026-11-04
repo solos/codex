@@ -100,12 +100,23 @@ impl ThreadTraceContext {
         }
     }
 
-    /// Starts tracing when configured; an enabled recorder must initialize successfully.
-    pub fn start_root(metadata: ThreadStartedTraceMetadata) -> anyhow::Result<Self> {
+    /// Starts a root thread trace from `CODEX_ROLLOUT_TRACE_ROOT`, or disables tracing.
+    ///
+    /// Trace startup is best-effort. A tracing failure must not make the Codex
+    /// session unusable, because traces are diagnostic and can be enabled while
+    /// debugging unrelated production failures.
+    pub fn start_root_or_disabled(metadata: ThreadStartedTraceMetadata) -> Self {
         let Some(root) = std::env::var_os(CODEX_ROLLOUT_TRACE_ROOT_ENV) else {
-            return Ok(Self::disabled());
+            return Self::disabled();
         };
-        start_root_in_root(&PathBuf::from(root), metadata)
+        let root = PathBuf::from(root);
+        match start_root_in_root(root.as_path(), metadata) {
+            Ok(context) => context,
+            Err(err) => {
+                warn!("failed to initialize rollout trace bundle: {err:#}");
+                Self::disabled()
+            }
+        }
     }
 
     /// Starts a root trace in a known directory.
@@ -124,17 +135,16 @@ impl ThreadTraceContext {
         writer: Arc<TraceWriter>,
         root_thread_id: AgentThreadId,
         metadata: ThreadStartedTraceMetadata,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let context = EnabledThreadTraceContext {
             writer,
             root_thread_id,
             thread_id: metadata.thread_id.clone(),
         };
         record_thread_started(&context, metadata);
-        context.writer.check()?;
-        Ok(Self {
+        Self {
             state: ThreadTraceContextState::Enabled(context),
-        })
+        }
     }
 
     /// Returns whether this handle will write trace events.
@@ -147,12 +157,12 @@ impl ThreadTraceContext {
     }
 
     /// Starts a new child thread in this context's rollout tree.
-    pub fn start_child_thread_trace(
+    pub fn start_child_thread_trace_or_disabled(
         &self,
         metadata: ThreadStartedTraceMetadata,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         match &self.state {
-            ThreadTraceContextState::Disabled => Ok(Self::disabled()),
+            ThreadTraceContextState::Disabled => Self::disabled(),
             ThreadTraceContextState::Enabled(context) => Self::start(
                 Arc::clone(&context.writer),
                 context.root_thread_id.clone(),
@@ -162,29 +172,26 @@ impl ThreadTraceContext {
     }
 
     /// Reattaches an evicted child to this rollout without starting a new thread.
-    pub fn resume_child_thread_trace(&self, thread_id: String) -> anyhow::Result<Self> {
+    pub fn resume_child_thread_trace_or_disabled(&self, thread_id: String) -> Self {
         let ThreadTraceContextState::Enabled(parent) = &self.state else {
-            return Ok(Self::disabled());
+            return Self::disabled();
         };
         let context = EnabledThreadTraceContext {
             writer: Arc::clone(&parent.writer),
             root_thread_id: parent.root_thread_id.clone(),
             thread_id: thread_id.clone(),
         };
-        context
-            .writer
-            .append(RawTraceEventPayload::ThreadResumed { thread_id })?;
-        Ok(Self {
+        context.append_best_effort(RawTraceEventPayload::ThreadResumed { thread_id });
+        Self {
             state: ThreadTraceContextState::Enabled(context),
-        })
+        }
     }
 
-    /// Emits terminal trace events when the thread stops.
+    /// Emits terminal trace events for graceful thread shutdown.
     ///
     /// Spawned child sessions share their root bundle, so only the root
-    /// thread end closes the rollout. This is not recording finalization: child
-    /// threads and detached producers may still hold the shared writer.
-    /// Recording errors stay with the writer and prevent the closing event.
+    /// thread end closes the rollout. Child thread ends update the child thread
+    /// execution state without marking the whole bundle complete.
     pub fn record_ended(&self, status: RolloutStatus) {
         let ThreadTraceContextState::Enabled(context) = &self.state else {
             return;
@@ -492,13 +499,15 @@ fn start_root_in_root(
     )?;
     let writer = Arc::new(writer);
 
-    writer.append(RawTraceEventPayload::RolloutStarted {
+    if let Err(err) = writer.append(RawTraceEventPayload::RolloutStarted {
         trace_id,
         root_thread_id: thread_id.clone(),
-    })?;
+    }) {
+        warn!("failed to append rollout trace event: {err:#}");
+    }
 
     debug!("recording rollout trace at {}", bundle_dir.display());
-    ThreadTraceContext::start(writer, thread_id, metadata)
+    Ok(ThreadTraceContext::start(writer, thread_id, metadata))
 }
 
 fn record_thread_started(

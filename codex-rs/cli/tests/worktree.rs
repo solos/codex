@@ -135,19 +135,10 @@ async fn rejected_start(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_worktree_start_and_fork_bind_owner_before_turn() -> anyhow::Result<()> {
-    worktree_start_and_fork("embedded").await
+    worktree_start_and_fork().await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "requires a non-elevated terminal with daemon breakaway support"
-)]
-async fn daemon_worktree_start_and_fork_bind_owner_before_turn() -> anyhow::Result<()> {
-    worktree_start_and_fork("daemon").await
-}
-
-async fn worktree_start_and_fork(backend: &str) -> anyhow::Result<()> {
+async fn worktree_start_and_fork() -> anyhow::Result<()> {
     // Leave room for the local control socket on Unix platforms with short sun_path limits.
     #[cfg(unix)]
     let root = tempfile::Builder::new().tempdir_in("/tmp")?;
@@ -162,7 +153,7 @@ async fn worktree_start_and_fork(backend: &str) -> anyhow::Result<()> {
     for path in [&home, &source, &launcher, &launcher.join("extra")] {
         fs::create_dir(path)?;
     }
-    // Forking without --cd must select the daemon using the resolved project, not this launcher.
+    // Forking without --cd must select the server using the resolved project, not this launcher.
     fs::create_dir(launcher.join(".codex"))?;
     fs::write(
         launcher.join(".codex/config.toml"),
@@ -269,36 +260,6 @@ trust_level = "trusted"
     ] {
         env.remove(key);
     }
-    // Keep the managed package local; no installer or updater participates in this test.
-    struct StopDaemon(Command);
-    impl Drop for StopDaemon {
-        fn drop(&mut self) {
-            let _ = self.0.output();
-        }
-    }
-    let _daemon = if backend == "daemon" {
-        let bin = home.join("packages/app-server-daemon/current/bin");
-        fs::create_dir_all(&bin)?;
-        let managed = bin.join(if cfg!(windows) { "codex.exe" } else { "codex" });
-        // Hard links change the executable's ctime and invalidate Rosetta's translation cache.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(program.canonicalize()?, &managed)?;
-        #[cfg(not(unix))]
-        fs::hard_link(&program, &managed)
-            .or_else(|_| codex_utils_cargo_bin::copy_executable(&program, &managed))?;
-        fs::create_dir(home.join("app-server-daemon"))?;
-        fs::write(
-            home.join("app-server-daemon/settings.json"),
-            r#"{"shutdownGraceSeconds":0,"updater":{"autoUpdateEnabled":false}}"#,
-        )?;
-        let mut daemon_stop = Command::new(&program);
-        daemon_stop
-            .envs(&env)
-            .args(["app-server", "daemon", "stop"]);
-        Some(StopDaemon(daemon_stop))
-    } else {
-        None
-    };
     // Every launch, including rejection cases, exercises the same CLI feature opt-in.
     let worktree_args: Vec<String> = vec![
         "--worktree".into(),
@@ -388,12 +349,6 @@ trust_level = "trusted"
             .mount(&server)
             .await;
         let mut args = worktree_args.clone();
-        if backend == "embedded" && !analytics {
-            args.push("--no-daemon".into());
-        }
-        if backend == "daemon" && previous.is_empty() {
-            args.extend(["-c".into(), "features.auth_elicitation=true".into()]);
-        }
         if fork {
             args.extend([
                 "--add-dir".into(),
@@ -537,25 +492,6 @@ trust_level = "trusted"
         } else {
             Ok(())
         };
-        if backend == "daemon" && !analytics && matches!(observed, Ok(Ok(_))) {
-            session.writer_sender().send(b"/status\r".to_vec()).await?;
-            tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
-                while !output.contains("Local background server") {
-                    let bytes = stdout
-                        .recv()
-                        .await
-                        .context("TUI exited before daemon status")?;
-                    output.push_str(&String::from_utf8_lossy(&bytes));
-                    let replies = queries.feed(&bytes);
-                    if !replies.is_empty() {
-                        session.writer_sender().send(replies).await?;
-                    }
-                }
-                Ok::<_, anyhow::Error>(())
-            })
-            .await
-            .with_context(|| format!("daemon status timed out: {output}"))??;
-        }
         if analytics {
             for reason in ["turn_start", "resize"] {
                 let started = Instant::now();
@@ -610,29 +546,7 @@ trust_level = "trusted"
             );
         }
         if matches!(startup_result, Ok(Ok(()))) && renamed.is_ok() {
-            if !fork && backend == "embedded" {
-                for (input, expected) in [
-                    ("/daemon\r", "Install latest public stable"),
-                    ("\r", "Update and exit"),
-                    ("\x1b[B\r", "Updating the local background server..."),
-                ] {
-                    session
-                        .writer_sender()
-                        .send(input.as_bytes().to_vec())
-                        .await?;
-                    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
-                        while !output.contains(expected) {
-                            let bytes = stdout.recv().await.context("TUI exited before handoff")?;
-                            output.push_str(&String::from_utf8_lossy(&bytes));
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    })
-                    .await
-                    .with_context(|| format!("waiting for {expected}: {output}"))??;
-                }
-            } else {
-                session.writer_sender().send(b"/quit\r".to_vec()).await?;
-            }
+            session.writer_sender().send(b"/quit\r".to_vec()).await?;
         } else {
             session.terminate();
         }
@@ -645,9 +559,7 @@ trust_level = "trusted"
             }
         })
         .await;
-        let elevated_handoff = cfg!(windows)
-            && output.contains("start the Windows daemon from a non-elevated terminal");
-        assert_eq!(exit, i32::from(elevated_handoff), "{output}");
+        assert_eq!(exit, 0, "{output}");
         assert!(!output.contains("The checkout was kept"), "{output}");
         let metrics = server
             .received_requests()
@@ -664,14 +576,6 @@ trust_level = "trusted"
                 .flat_map(|resource| resource["scopeMetrics"].as_array().into_iter().flatten())
                 .flat_map(|scope| scope["metrics"].as_array().into_iter().flatten())
                 .collect::<Vec<_>>();
-            if backend == "embedded" {
-                let update = exported
-                    .iter()
-                    .find(|metric| metric["name"] == "codex.daemon.update")
-                    .context("handoff metric")?;
-                let update_point = &update["sum"]["dataPoints"][0];
-                assert_eq!(update_point["asInt"], 1);
-            }
             let point = exported
                 .iter()
                 .filter(|metric| metric["name"] == "codex.tui.start")
@@ -698,23 +602,11 @@ trust_level = "trusted"
                 ("terminal_columns", "120-239"),
                 ("terminal_rows", "40-79"),
                 ("multiplexer", "none"),
-                ("daemon_selection_reason", "incompatible_option"),
                 ("auto_update", "enabled"),
                 ("auto_update_setting", "default"),
                 ("update_interval_setting", "default"),
                 ("shutdown_grace_setting", "default"),
             ]);
-            #[cfg(windows)]
-            if codex_app_server_daemon::is_elevated()? {
-                expected_tags.insert("daemon_selection_reason", "elevated_windows");
-            }
-            if backend == "daemon" {
-                expected_tags.extend([
-                    ("auto_update", "disabled"),
-                    ("auto_update_setting", "configured"),
-                    ("shutdown_grace_setting", "configured"),
-                ]);
-            }
             assert_eq!(tags, expected_tags);
             let observations = exported
                 .iter()

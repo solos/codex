@@ -1,5 +1,5 @@
 use super::session_lifecycle_requests::recorded_params;
-use super::session_lifecycle_requests::start_recording_remote_app_server;
+use super::session_lifecycle_requests::start_recording_cloud_app_server;
 use super::*;
 use crate::ThreadParamsMode;
 use crate::app_event_sender::AppEventSender;
@@ -16,27 +16,6 @@ use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::unbounded_channel;
-
-#[tokio::test]
-async fn windows_sandbox_setup_uses_local_app_server_connection() {
-    let mut app = make_test_app().await;
-    app.chat_widget.windows_sandbox_local_server = true;
-    assert!(app.windows_sandbox_setup_is_local());
-
-    let endpoint = crate::RemoteAppServerEndpoint::WebSocket {
-        websocket_url: "ws://127.0.0.1:4500".to_string(),
-        auth_token: None,
-    };
-    app.app_server_target = crate::AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: endpoint.clone(),
-    };
-    assert!(app.windows_sandbox_setup_is_local());
-
-    app.app_server_target = crate::AppServerTarget::Remote { endpoint };
-    assert!(!app.windows_sandbox_setup_is_local());
-}
-
 #[tokio::test]
 async fn windows_sandbox_setup_uses_observed_thread_host() {
     let mut app = make_test_app().await;
@@ -585,96 +564,6 @@ async fn startup_draft_handoff_keeps_approval_shortcuts_in_recently_active_compo
 
     Ok(())
 }
-
-#[tokio::test]
-async fn startup_draft_delayed_approval_becomes_protected_on_redraw() -> Result<()> {
-    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-    app.startup_protected_input_boundary = true;
-    let thread_id = ThreadId::new();
-    app.enqueue_primary_thread_session(
-        test_thread_session(thread_id, test_path_buf("/tmp/project")),
-        Vec::new(),
-    )
-    .await?;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
-            websocket_url: "ws://127.0.0.1:1".into(),
-            auth_token: None,
-        },
-    };
-    app.begin_reconnect();
-    assert!(app.startup_protected_input_boundary);
-    // The replacement connection replays the protected request after the old request was dropped.
-    app.reconnect.offline = false;
-
-    let (mut startup_pane, _startup_app_event_rx) = startup_bottom_pane();
-    startup_pane.set_composer_text("draft".to_string(), Vec::new(), Vec::new());
-    let mut draft = startup_pane.composer_draft_snapshot();
-    draft.last_composer_activity_at = Some(Instant::now() - Duration::from_millis(/*millis*/ 950));
-    let mut pending_startup_draft = Some(draft);
-    app.chat_widget
-        .restore_startup_draft_when_ready(&mut pending_startup_draft);
-    // The warning panel owns input but must not mask a later protected modal.
-    app.chat_widget.open_warnings(&[]);
-
-    let approval_request =
-        exec_approval_request(thread_id, "turn-1", "call-1", /*approval_id*/ None);
-    let _ = app
-        .pending_app_server_requests
-        .note_server_request(&approval_request);
-    app.enqueue_primary_thread_request(approval_request).await?;
-    let approval_event = app
-        .active_thread_rx
-        .as_mut()
-        .expect("primary thread receiver should be active")
-        .try_recv()
-        .expect("approval should be queued on the active thread");
-    app.handle_thread_event_now(approval_event);
-    assert!(app.chat_widget.has_active_view());
-    assert!(!app.chat_widget.has_active_modal());
-    assert!(app.startup_pending_protected_request);
-
-    app.handle_tui_event(
-        &mut tui,
-        &mut app_server,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
-    )
-    .await?;
-    assert!(app.startup_protected_input_boundary);
-    assert!(app.startup_pending_protected_request);
-
-    tokio::time::sleep(Duration::from_millis(/*millis*/ 1100)).await;
-    let redraw_result = app
-        .handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
-        .await;
-
-    assert!(app.chat_widget.has_active_modal());
-    assert!(!tui.terminal.viewport_area.is_empty());
-    while let Ok(event) = app_event_rx.try_recv() {
-        assert!(
-            !matches!(event, AppEvent::SubmitThreadOp { .. }),
-            "revealing a delayed startup approval must not submit a decision: {event:?}"
-        );
-    }
-    while let Ok(op) = op_rx.try_recv() {
-        assert!(
-            !matches!(op, Op::ExecApproval { .. } | Op::UserInputAnswer { .. }),
-            "revealing a delayed startup approval must not answer it: {op:?}"
-        );
-    }
-    if let Err(error) = redraw_result {
-        tracing::debug!(error = %error, "test terminal cannot quarantine interactive input");
-    } else {
-        assert!(!app.startup_pending_protected_request);
-    }
-
-    app_server.shutdown().await?;
-    Ok(())
-}
-
 #[tokio::test]
 async fn remotely_resolved_startup_approvals_release_the_draft_after_the_last_request() -> Result<()>
 {
@@ -799,238 +688,6 @@ async fn later_thread_approval_preserves_input_after_startup_boundary_ends() -> 
     app_server.shutdown().await?;
     Ok(())
 }
-
-#[cfg(unix)]
-#[tokio::test]
-async fn unattended_modals_survive_unfinished_terminal_input() -> Result<()> {
-    use std::os::fd::FromRawFd;
-    use std::process::Command;
-    use std::process::Stdio;
-
-    // Isolate crossterm's global parser and give its input poll a real terminal, as in
-    // tui_startup_tests. No key is delivered to the app before the approval.
-    if std::env::var_os("CODEX_UNATTENDED_MODALS_PTY").is_none() {
-        let mut master = -1;
-        let mut slave = -1;
-        // Safety: openpty initializes both file descriptors on success.
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0,
-        );
-        // Safety: openpty transferred ownership of these descriptors.
-        let _master = unsafe { std::fs::File::from_raw_fd(master) };
-        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
-        let output = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "app::tests::startup::unattended_modals_survive_unfinished_terminal_input",
-                "--nocapture",
-            ])
-            .env("CODEX_UNATTENDED_MODALS_PTY", "1")
-            .stdin(Stdio::from(slave))
-            .output()?;
-        assert!(
-            output.status.success(),
-            "PTY child failed: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-        return Ok(());
-    }
-
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    app.startup_protected_input_boundary = true;
-    let thread_id = ThreadId::new();
-    app.enqueue_primary_thread_session(
-        test_thread_session(thread_id, test_path_buf("/tmp/project")),
-        Vec::new(),
-    )
-    .await?;
-    while app_event_rx.try_recv().is_ok() {}
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    let mut app_server =
-        crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    crossterm::event::buffer_input(b"\x1b]10;")?;
-    let request = exec_approval_request(thread_id, "turn-1", "call-1", /*approval_id*/ None);
-    let _ = app
-        .pending_app_server_requests
-        .note_server_request(&request);
-    app.enqueue_primary_thread_request(request).await?;
-    let event = app.active_thread_rx.as_mut().unwrap().try_recv()?;
-    app.handle_active_thread_event(&mut tui, &mut app_server, event)
-        .await?;
-    assert!(app.chat_widget.has_active_modal());
-
-    // A separate tracked request may resolve while the visible approval's input is quarantined.
-    let mut other = exec_approval_request(
-        ThreadId::new(),
-        "turn-2",
-        "call-2",
-        /*approval_id*/ None,
-    );
-    let ServerRequest::CommandExecutionRequestApproval { request_id, params } = &mut other else {
-        unreachable!("exec approval helper returns an exec approval");
-    };
-    *request_id = AppServerRequestId::Integer(2);
-    let resolved = codex_app_server_protocol::ServerRequestResolvedNotification {
-        thread_id: params.thread_id.clone(),
-        request_id: request_id.clone(),
-    };
-    let _ = app.pending_app_server_requests.note_server_request(&other);
-    app.handle_app_server_event(
-        &app_server,
-        codex_app_server_client::AppServerEvent::ServerNotification(Box::new(
-            ServerNotification::ServerRequestResolved(resolved),
-        )),
-    )
-    .await;
-
-    // Action keys inside the unfinished sequence and immediately after its terminator are
-    // still typeahead. Even the first decoded key must retry the drain, not accept the prompt.
-    crossterm::event::buffer_input(b"1y\r\x1b\\y\r")?;
-    let crossterm::event::Event::Key(key) = crossterm::event::read()? else {
-        panic!("expected queued approval shortcut");
-    };
-    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Key(key))
-        .await?;
-    assert!(app.chat_widget.has_active_modal());
-    while let Ok(event) = app_event_rx.try_recv() {
-        assert!(
-            !matches!(event, AppEvent::SubmitThreadOp { .. }),
-            "typeahead answered unattended approval: {event:?}"
-        );
-    }
-
-    let snapshot = app.thread_event_channels[&thread_id]
-        .store
-        .lock()
-        .await
-        .snapshot();
-    // After the drain has settled a fresh explicit decision works normally.
-    app.handle_tui_event(
-        &mut tui,
-        &mut app_server,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
-    )
-    .await?;
-    assert!(!app.chat_widget.has_active_modal());
-
-    // Replay the cached request with the startup boundary already ended.
-    while app_event_rx.try_recv().is_ok() {}
-    app.startup_protected_input_boundary = false;
-    app.config.features.enable(Feature::TuiWorkspace)?;
-    app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Owned;
-    tui.set_owned_screen(/*owned*/ true)?;
-    crossterm::event::buffer_input(b"\rya")?;
-    app.render_thread_snapshot(
-        &mut tui,
-        &app_server,
-        thread_id,
-        snapshot,
-        /*resume_restored_queue*/ false,
-    )?;
-    assert!(app.chat_widget.has_active_modal());
-    let before = tui.terminal.previous_buffer().clone();
-    let cursor = tui.terminal.last_known_cursor_pos;
-    loop {
-        app.render_startup_frame(&mut tui, &app_event_rx)?;
-        assert_eq!(tui.terminal.previous_buffer(), &before);
-        assert_eq!(tui.terminal.last_known_cursor_pos, cursor);
-        let event = app_event_rx.try_recv()?;
-        let finished = matches!(event, AppEvent::SideReplayFinished(id) if id == thread_id);
-        boxed_future!(app.handle_event(&mut tui, &mut app_server, event)).await?;
-        if finished {
-            break;
-        }
-    }
-    assert!(crossterm::event::poll(std::time::Duration::ZERO)?);
-    app.render_startup_frame(&mut tui, &app_event_rx)?;
-    assert!(buffer_text(tui.terminal.previous_buffer()).contains("echo hello"));
-    assert!(!crossterm::event::poll(std::time::Duration::ZERO)?);
-    tui.set_owned_screen(/*owned*/ false)?;
-
-    // Overview can open before the first real input, and survives a server reconnect.
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    app.startup_protected_input_boundary = true;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?,
-    };
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        super::disconnect::serve_reconnect_requests(
-            tokio_tungstenite::accept_async(stream).await?,
-            |request| {
-                std::future::ready(Some(match request.method.as_str() {
-                    "thread/list" | "thread/loaded/list" => {
-                        serde_json::json!({"result": {"data": [], "nextCursor": null}})
-                    }
-                    method => panic!("unexpected overview reconnect request: {method}"),
-                }))
-            },
-        )
-        .await
-    });
-    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    crossterm::event::buffer_input(b"\x1b]10;")?;
-    app.render_startup_frame(&mut tui, &app_event_rx)?;
-    assert!(app.begin_reconnect());
-    let connected = super::super::reconnect::reconnect(
-        app_server.backend_id(),
-        app.app_server_target.clone(),
-        app.config.clone(),
-        app.local_settings.clone(),
-        /*thread_id*/ None,
-        /*remote_cwd*/ None,
-        app_server.thread_tool_transport(),
-        super::super::reconnect::ReconnectPresentation::Overview,
-    )
-    .await?;
-    app.finish_reconnect(
-        &mut tui,
-        &mut app_server,
-        &mut app_event_rx,
-        connected,
-        CODEX_CLI_VERSION,
-    )
-    .await?;
-
-    crossterm::event::buffer_input(b"1n\r\x1b\\n\r")?;
-    let crossterm::event::Event::Key(key) = crossterm::event::read()? else {
-        panic!("expected queued overview shortcut");
-    };
-    app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Key(key))
-        .await?;
-    assert!(
-        !std::iter::from_fn(|| app_event_rx.try_recv().ok())
-            .any(|event| matches!(event, AppEvent::NewAgentsOverviewSession { .. })),
-        "typeahead created a task in restored Overview"
-    );
-    app.handle_tui_event(
-        &mut tui,
-        &mut app_server,
-        TuiEvent::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
-    )
-    .await?;
-    assert!(
-        std::iter::from_fn(|| app_event_rx.try_recv().ok())
-            .any(|event| matches!(event, AppEvent::NewAgentsOverviewSession { .. })),
-        "fresh Overview shortcut should create a task"
-    );
-    app_server.shutdown().await?;
-    server.await??;
-    Ok(())
-}
-
 #[tokio::test]
 async fn auto_declined_mcp_elicitations_do_not_leave_startup_quarantine_armed() {
     for replay in [false, true] {
@@ -1165,13 +822,11 @@ async fn fresh_startup_thread_drains_buffered_approval_before_draft_handoff() ->
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
-    let backend_id = app_server.backend_id();
 
     let control = Box::pin(app.handle_event(
         &mut tui,
         &mut app_server,
         AppEvent::StartupThreadStarted {
-            backend_id,
             result: Ok(AppServerStartedThread {
                 session: test_thread_session(thread_id, test_path_buf("/tmp/project")),
                 turns: Vec::new(),
@@ -1407,115 +1062,6 @@ async fn startup_thread_started_submits_queued_startup_input() {
         ),
         other => panic!("expected queued startup input submission, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn fresh_startup_notice_follows_session_attachment() {
-    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
-    app.pending_startup_thread_start = true;
-    app.pending_server_version_notice =
-        Some(crate::status::remote_connection::ServerVersionNotice {
-            message: "Older server notice".to_string(),
-            offer_update: false,
-        });
-    assert!(events.try_recv().is_err());
-
-    let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
-        .await
-        .expect("embedded app server");
-    app.handle_startup_thread_started(
-        &mut app_server,
-        Ok(AppServerStartedThread {
-            session: test_thread_session(ThreadId::new(), test_path_buf("/tmp/project")),
-            turns: Vec::new(),
-            blocks_direct_input: false,
-            task_tools_available: false,
-        }),
-    )
-    .await
-    .expect("startup thread should attach");
-
-    let cells = std::iter::from_fn(|| events.try_recv().ok())
-        .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => Some(cell),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(cells.len() > 1, "session history should precede the notice");
-    insta::assert_snapshot!(lines_to_single_string(&cells.last().unwrap().transcript_lines(/*width*/ 80)), @"⚠ Older server notice");
-    assert_eq!(app.pending_server_version_notice, None);
-}
-
-#[tokio::test]
-async fn remote_overview_startup_hides_disabled_older_server_notice() -> Result<()> {
-    let mut app = make_test_app().await;
-    app.local_settings.tui.show_server_version_notice = false;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: endpoint.clone(),
-    };
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        super::disconnect::serve_reconnect_requests(
-            tokio_tungstenite::accept_async(stream).await?,
-            |_request| std::future::ready(None),
-        )
-        .await
-    });
-    let session = AppServerSession::new(
-        crate::backend_id::BackendId::new(),
-        crate::connect_remote_app_server(endpoint).await?,
-        ThreadParamsMode::Remote,
-    );
-
-    assert!(crate::app::safety_recourse::supports_server(&session));
-    assert_eq!(
-        app.initialize_server_version_notice("2.1.0", session.server_version()),
-        None
-    );
-    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
-    assert!(!rendered.contains("Service v"));
-    app.chat_widget.remote_connection =
-        crate::status::remote_connection::remote_connection_status_value(
-            &app.app_server_target,
-            session.server_version(),
-        );
-    assert_eq!(
-        app.chat_widget
-            .remote_connection
-            .as_ref()
-            .expect("remote status")
-            .version,
-        "v2.0.0"
-    );
-    app.local_settings.tui.show_server_version_notice = true;
-    app.refresh_server_version_overview_notice("2.1.0");
-    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
-    assert!(rendered.contains("Service v2.0.0 < Codex CLI v2.1.0"));
-    app.pending_server_version_notice =
-        Some(crate::status::remote_connection::ServerVersionNotice {
-            message: "Older service".to_string(),
-            offer_update: false,
-        });
-    app.reconnect.seen_version_notice = Some("old-key".to_string());
-    app.local_settings.tui.show_server_version_notice = false;
-    app.refresh_server_version_overview_notice("2.1.0");
-    assert_eq!(app.pending_server_version_notice, None);
-    assert_eq!(app.reconnect.seen_version_notice, None);
-    assert_eq!(
-        app.agents_overview
-            .view_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .server_version_notice,
-        None
-    );
-    session.shutdown().await?;
-    server.await??;
-    Ok(())
 }
 
 #[tokio::test]
@@ -1931,46 +1477,35 @@ async fn ignore_same_thread_resume_allows_retrying_read_only_view() -> Result<()
 }
 
 #[tokio::test]
-async fn read_only_startup_keeps_initial_prompt_as_draft() -> Result<()> {
-    for provider_unavailable in [false, true] {
-        let (mut app, mut events, _operations) = make_test_app_with_channels().await;
-        let thread_id = ThreadId::new();
-        let prompt = "Continue after the other app closes";
-        set_test_initial_prompt(&mut app, prompt.to_string());
-        if provider_unavailable {
-            app.chat_widget.show_provider_error(
-                codex_app_server_protocol::ModelProviderError::ModelProviderNotConfigured {
-                    model_provider: "missing".into(),
-                },
-                /*rejected_message_id*/ None,
-            );
-        } else {
-            app.chat_widget.show_external_writer_thread();
-        }
-        app.enqueue_primary_thread_session(
-            test_thread_session(thread_id, test_path_buf("/tmp/project")),
-            Vec::new(),
-        )
-        .await?;
+async fn external_writer_startup_keeps_initial_prompt_as_draft() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    let thread_id = ThreadId::new();
+    let prompt = "Continue after the other app closes";
+    set_test_initial_prompt(&mut app, prompt.to_string());
+    app.chat_widget.show_external_writer_thread();
+    app.enqueue_primary_thread_session(
+        test_thread_session(thread_id, test_path_buf("/tmp/project")),
+        Vec::new(),
+    )
+    .await?;
 
-        assert_eq!(app.chat_widget.composer_text_with_pending(), prompt);
-        assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
-            matches!(
-                event,
-                AppEvent::SubmitThreadOp {
-                    op: Op::UserTurn { .. },
-                    ..
-                } | AppEvent::CodexOp(Op::UserTurn { .. })
-            )
-        }));
-    }
+    assert_eq!(app.chat_widget.composer_text_with_pending(), prompt);
+    assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+        matches!(
+            event,
+            AppEvent::SubmitThreadOp {
+                op: Op::UserTurn { .. },
+                ..
+            } | AppEvent::CodexOp(Op::UserTurn { .. })
+        )
+    }));
     Ok(())
 }
 
 #[tokio::test]
 async fn windows_sandbox_config_refresh_uses_connected_server() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
-    let (server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     std::fs::write(
         app.config.codex_home.join("config.toml"),
         "[windows]\nsandbox = \"unelevated\"\n",
@@ -2030,144 +1565,5 @@ async fn windows_sandbox_config_refresh_uses_connected_server() -> Result<()> {
     ));
     recovered.shutdown().await?;
     server.shutdown().await?;
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum ProviderResumeRoute {
-    SameThread,
-    Overview,
-    Picker,
-}
-
-#[tokio::test]
-async fn provider_resume_keeps_history_readable_and_retries_after_configuration_restored()
--> Result<()> {
-    check_provider_resume_retries(ProviderResumeRoute::SameThread).await
-}
-
-#[tokio::test]
-async fn provider_resume_retries_via_overview_preserve_fresh_errors_and_drafts() -> Result<()> {
-    check_provider_resume_retries(ProviderResumeRoute::Overview).await
-}
-
-#[tokio::test]
-async fn provider_resume_retries_via_picker_preserve_fresh_errors_and_drafts() -> Result<()> {
-    check_provider_resume_retries(ProviderResumeRoute::Picker).await
-}
-
-async fn check_provider_resume_retries(reopen_via: ProviderResumeRoute) -> Result<()> {
-    for provider_configured in [false, true] {
-        let mut app = Box::pin(make_test_app()).await;
-        let home = app.config.codex_home.clone();
-        let definition = "[model_providers.missing_provider]\nname = 'Saved provider'\nbase_url = 'http://127.0.0.1:12345/v1'\nwire_api = 'responses'\n";
-        let config = if provider_configured {
-            format!("[tui]\nresume_cwd = 'current'\n{definition}")
-        } else {
-            "[tui]\nresume_cwd = 'current'\n".to_string()
-        };
-        std::fs::write(home.join("config.toml"), config)?;
-        crate::legacy_core::config::set_project_trust_level(
-            home.as_path(),
-            app.config.cwd.as_path(),
-            codex_protocol::config_types::TrustLevel::Trusted,
-        )
-        .map_err(std::io::Error::other)?;
-        let thread_id = ThreadId::from_string(
-            &app_test_support::create_fake_rollout(
-                home.as_path(),
-                "2025-01-05T12-00-00",
-                "2025-01-05T12:00:00Z",
-                "Saved provider history",
-                Some("missing_provider"),
-                /*git_info*/ None,
-            )
-            .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?,
-        )?;
-        let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-        let mut tui = crate::tui::test_support::make_test_tui()?;
-        let target = crate::resume_picker::SessionTarget {
-            backend_id: server.backend_id(),
-            path: None,
-            thread_id,
-            cwd: None,
-            history_mode: None,
-        };
-        Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone())).await?;
-        assert!(app.chat_widget.has_provider_error());
-        assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
-        let turns = app.thread_event_channels[&thread_id]
-            .store
-            .lock()
-            .await
-            .snapshot()
-            .turns;
-        assert!(serde_json::to_string(&turns)?.contains("Saved provider history"));
-        assert!(!app.ignore_same_thread_resume(&target));
-        app.chat_widget
-            .apply_external_edit("Preserved draft".into());
-        for current_provider in ["other_provider", "missing_provider"] {
-            if !matches!(reopen_via, ProviderResumeRoute::SameThread) {
-                let other_id = ThreadId::from_string(
-                    &app_test_support::create_fake_rollout(
-                        home.as_path(),
-                        "2025-01-05T13-00-00",
-                        "2025-01-05T13:00:00Z",
-                        "Other chat",
-                        Some("openai"),
-                        /*git_info*/ None,
-                    )
-                    .expect("other chat"),
-                )?;
-                Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, other_id))
-                    .await?;
-                assert_eq!(app.chat_widget.thread_id(), Some(other_id));
-                assert!(
-                    app.agents_overview.input_states[&thread_id]
-                        .provider_error
-                        .is_some()
-                );
-            }
-            std::fs::write(
-                home.join("config.toml"),
-                format!(
-                    "model_provider = '{current_provider}'\n[tui]\nresume_cwd = 'current'\n{definition}\n{}",
-                    definition.replace("missing_provider", "other_provider")
-                ),
-            )?;
-            match reopen_via {
-                ProviderResumeRoute::Overview => {
-                    Box::pin(app.select_agents_overview_thread(&mut tui, &mut server, thread_id))
-                        .await?;
-                }
-                ProviderResumeRoute::Picker => {
-                    Box::pin(app.apply_resume_picker_selection(
-                        &mut tui,
-                        &mut server,
-                        SessionSelection::Resume(target.clone()),
-                    ))
-                    .await?;
-                }
-                ProviderResumeRoute::SameThread => {
-                    Box::pin(app.resume_target_session(&mut tui, &mut server, target.clone()))
-                        .await?;
-                }
-            }
-            let input = app.chat_widget.capture_thread_input_state().unwrap();
-            let expected_error = (current_provider != "missing_provider").then(|| {
-                codex_app_server_protocol::ModelProviderError::ModelProviderMismatch {
-                    model_provider: "missing_provider".into(),
-                    current_model_provider: current_provider.into(),
-                }
-            });
-            assert_eq!(input.provider_error, expected_error);
-            assert_eq!(app.chat_widget.thread_id(), Some(thread_id));
-            assert_eq!(
-                app.chat_widget.composer_text_with_pending(),
-                "Preserved draft"
-            );
-        }
-        server.shutdown().await?;
-    }
     Ok(())
 }

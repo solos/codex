@@ -279,12 +279,8 @@ impl AccountRequestProcessor {
     async fn maybe_refresh_plugin_caches_for_current_config(
         config_manager: &ConfigManager,
         thread_manager: &Arc<ThreadManager>,
-        auth: Option<CodexAuth>,
+        _auth: Option<CodexAuth>,
     ) {
-        thread_manager
-            .plugins_manager()
-            .clear_recommended_plugins_cache();
-
         match config_manager
             .load_latest_config(/*fallback_cwd*/ None)
             .await
@@ -294,35 +290,11 @@ impl AccountRequestProcessor {
                     Arc::clone(thread_manager),
                     config_manager.clone(),
                 );
-                let plugins_config = config.plugins_config_input();
-                let refresh_thread_manager = Arc::clone(thread_manager);
-                let refresh_config_manager = config_manager.clone();
-                let on_effective_plugins_changed: Arc<
-                    dyn Fn(codex_core_plugins::EffectivePluginsChange) + Send + Sync,
-                > = Arc::new(move |_change| {
-                    Self::spawn_effective_plugins_changed_task(
-                        Arc::clone(&refresh_thread_manager),
-                        refresh_config_manager.clone(),
-                    );
-                });
-                thread_manager
-                    .plugins_manager()
-                    .maybe_start_curated_repo_sync_for_config(
-                        &plugins_config,
-                        Some(Arc::clone(&on_effective_plugins_changed)),
-                    );
-                thread_manager
-                    .plugins_manager()
-                    .maybe_start_remote_plugin_caches_refresh(
-                        &plugins_config,
-                        auth,
-                        /*prefetch_recommendations*/ true,
-                        Some(on_effective_plugins_changed),
-                    );
+                let _ = config;
             }
             Err(err) => {
                 warn!(
-                    "failed to reload config after account changed, skipping remote installed plugins cache refresh: {err}"
+                    "failed to reload config after account changed, skipping plugin cache refresh: {err}"
                 );
             }
         }

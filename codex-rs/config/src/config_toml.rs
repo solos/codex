@@ -142,17 +142,9 @@ of strings; comma-separated strings are not supported. Use \
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct OrchestratorToml {
-    /// Legacy no-op setting retained for compatibility. Use `cloud.skills` to configure cloud skills.
+    /// Legacy no-op setting retained for compatibility.
     pub skills: Option<FeatureToggleToml>,
     pub mcp: Option<FeatureToggleToml>,
-}
-
-/// Cloud-owned feature settings.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct CloudToml {
-    /// Cloud skills are permitted by default; the host must supply a cloud provider.
-    pub skills: Option<FeatureToggleToml>,
 }
 
 /// Optional enablement of a configured feature.
@@ -428,9 +420,6 @@ pub struct ConfigToml {
     /// Orchestrator-owned feature settings.
     pub orchestrator: Option<OrchestratorToml>,
 
-    /// Cloud-owned feature settings.
-    pub cloud: Option<CloudToml>,
-
     /// Base URL override for the built-in `openai` model provider.
     pub openai_base_url: Option<String>,
 
@@ -598,9 +587,6 @@ pub struct AutoReviewToml {
     /// Experimental replacement for the history-retrieval instructions when history tools
     /// and Apps are enabled. Omitted or blank values use the built-in prompt.
     pub experimental_conversation_history_prompt: Option<String>,
-    /// Developer message used when `features.guardian_denial_reconsideration` is enabled.
-    /// Omitted or blank values use the built-in prompt. Maximum 1,000 UTF-8 bytes.
-    pub experimental_denial_reconsideration_prompt: Option<String>,
     /// Maximum estimated tokens per Guardian history-tool response, before the standard
     /// serialization allowance. Defaults to 4,000; stricter parent tool limits still apply.
     pub conversation_history_max_output_tokens: Option<NonZeroUsize>,
@@ -709,8 +695,6 @@ pub struct RealtimeAudioToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolsToml {
-    /// Client provider preference when the model does not select a provider.
-    pub client_search_provider: Option<codex_protocol::openai_models::WebSearchProvider>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_web_search_tool_config"
@@ -848,16 +832,6 @@ pub fn effective_sandbox_mode(
         SandboxMode::ReadOnly
     } else {
         mode
-    }
-}
-
-impl TryFrom<toml::Value> for ConfigToml {
-    type Error = toml::de::Error;
-
-    // Keep the generated TOML deserializer in this crate, shared by all callers.
-    #[inline(never)]
-    fn try_from(value: toml::Value) -> Result<Self, Self::Error> {
-        value.try_into()
     }
 }
 

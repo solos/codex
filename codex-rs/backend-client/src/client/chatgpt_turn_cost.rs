@@ -57,7 +57,7 @@ impl Client {
         };
         let request = self
             .request(Method::POST, &url)
-            .headers(self.headers().await?)
+            .headers(self.headers()?)
             .json(&TurnCostsRequest {
                 threads: threads
                     .iter()

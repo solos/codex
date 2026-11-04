@@ -6,7 +6,6 @@ use app_test_support::ChatGptAuthFixture;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
-use app_test_support::start_analytics_events_server;
 use app_test_support::write_chatgpt_auth;
 #[cfg(unix)]
 use codex_app_server_protocol::ConfigReadParams;
@@ -56,8 +55,6 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use tokio::time::timeout;
-
-use super::analytics::wait_for_analytics_event;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 const SECONDARY_MIGRATION_SOURCE: &str = concat!("cur", "sor");
@@ -610,7 +607,6 @@ source = {:?}
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -1307,551 +1303,6 @@ async fn external_agent_config_detects_and_imports_project_memory_files(
 }
 
 #[tokio::test]
-async fn external_agent_config_import_reports_failed_sync_import_in_completion() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    let source_home = external_agent_home(codex_home.path());
-    std::fs::create_dir_all(&source_home)?;
-    std::fs::write(
-        source_home.join("settings.json"),
-        r#"{"env":{"FOO":"bar"}}"#,
-    )?;
-    std::fs::write(codex_home.path().join("config.toml"), "invalid = [")?;
-    let home_dir = codex_home.path().display().to_string();
-    let analytics_capture_file = codex_home.path().join("analytics-events.jsonl");
-    let analytics_capture_file = analytics_capture_file.display().to_string();
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[
-            ("HOME", Some(home_dir.as_str())),
-            (
-                "CODEX_ANALYTICS_EVENTS_CAPTURE_FILE",
-                Some(analytics_capture_file.as_str()),
-            ),
-        ])
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-
-    let request_id = mcp
-        .send_raw_request(
-            "externalAgentConfig/import",
-            Some(serde_json::json!({
-                "source": "test_import",
-                "providerId": "test-provider-42",
-                "migrationItems": [
-                    {
-                        "itemType": "CONFIG",
-                        "description": "Import config",
-                        "cwd": null
-                    },
-                    {
-                        "itemType": "COMMANDS",
-                        "description": "Import commands",
-                        "cwd": null
-                    }
-                ]
-            })),
-        )
-        .await?;
-
-    let response: ExternalAgentConfigImportResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    let import_id = assert_import_response(response);
-
-    let completed: ExternalAgentConfigImportCompletedNotification = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_notification("externalAgentConfig/import/completed"),
-    )
-    .await??;
-    assert_eq!(completed.import_id, import_id);
-    let config_result = completed
-        .item_type_results
-        .iter()
-        .find(|result| result.item_type == ExternalAgentConfigMigrationItemType::Config)
-        .expect("config result");
-    assert!(config_result.successes.is_empty());
-    assert_eq!(config_result.failures.len(), 1);
-    let config_failure = &config_result.failures[0];
-    assert_eq!(
-        config_failure.error_type.as_deref(),
-        Some("invalid_existing_config")
-    );
-    assert_eq!(config_failure.failure_stage, "import_request_failed");
-    assert!(
-        config_failure
-            .message
-            .contains("invalid existing config.toml"),
-        "unexpected failure: {config_failure:?}"
-    );
-    let commands_result = completed
-        .item_type_results
-        .iter()
-        .find(|result| result.item_type == ExternalAgentConfigMigrationItemType::Commands)
-        .expect("commands result");
-    assert!(commands_result.successes.is_empty());
-    assert!(commands_result.failures.is_empty());
-
-    let events = timeout(DEFAULT_TIMEOUT, async {
-        loop {
-            let contents = match std::fs::read_to_string(&analytics_capture_file) {
-                Ok(contents) => contents,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    continue;
-                }
-                Err(err) => return Err(err.into()),
-            };
-            let mut captured_events = Vec::new();
-            for line in contents.lines() {
-                let payload: serde_json::Value = serde_json::from_str(line)?;
-                let Some(events) = payload["events"].as_array() else {
-                    continue;
-                };
-                captured_events.extend(events.iter().cloned());
-            }
-            if captured_events.iter().any(|event| {
-                event["event_type"] == "codex_onboarding_external_agent_import_complete"
-                    && event["event_params"]["type"] == "COMMANDS"
-            }) {
-                return Ok::<Vec<serde_json::Value>, anyhow::Error>(captured_events);
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await??;
-    let event = events
-        .iter()
-        .find(|event| {
-            event["event_type"] == "codex_onboarding_external_agent_import_failure"
-                && event["event_params"]["type"] == "CONFIG"
-        })
-        .expect("config failure analytics event");
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["import_id"], import_id);
-    assert_eq!(event_params["source"], "test_import");
-    assert_eq!(event_params["provider_id"], "test-provider-42");
-    assert_eq!(event_params["type"], "CONFIG");
-    assert_eq!(event_params["failure_stage"], "import_request_failed");
-    assert_eq!(event_params["error_type"], "invalid_existing_config");
-    assert!(event_params.get("raw_errors").is_none());
-    assert!(event_params.get("message").is_none());
-    assert!(!events.iter().any(|event| {
-        event["event_type"] == "codex_onboarding_external_agent_import_failure"
-            && event["event_params"]["type"] == "COMMANDS"
-    }));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_agent_config_import_completed_tracks_analytics_event() -> Result<()> {
-    let analytics_server = start_analytics_events_server().await?;
-    let codex_home = TempDir::new()?;
-    write_analytics_config(codex_home.path(), &analytics_server.uri())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-
-    let missing_session_path =
-        external_agent_home(codex_home.path()).join("projects/repo/missing.jsonl");
-    let project_root = codex_home.path().join("repo");
-    let home_dir = codex_home.path().display().to_string();
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[("HOME", Some(home_dir.as_str()))])
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-
-    let request_id = mcp
-        .send_raw_request(
-            "externalAgentConfig/import",
-            Some(serde_json::json!({
-                "source": "test_import",
-                "providerId": "test-provider-42",
-                "migrationSource": SECONDARY_MIGRATION_SOURCE,
-                "migrationItems": [{
-                    "itemType": "SESSIONS",
-                    "description": "Migrate recent sessions",
-                    "cwd": null,
-                    "details": {
-                        "sessions": [{
-                            "path": missing_session_path,
-                            "cwd": project_root,
-                            "title": "missing session"
-                        }]
-                    }
-                }]
-            })),
-        )
-        .await?;
-    let response: ExternalAgentConfigImportResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    let import_id = assert_import_response(response);
-
-    let completed: ExternalAgentConfigImportCompletedNotification = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_notification("externalAgentConfig/import/completed"),
-    )
-    .await??;
-    assert_eq!(completed.import_id, import_id);
-    assert_eq!(completed.item_type_results.len(), 1);
-    assert_eq!(completed.item_type_results[0].successes.len(), 0);
-    assert_eq!(completed.item_type_results[0].failures.len(), 1);
-    assert_eq!(
-        completed.item_type_results[0].failures[0]
-            .sub_error_type
-            .as_deref(),
-        Some("session_not_detected")
-    );
-
-    let event = wait_for_analytics_event(
-        &analytics_server,
-        DEFAULT_TIMEOUT,
-        "codex_onboarding_external_agent_import_complete",
-    )
-    .await?;
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["import_id"], serde_json::json!(import_id));
-    assert_eq!(event_params["source"], "test_import");
-    assert_eq!(event_params["provider_id"], "test-provider-42");
-    assert_eq!(event_params["type"], "SESSIONS");
-    assert_eq!(event_params["success_count"], 0);
-    assert_eq!(event_params["failed_count"], 1);
-    assert!(event_params.get("raw_errors").is_none());
-
-    let event = wait_for_analytics_event(
-        &analytics_server,
-        DEFAULT_TIMEOUT,
-        "codex_onboarding_external_agent_import_failure",
-    )
-    .await?;
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["import_id"], serde_json::json!(import_id));
-    assert_eq!(event_params["source"], "test_import");
-    assert_eq!(event_params["provider_id"], "test-provider-42");
-    assert_eq!(event_params["type"], "SESSIONS");
-    assert_eq!(event_params["failure_stage"], "session_missing");
-    assert_eq!(event_params["error_type"], "session_missing");
-    assert_eq!(event_params["sub_error_type"], "session_not_detected");
-    assert!(event_params.get("raw_errors").is_none());
-    assert!(event_params.get("message").is_none());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_agent_config_import_reports_session_config_error_subtype() -> Result<()> {
-    let analytics_server = start_analytics_events_server().await?;
-    let codex_home = TempDir::new()?;
-    write_analytics_config(codex_home.path(), &analytics_server.uri())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-
-    let project_root = codex_home.path().join("repo");
-    let session_dir = external_agent_home(codex_home.path()).join("projects/repo");
-    let session_path = session_dir.join("session.jsonl");
-    let recent_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    std::fs::create_dir_all(&project_root)?;
-    std::fs::create_dir_all(&session_dir)?;
-    std::fs::write(
-        &session_path,
-        serde_json::json!({
-            "type": "user",
-            "cwd": &project_root,
-            "timestamp": &recent_timestamp,
-            "message": { "content": "first request" },
-        })
-        .to_string(),
-    )?;
-
-    let home_dir = codex_home.path().display().to_string();
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[("HOME", Some(home_dir.as_str()))])
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-    std::fs::write(
-        codex_home.path().join("config.toml"),
-        "chatgpt_base_url = [",
-    )?;
-
-    let request_id = mcp
-        .send_raw_request(
-            "externalAgentConfig/import",
-            Some(serde_json::json!({
-                "source": "test_import",
-                "providerId": "test-provider-42",
-                "migrationItems": [{
-                    "itemType": "SESSIONS",
-                    "description": "Migrate recent sessions",
-                    "cwd": null,
-                    "details": {
-                        "sessions": [{
-                            "path": session_path,
-                            "cwd": project_root,
-                            "title": "first request"
-                        }]
-                    }
-                }]
-            })),
-        )
-        .await?;
-    let response: ExternalAgentConfigImportResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    let import_id = assert_import_response(response);
-    let completed: ExternalAgentConfigImportCompletedNotification = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_notification("externalAgentConfig/import/completed"),
-    )
-    .await??;
-    assert_eq!(completed.import_id, import_id);
-    assert_eq!(completed.item_type_results.len(), 1);
-    assert_eq!(completed.item_type_results[0].successes.len(), 0);
-    assert_eq!(completed.item_type_results[0].failures.len(), 1);
-    let failure = &completed.item_type_results[0].failures[0];
-    assert_eq!(failure.failure_stage, "session_persist");
-    assert_eq!(
-        failure.sub_error_type.as_deref(),
-        Some("failed_to_load_session_config_invalid_data")
-    );
-
-    let event = wait_for_analytics_event(
-        &analytics_server,
-        DEFAULT_TIMEOUT,
-        "codex_onboarding_external_agent_import_failure",
-    )
-    .await?;
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["import_id"], serde_json::json!(import_id));
-    assert_eq!(event_params["source"], "test_import");
-    assert_eq!(event_params["provider_id"], "test-provider-42");
-    assert_eq!(event_params["type"], "SESSIONS");
-    assert_eq!(event_params["failure_stage"], "session_persist");
-    assert_eq!(
-        event_params["sub_error_type"],
-        "failed_to_load_session_config_invalid_data"
-    );
-    assert!(event_params.get("raw_errors").is_none());
-    assert!(event_params.get("message").is_none());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn external_agent_config_import_reinstalls_plugins_from_known_marketplaces() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let analytics_server = start_analytics_events_server().await?;
-    write_analytics_config(codex_home.path(), &analytics_server.uri())?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
-    let marketplace_root = codex_home.path().join("marketplace");
-    let plugin_root = marketplace_root.join("plugins").join("sample");
-    std::fs::create_dir_all(marketplace_root.join(".agents/plugins"))?;
-    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
-    std::fs::write(
-        marketplace_root.join(".agents/plugins/marketplace.json"),
-        r#"{
-  "name": "debug",
-  "plugins": [
-    {
-      "name": "sample",
-      "source": {
-        "source": "local",
-        "path": "./plugins/sample"
-      }
-    }
-  ]
-}"#,
-    )?;
-    std::fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample","version":"0.1.0"}"#,
-    )?;
-    let source_home = external_agent_home(codex_home.path());
-    std::fs::create_dir_all(source_home.join("plugins"))?;
-    let settings = serde_json::json!({
-        "enabledPlugins": {
-            "missing@debug": true,
-            "sample@debug": true,
-        },
-        "extraKnownMarketplaces": {
-            "debug": {
-                "source": {
-                    "source": "file",
-                    "path": marketplace_root.join(".agents/plugins/marketplace.json"),
-                }
-            }
-        }
-    });
-    std::fs::write(
-        source_home.join("settings.json"),
-        serde_json::to_string_pretty(&settings)?,
-    )?;
-    std::fs::write(
-        source_home.join("plugins/known_marketplaces.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "debug": {
-                "source": {
-                    "source": "file",
-                    "path": marketplace_root.join(".agents/plugins/marketplace.json"),
-                },
-                "installLocation": marketplace_root,
-                "lastUpdated": "2026-07-09T00:16:23.611Z",
-            }
-        }))?,
-    )?;
-
-    let home_dir = codex_home.path().display().to_string();
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .with_env_overrides(&[("HOME", Some(home_dir.as_str()))])
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-
-    let request_id = mcp
-        .send_raw_request(
-            "externalAgentConfig/detect",
-            Some(serde_json::json!({ "includeHome": true })),
-        )
-        .await?;
-    let detected: ExternalAgentConfigDetectResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    assert_eq!(detected.items.len(), 1);
-    assert_eq!(
-        detected.items[0].item_type,
-        ExternalAgentConfigMigrationItemType::Plugins
-    );
-    assert_eq!(
-        detected.items[0]
-            .details
-            .as_ref()
-            .map(|details| details.plugins.clone()),
-        Some(vec![codex_app_server_protocol::PluginsMigration {
-            marketplace_name: "debug".to_string(),
-            plugin_names: vec!["missing".to_string(), "sample".to_string()],
-        }])
-    );
-
-    let request_id = mcp
-        .send_raw_request(
-            "externalAgentConfig/import",
-            Some(serde_json::json!({ "migrationItems": detected.items })),
-        )
-        .await?;
-    let response: ExternalAgentConfigImportResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-
-    let import_id = assert_import_response(response);
-    let completed: ExternalAgentConfigImportCompletedNotification = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_notification("externalAgentConfig/import/completed"),
-    )
-    .await??;
-    assert_eq!(completed.import_id, import_id);
-    assert_eq!(completed.item_type_results.len(), 1);
-    let plugin_result = &completed.item_type_results[0];
-    assert_eq!(
-        plugin_result.item_type,
-        ExternalAgentConfigMigrationItemType::Plugins
-    );
-    assert_eq!(plugin_result.successes.len(), 1);
-    assert_eq!(
-        plugin_result.successes[0].source.as_deref(),
-        Some("sample@debug")
-    );
-    assert_eq!(plugin_result.failures.len(), 1);
-    assert_eq!(
-        plugin_result.failures[0].source.as_deref(),
-        Some("missing@debug")
-    );
-    assert_eq!(
-        plugin_result.failures[0].error_type.as_deref(),
-        Some("plugin_not_found")
-    );
-    assert_eq!(plugin_result.failures[0].failure_stage, "plugin_import");
-    assert_eq!(
-        plugin_result.failures[0].message,
-        "plugin `missing` was not found in marketplace `debug`"
-    );
-
-    let event = wait_for_analytics_event(
-        &analytics_server,
-        DEFAULT_TIMEOUT,
-        "codex_plugin_install_failed",
-    )
-    .await?;
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["plugin_id"], "missing@debug");
-    assert_eq!(event_params["plugin_name"], "missing");
-    assert_eq!(event_params["marketplace_name"], "debug");
-    assert_eq!(event_params["source"], "external_agent_migration");
-    assert_eq!(event_params["error_type"], "plugin_not_found");
-
-    let event = wait_for_analytics_event(
-        &analytics_server,
-        DEFAULT_TIMEOUT,
-        "codex_onboarding_external_agent_import_failure",
-    )
-    .await?;
-    let event_params = &event["event_params"];
-    assert_eq!(event_params["type"], "PLUGINS");
-    assert_eq!(event_params["failure_stage"], "plugin_import");
-    assert_eq!(event_params["error_type"], "plugin_not_found");
-
-    let request_id = mcp
-        .send_plugin_list_request(PluginListParams {
-            cwds: None,
-            marketplace_kinds: None,
-            force_refetch: false,
-        })
-        .await?;
-    let response: PluginListResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-    let plugin = response
-        .marketplaces
-        .iter()
-        .find(|marketplace| marketplace.name == "debug")
-        .and_then(|marketplace| {
-            marketplace
-                .plugins
-                .iter()
-                .find(|plugin| plugin.name == "sample")
-        })
-        .expect("expected imported plugin to be listed");
-    assert!(plugin.installed);
-    assert!(plugin.enabled);
-    Ok(())
-}
-
-#[tokio::test]
 async fn external_agent_config_import_sends_completion_notification_after_pending_plugins_finish()
 -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -2067,7 +1518,6 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2261,7 +1711,6 @@ required = true
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2350,7 +1799,6 @@ async fn external_agent_config_import_accepts_detected_session_payload_after_res
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2436,7 +1884,6 @@ async fn external_agent_config_import_skips_already_imported_session_versions() 
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2568,7 +2015,6 @@ async fn external_agent_config_import_returns_before_background_session_import_f
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2688,7 +2134,6 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -2751,11 +2196,4 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
     assert!(second.contains("follow up"));
     assert!(second.contains("LOCAL_SUMMARY"));
     Ok(())
-}
-
-fn write_analytics_config(codex_home: &std::path::Path, base_url: &str) -> std::io::Result<()> {
-    std::fs::write(
-        codex_home.join("config.toml"),
-        format!("chatgpt_base_url = \"{base_url}\"\n"),
-    )
 }

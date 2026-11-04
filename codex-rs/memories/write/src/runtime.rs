@@ -21,8 +21,8 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_login::default_client::originator;
 use codex_model_provider::ModelProvider;
-use codex_model_provider::ProviderAuthContext;
 use codex_model_provider::SharedModelProvider;
+use codex_model_provider::create_model_provider;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::MemoryVersion;
@@ -119,7 +119,7 @@ fn build_session_telemetry(
         &config.model_provider,
         auth_manager.codex_api_key_env_enabled(),
     );
-    let mut session_telemetry = SessionTelemetry::new(
+    SessionTelemetry::new(
         thread_id,
         model,
         model,
@@ -131,11 +131,7 @@ fn build_session_telemetry(
         user_agent(),
         source,
     )
-    .with_auth_env(auth_env_telemetry.to_otel_metadata());
-    if !config.otel.log_sse_deltas {
-        session_telemetry = session_telemetry.without_sse_delta_logs();
-    }
-    session_telemetry
+    .with_auth_env(auth_env_telemetry.to_otel_metadata())
 }
 
 impl MemoryStartupContext {
@@ -147,19 +143,13 @@ impl MemoryStartupContext {
         config: &Config,
         source: SessionSource,
     ) -> Self {
-        let auth = thread
-            .thread_extension_data()
-            .get::<ProviderAuthContext>()
-            .unwrap_or_else(|| {
-                Arc::new(ProviderAuthContext {
-                    credentials: auth_manager,
-                    runtime_auth: None,
-                })
-            });
-        let provider = auth.model_provider(config.model_provider.clone());
+        let provider = create_model_provider(
+            config.model_provider.clone(),
+            Some(Arc::clone(&auth_manager)),
+        );
         Self::new_with_provider(
             thread_manager,
-            Arc::clone(&auth.credentials),
+            auth_manager,
             thread_id,
             thread,
             config,
@@ -306,7 +296,7 @@ impl MemoryStartupContext {
 
         StageOneRequestContext {
             version: self.version,
-            model_info: Arc::unwrap_or_clone(model_info.model),
+            model_info,
             session_telemetry: build_session_telemetry(
                 &self.auth_manager,
                 self.thread_id,
@@ -333,9 +323,10 @@ impl MemoryStartupContext {
         let session_id = SessionId::from(self.thread_id);
         let session_id_string = session_id.to_string();
         let model_client = ModelClient::new(
-            Arc::clone(&self.provider),
+            Some(Arc::clone(&self.auth_manager)),
             AgentIdentityAuthPolicy::JwtOnly,
             self.thread_id,
+            config.model_provider.clone(),
             session_source.clone(),
             config_snapshot.originator,
             config.model_verbosity,

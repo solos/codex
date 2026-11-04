@@ -26,21 +26,6 @@ impl ExplicitSkillLookup for TestLookup {
     }
 }
 
-fn make_skill(name: &str, path: &str) -> SkillMetadata {
-    SkillMetadata {
-        name: name.to_string(),
-        description: format!("{name} skill"),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: test_path_buf(path).abs().into(),
-        scope: codex_protocol::protocol::SkillScope::User,
-        plugin_id: None,
-        remote_plugin_id: None,
-    }
-}
-
 fn linked_skill_mention(name: &str, unix_path: &str) -> String {
     format!("[${name}]({})", test_path_buf(unix_path).display())
 }

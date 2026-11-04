@@ -79,9 +79,9 @@ fn handle_model_connection(mut stream: TcpStream) -> io::Result<()> {
     if request_line.starts_with("POST ") && request_line.contains("/responses ") {
         let body = concat!(
             "event: response.created\n",
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-plugin-analytics\"}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-test\"}}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-plugin-analytics\",\"usage\":{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-test\",\"usage\":{\"input_tokens\":0,\"input_tokens_details\":null,\"output_tokens\":0,\"output_tokens_details\":null,\"total_tokens\":0}}}\n\n"
         );
         write_http_response(&mut stream, "200 OK", "text/event-stream", body)
     } else {

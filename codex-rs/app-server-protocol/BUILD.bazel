@@ -36,8 +36,7 @@ alias(
 
 schema_sources(
     name = "schema-generator-sources",
-    srcs = ["schema_generator.rs"] + glob(["src/**/*.rs"]),
-    crate_root = "schema_generator.rs",
+    srcs = glob(["src/**/*.rs"]),
     tags = ["manual"],
 )
 
@@ -55,7 +54,8 @@ filegroup(
     tags = ["manual"],
 )
 
-# Compile the test-only schema derives without registering or compiling tests.
+# Compile the crate's test harness, including its unit tests.
+# Each schema action runs only write_schema_fixtures_from_env via --exact --ignored.
 rust_binary(
     name = "schema-generator-on-demand",
     srcs = [":schema-generator-sources"],
@@ -68,14 +68,11 @@ rust_binary(
         "CARGO_PKG_NAME": "codex-app-server-protocol",
     },
     # This short-lived exporter sits on application builds' critical path. Avoid
-    # optimizing the exporter, retaining exec-mode assertion behavior.
+    # optimizing its full test harness, retaining exec-mode assertion behavior.
     rustc_flags = [
-        "--cfg=test",
+        "--test",
         "-Copt-level=0",
         "-Cdebug-assertions=no",
-        # Debug metadata is unused by this short-lived build tool.
-        "-Cdebuginfo=0",
-        "-Cstrip=debuginfo",
     ] + WINDOWS_RUSTC_LINK_FLAGS,
     tags = ["manual"],
     visibility = ["//bazel/schema:__pkg__"],

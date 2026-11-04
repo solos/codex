@@ -24,7 +24,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::Weak;
 use tempfile::TempDir;
 
 #[derive(Default)]
@@ -79,30 +78,6 @@ fn write_plugin_skill(
     let skill_path = skill_dir.join("SKILL.md");
     fs::write(&skill_path, content).unwrap();
     skill_path
-}
-
-fn plugin_skill_root_for_skill_path(
-    skill_path: &Path,
-    plugin_id: &str,
-    plugin_namespace: &str,
-) -> PluginSkillRoot {
-    let skills_root = skill_path
-        .parent()
-        .and_then(Path::parent)
-        .expect("plugin skill should live under a skills root");
-    let plugin_root = skills_root
-        .parent()
-        .expect("plugin skills root should live under a plugin root");
-    PluginSkillRoot {
-        path: skills_root.abs(),
-        plugin_identity: PluginIdentity {
-            plugin_id: plugin_id.to_string(),
-            remote_plugin_id: None,
-        },
-        plugin_namespace: plugin_namespace.to_string(),
-        plugin_root: plugin_root.abs(),
-        discovery_mode: SkillDiscoveryMode::Recursive,
-    }
 }
 
 fn user_config_layer(codex_home: &TempDir, config_toml: &str) -> ConfigLayerEntry {
@@ -176,10 +151,7 @@ async fn skills_for_config_with_stack(
         config_layer_stack.clone(),
     );
     skills_service
-        .snapshot_for_config(
-            &skills_input,
-            Some(&codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
-        )
+        .snapshot_for_config(&skills_input, Some(Arc::clone(&LOCAL_FS)))
         .await
         .outcome()
         .clone()
@@ -252,10 +224,7 @@ async fn skills_for_config_bounds_plugin_generations_and_preserves_live_snapshot
             .clone()
             .with_plugin_skill_snapshots(Some(SkillRootSnapshots::new(owner)));
         let snapshot = skills_service
-            .snapshot_for_config(
-                &input,
-                Some(&codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
-            )
+            .snapshot_for_config(&input, Some(Arc::clone(&LOCAL_FS)))
             .await;
 
         if generation == 0 {
@@ -267,12 +236,7 @@ async fn skills_for_config_bounds_plugin_generations_and_preserves_live_snapshot
         if generation == CONFIG_SKILLS_CACHE_CAPACITY - 1 {
             let (input, snapshot) = recent.as_ref().expect("first generation");
             let reused = skills_service
-                .snapshot_for_config(
-                    input,
-                    Some(
-                        &codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS),
-                    ),
-                )
+                .snapshot_for_config(input, Some(Arc::clone(&LOCAL_FS)))
                 .await;
             assert!(std::ptr::eq(snapshot.outcome(), reused.outcome()));
         }
@@ -362,10 +326,7 @@ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
     );
 
     let snapshot = skills_service
-        .snapshot_for_config(
-            &input,
-            Some(&codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
-        )
+        .snapshot_for_config(&input, Some(Arc::clone(&LOCAL_FS)))
         .await;
     let skills = snapshot
         .outcome()
@@ -377,63 +338,6 @@ async fn snapshot_for_config_merges_extension_host_and_legacy_plugin_roots() {
     assert_eq!(
         skills,
         vec![("sample:search", Some("sample@test")), ("user-skill", None)]
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn snapshot_for_config_preserves_host_precedence_for_symlinked_plugin_root() {
-    use std::os::unix::fs::symlink;
-
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let plugin_skill_path = write_plugin_skill(
-        &codex_home,
-        "test",
-        "sample",
-        "search",
-        "search",
-        "shared skill",
-    );
-    let plugin_skill_root =
-        plugin_skill_root_for_skill_path(&plugin_skill_path, "sample@test", "sample");
-    symlink(
-        plugin_skill_root.path.as_path(),
-        codex_home.path().join("skills"),
-    )
-    .expect("symlink user skills root to plugin skills root");
-    let config_layer_stack = config_stack(&codex_home, "[skills.bundled]\nenabled = false\n");
-    let skills_service = HostSkillsService::new(
-        codex_home.path().abs(),
-        /*bundled_skills_enabled*/ false,
-    );
-
-    let outcome = skills_for_config_with_stack(
-        &skills_service,
-        &cwd,
-        &config_layer_stack,
-        &[plugin_skill_root],
-    )
-    .await;
-
-    assert_eq!(
-        outcome.skills,
-        vec![codex_skills::SkillMetadata {
-            name: "sample:search".to_string(),
-            description: "shared skill".to_string(),
-            short_description: None,
-            interface: None,
-            dependencies: None,
-            policy: None,
-            path_to_skills_md: PathUri::from_abs_path(
-                &dunce::canonicalize(plugin_skill_path)
-                    .expect("canonical plugin skill path")
-                    .abs()
-            ),
-            scope: SkillScope::User,
-            plugin_id: None,
-            remote_plugin_id: None,
-        }]
     );
 }
 
@@ -499,91 +403,6 @@ async fn skills_list_snapshots_share_host_roots_only_within_one_request() {
             .skills
             .iter()
             .any(|skill| skill.name == "second-skill")
-    );
-}
-
-#[tokio::test]
-async fn skills_for_config_refreshes_cache_when_remote_plugin_id_changes() {
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let cwd = tempfile::tempdir().expect("tempdir");
-    let skill_path = write_plugin_skill(
-        &codex_home,
-        "test",
-        "sample",
-        "sample-search",
-        "sample-search",
-        "search sample data",
-    );
-    let config_layer_stack = config_stack(&codex_home, "");
-    let mut plugin_skill_root =
-        plugin_skill_root_for_skill_path(&skill_path, "sample@test", "sample");
-    let skills_service = HostSkillsService::new(
-        codex_home.path().abs(),
-        /*bundled_skills_enabled*/ true,
-    );
-
-    let plugin_input = HostSkillsLoadInput::new(
-        cwd.path().abs(),
-        vec![plugin_skill_root.clone()],
-        config_layer_stack.clone(),
-    )
-    .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
-    let plugin_snapshot = skills_service
-        .snapshot_for_config(
-            &plugin_input,
-            Some(&codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS)),
-        )
-        .await;
-    fs::write(
-        &skill_path,
-        "---\nname: sample-search\ndescription: updated sample data\n---\n\n# Body\n",
-    )
-    .expect("update plugin skill");
-    let listing_input = plugin_input
-        .clone()
-        .with_plugin_skill_snapshots(/*plugin_skill_snapshots*/ None);
-    let listing_snapshot = skills_service
-        .for_request()
-        .snapshot_for_cwd(
-            &listing_input,
-            /*force_reload*/ false,
-            Some(Arc::clone(&LOCAL_FS)),
-        )
-        .await;
-    assert_eq!(
-        (
-            plugin_snapshot
-                .outcome()
-                .skills
-                .iter()
-                .find(|skill| skill.name == "sample:sample-search")
-                .map(|skill| skill.description.as_str()),
-            listing_snapshot
-                .outcome()
-                .skills
-                .iter()
-                .find(|skill| skill.name == "sample:sample-search")
-                .map(|skill| skill.description.as_str()),
-        ),
-        (Some("search sample data"), Some("updated sample data"))
-    );
-
-    plugin_skill_root.plugin_identity.remote_plugin_id = Some("plugins~Plugin_sample".to_string());
-    let refreshed = skills_for_config_with_stack(
-        &skills_service,
-        &cwd,
-        &config_layer_stack,
-        &[plugin_skill_root],
-    )
-    .await;
-
-    assert_eq!(
-        refreshed
-            .skills
-            .iter()
-            .find(|skill| skill.name == "sample:sample-search")
-            .and_then(|skill| skill.remote_plugin_id.as_deref()),
-        Some("plugins~Plugin_sample")
     );
 }
 
@@ -816,40 +635,10 @@ async fn skills_for_cwd_loads_repo_and_user_roots_with_local_fs() {
     assert!(loaded_names.contains("repo-skill"));
     let other_file_system: Arc<dyn codex_exec_server::ExecutorFileSystem> =
         Arc::new(codex_exec_server::LocalFileSystem::unsandboxed());
-    let other_access = FileSystemEnvironmentAccessor::unrestricted(&other_file_system);
     let other_snapshot = skills_service
-        .snapshot_for_config(&skills_input, Some(&other_access))
+        .snapshot_for_config(&skills_input, Some(other_file_system))
         .await;
     assert!(!std::ptr::eq(snapshot.outcome(), other_snapshot.outcome()));
-    let outcome = other_snapshot.outcome();
-    let repo_skill = outcome
-        .skills
-        .iter()
-        .find(|skill| skill.name == "repo-skill")
-        .unwrap();
-    let repo_skill_path = repo_skill.path_to_skills_md.to_abs_path().unwrap();
-    assert_eq!(
-        outcome.implicit_skill_for_doc_path(&repo_skill_path),
-        Some(repo_skill)
-    );
-    assert_eq!(
-        outcome.implicit_skill_for_scripts_dir(&repo_skill_path.parent().unwrap().join("scripts")),
-        Some(repo_skill)
-    );
-    let remote_snapshot = skills_service
-        .snapshot_for_config(
-            &skills_input.with_environment_id("remote"),
-            Some(&other_access),
-        )
-        .await;
-    let remote_outcome = remote_snapshot.outcome();
-    for skill in &remote_outcome.skills {
-        assert_eq!(
-            remote_outcome
-                .implicit_skill_for_doc_path(&skill.path_to_skills_md.to_abs_path().unwrap()),
-            (skill.scope != SkillScope::Repo).then_some(skill)
-        );
-    }
 }
 
 #[tokio::test]
@@ -957,9 +746,8 @@ async fn skills_for_cwd_uses_cached_result_until_force_reload() {
         .clone()
         .with_plugin_skill_snapshots(Some(test_plugin_skill_snapshots()));
     let request = skills_service.for_request();
-    let access = codex_exec_server::FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
     let (config_snapshot, snapshot_a) = tokio::join!(
-        skills_service.snapshot_for_config(&config_input, Some(&access)),
+        skills_service.snapshot_for_config(&config_input, Some(Arc::clone(&LOCAL_FS))),
         request.snapshot_for_cwd(
             &base_input,
             /*force_reload*/ false,

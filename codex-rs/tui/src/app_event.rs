@@ -27,7 +27,6 @@ use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
-use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
@@ -191,23 +190,14 @@ pub(crate) struct ConnectorsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PluginLocation {
     Local { marketplace_path: AbsolutePathBuf },
-    Remote { marketplace_name: String },
 }
 
 impl PluginLocation {
-    pub(crate) fn into_request_params(self) -> (Option<AbsolutePathBuf>, Option<String>) {
+    pub(crate) fn into_request_params(self) -> Option<AbsolutePathBuf> {
         match self {
-            PluginLocation::Local { marketplace_path } => (Some(marketplace_path), None),
-            PluginLocation::Remote { marketplace_name } => (None, Some(marketplace_name)),
+            PluginLocation::Local { marketplace_path } => Some(marketplace_path),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PluginRemoteSectionError {
-    pub(crate) section_id: String,
-    pub(crate) label: String,
-    pub(crate) message: String,
 }
 
 /// Distinguishes why a rate-limit refresh was requested so the completion
@@ -279,8 +269,7 @@ pub(crate) enum RecapTrigger {
 
 #[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
-    pub(crate) cleared_unread: Vec<ThreadId>,
-    pub(crate) threads: std::collections::HashMap<ThreadId, Option<(Thread, bool)>>,
+    pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
     pub(crate) last_messages: std::collections::HashMap<ThreadId, String>,
     pub(crate) recent_seed_complete: bool,
     pub(crate) discovery: Option<crate::app::agents_overview_discovery::AgentsOverviewDiscovery>,
@@ -291,22 +280,6 @@ pub(crate) struct AgentsOverviewThreadRefresh {
 pub(crate) struct AgentPickerThreadRefresh {
     pub(crate) threads: Vec<Thread>,
     pub(crate) archived_thread_ids: std::collections::HashSet<ThreadId>,
-}
-
-/// Source-backed replacement for the outgoing widget's width-bound streaming rows.
-#[derive(Debug)]
-pub(crate) enum CapturedSideStream {
-    Answer(Arc<crate::history_cell::AgentMarkdownCell>),
-    Plan(Arc<crate::history_cell::ProposedPlanCell>),
-}
-
-/// Presentation retained alongside the transcript while its composer is inactive.
-#[derive(Debug)]
-pub(crate) struct CapturedSideDisplay {
-    pub(crate) active: Option<Box<dyn HistoryCell>>,
-    pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
-    pub(crate) draft: String,
-    pub(crate) status: Option<String>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -322,27 +295,17 @@ pub(crate) enum AppEvent {
         identity: crate::security_setup::Identity,
         notice: crate::security_setup::Notice,
     },
-    OpenDaemonMenu,
-    ConfirmDaemonRestart,
-    RunDaemonRestart,
-    ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
-    RunDaemonUpdate(crate::update_action::DaemonUpdateSource),
     ReviewMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     ContinueMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     CloseMisalignmentReview,
     /// Open the live command center for recent and locally retained root sessions.
     OpenAgentsOverview,
     ShowMoreAgentsOverview,
-    RefreshViewedThread {
-        backend_id: crate::backend_id::BackendId,
-        thread_id: ThreadId,
-        revision: String,
-    },
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
         cwd: Option<AbsolutePathBuf>,
     },
-    /// Update the agents overview after a background thread listing finishes.
+    /// Update the agent overview after a background thread listing finishes.
     AgentsOverviewThreadsLoaded {
         request_id: Uuid,
         result: Result<AgentsOverviewThreadRefresh, String>,
@@ -570,24 +533,6 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
-    /// Resolve the /new host before offering choices about the displayed checkout.
-    ChooseNewSessionCheckout {
-        name: Option<String>,
-    },
-
-    /// Start on the current worktree's host, ignoring the saved new-thread host.
-    NewSessionInCurrentWorktree {
-        name: Option<String>,
-    },
-
-    /// Move an empty conversation to the next connected backend.
-    CycleNewConversationBackend,
-
-    /// Continue a provider-locked conversation in a fresh chat using its saved history.
-    ContinueProviderChat {
-        thread_id: ThreadId,
-    },
-
     /// Create a managed checkout and start or fork a session into it.
     StartManagedWorktree {
         mode: ManagedWorktreeMode,
@@ -630,7 +575,6 @@ pub(crate) enum AppEvent {
 
     /// Result of the fresh startup thread that is attached after the input UI is live.
     StartupThreadStarted {
-        backend_id: crate::backend_id::BackendId,
         result: color_eyre::Result<AppServerStartedThread>,
     },
 
@@ -657,17 +601,6 @@ pub(crate) enum AppEvent {
     ClearUi {
         name: Option<String>,
     },
-
-    /// Move the outgoing transcript once its previously queued history edits have run.
-    ParkSideCompanion {
-        pair: ThreadId,
-        thread_id: ThreadId,
-        stream: Option<CapturedSideStream>,
-        display: CapturedSideDisplay,
-    },
-
-    /// Release input and drawing after the destination snapshot's queued history edits.
-    SideReplayFinished(ThreadId),
 
     /// Clear history queued by the previous thread before the new thread's replay events.
     ResetTranscriptForThreadSwitch,
@@ -696,13 +629,10 @@ pub(crate) enum AppEvent {
     /// Resume a thread by UUID or thread name inside the running TUI session.
     ResumeSessionByIdOrName(String),
 
-    /// Attach a conversation through the registered backend that owns it.
-    ResumeBackendSession(crate::resume_picker::SessionTarget),
-
-    /// Archive the current active main thread and return to the command center.
+    /// Archive the current active main thread and exit after it succeeds.
     ArchiveCurrentThread,
 
-    /// Permanently delete the current active main thread and return to the command center.
+    /// Permanently delete the current active main thread and exit after it succeeds.
     DeleteCurrentThread,
 
     /// Fork the current session into a new thread, optionally assigning it a name.
@@ -728,14 +658,6 @@ pub(crate) enum AppEvent {
     /// escape hatch that skips shutdown and may drop in-flight work (e.g.,
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
-    /// The user accepted stopping other sessions owned by this embedded server.
-    ConfirmedEmbeddedExit(ExitMode),
-
-    /// Apply a choice from the running-task exit menu to its originating thread.
-    RunningTaskExit {
-        action: RunningTaskExitAction,
-        thread_id: ThreadId,
-    },
 
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
@@ -1010,13 +932,6 @@ pub(crate) enum AppEvent {
         response: PluginListResponse,
     },
 
-    /// Result of explicitly fetching remote-backed plugin sections.
-    PluginRemoteSectionsLoaded {
-        cwd: PathBuf,
-        marketplaces: Vec<PluginMarketplaceEntry>,
-        section_errors: Vec<PluginRemoteSectionError>,
-    },
-
     /// Result of fetching lifecycle hook inventory.
     HooksLoaded {
         target: crate::hooks_rpc::HooksListTarget,
@@ -1207,14 +1122,6 @@ pub(crate) enum AppEvent {
     /// command path because those callers expect the visible skill state to be current when their command
     /// completes.
     SkillsListLoaded {
-        cwd: PathBuf,
-        result: Result<SkillsListResponse, String>,
-    },
-
-    /// Result of the skills refresh issued while replaying a docked conversation.
-    SideReplaySkillsLoaded {
-        request_id: Uuid,
-        thread_id: ThreadId,
         cwd: PathBuf,
         result: Result<SkillsListResponse, String>,
     },
@@ -1848,14 +1755,6 @@ pub(crate) enum ExitMode {
     /// This skips `Op::Shutdown`, so any in-flight work may be dropped and
     /// cleanup that normally runs before `ShutdownComplete` can be missed.
     Immediate,
-}
-
-/// Choice made when leaving a daemon-backed task that is still running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RunningTaskExitAction {
-    CancelTask,
-    RunInBackground,
-    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

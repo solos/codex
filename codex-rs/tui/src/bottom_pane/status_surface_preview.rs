@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use super::footer_content::FooterContent;
 use codex_protocol::ThreadId;
+use ratatui::text::Line;
 
-use super::status_line_content::StatusLineRenderer;
+use super::status_line_from_segments;
 use super::status_line_setup::StatusLineItem;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -137,8 +137,6 @@ struct PreviewValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StatusSurfacePreviewData {
     pub(crate) thread_id: Option<ThreadId>,
-    pub(crate) renderer: StatusLineRenderer,
-    pub(crate) pull_request_url: Option<String>,
     values: BTreeMap<StatusSurfacePreviewItem, PreviewValue>,
 }
 
@@ -146,8 +144,6 @@ impl Default for StatusSurfacePreviewData {
     fn default() -> Self {
         let mut data = Self {
             thread_id: None,
-            renderer: StatusLineRenderer::Native,
-            pull_request_url: None,
             values: BTreeMap::new(),
         };
         for item in StatusSurfacePreviewItem::iter() {
@@ -250,25 +246,15 @@ impl StatusSurfacePreviewData {
         &self,
         items: I,
         use_theme_colors: bool,
-    ) -> Option<FooterContent>
+    ) -> Option<Line<'static>>
     where
         I: IntoIterator<Item = StatusLineItem>,
     {
-        let mut segments = items
-            .into_iter()
-            .filter_map(|item| {
-                self.value_for(item.preview_item())
-                    .map(|value| (item, value.to_string()))
-            })
-            .peekable();
-        segments.peek()?;
-        self.renderer.content(
-            segments,
-            use_theme_colors,
-            self.thread_id,
-            self.live_value_for(StatusSurfacePreviewItem::PullRequestNumber)
-                .and(self.pull_request_url.as_deref()),
-        )
+        let segments = items.into_iter().filter_map(|item| {
+            self.value_for(item.preview_item())
+                .map(|value| (item, value.to_string()))
+        });
+        status_line_from_segments(segments, use_theme_colors, self.thread_id)
     }
 }
 

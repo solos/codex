@@ -72,8 +72,6 @@ pub(super) struct ThreadEventStore {
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
-    // Replay still needs the current turn's start after it falls out of the event buffer.
-    pub(super) evicted_active_turn: Option<Box<Turn>>,
     // Retain the active item even if its start falls out of the bounded replay buffer.
     pub(super) active_reasoning_item: Option<codex_app_server_protocol::ItemStartedNotification>,
     // Lifecycle identity must survive bounded replay-buffer eviction.
@@ -82,8 +80,6 @@ pub(super) struct ThreadEventStore {
     pub(super) input_state: Option<ThreadInputState>,
     pub(super) capacity: usize,
     pub(super) active: bool,
-    /// Output received since deactivation can change the transcript rebuilt on replay.
-    pub(super) replay_may_have_output: bool,
     pub(super) buffered_agent_message_delta_bytes: usize,
     delegated_turns: VecDeque<String>,
     recap_progress: recap::RecapProgress,
@@ -123,14 +119,12 @@ impl ThreadEventStore {
             buffer: VecDeque::new(),
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
-            evicted_active_turn: None,
             active_reasoning_item: None,
             latest_turn_id: None,
             pending_interrupt_turn_id: None,
             input_state: None,
             capacity,
             active: false,
-            replay_may_have_output: false,
             buffered_agent_message_delta_bytes: 0,
             delegated_turns: VecDeque::new(),
             recap_progress: recap::RecapProgress::default(),
@@ -160,7 +154,6 @@ impl ThreadEventStore {
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
-        self.evicted_active_turn = None;
         if self.active_reasoning_item.as_ref().is_some_and(|started| {
             turns.iter().any(|turn| {
                 (turn.id == started.turn_id && turn.status != TurnStatus::InProgress)
@@ -234,7 +227,7 @@ impl ThreadEventStore {
                     self.recap_progress.completed_turns += 1;
                 }
                 if self.active_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
-                    self.clear_active_turn_id();
+                    self.active_turn_id = None;
                 }
                 if self.pending_interrupt_turn_id.as_deref() == Some(turn.turn.id.as_str()) {
                     self.pending_interrupt_turn_id = None;
@@ -249,7 +242,7 @@ impl ThreadEventStore {
                 self.latest_turn_id = Some(n.turn_id.clone());
             }
             ServerNotification::ThreadClosed(_) => {
-                self.clear_active_turn_id();
+                self.active_turn_id = None;
                 self.active_reasoning_item = None;
                 self.pending_interrupt_turn_id = None;
             }
@@ -397,12 +390,6 @@ impl ThreadEventStore {
             active_reasoning_item: self.active_reasoning_item.clone(),
             input_state: self.input_state.clone(),
         };
-        if let Some(started) = self.evicted_active_turn.as_deref()
-            && self.active_turn_id() == Some(started.id.as_str())
-            && !snapshot.turns.iter().any(|turn| turn.id == started.id)
-        {
-            snapshot.turns.push(started.clone());
-        }
         if let Some(latest_turn_id) = &self.latest_turn_id {
             replay_filter::omit_resolved_misalignment_errors(&mut snapshot, latest_turn_id);
         }
@@ -559,7 +546,6 @@ impl ThreadEventStore {
 
     pub(super) fn clear_active_turn_id(&mut self) {
         self.active_turn_id = None;
-        self.evicted_active_turn = None;
     }
 }
 
@@ -611,8 +597,6 @@ fn file_change_item_changes(
 
 #[derive(Debug)]
 pub(super) struct ThreadEventChannel {
-    /// Set on backend handoff so a retained channel is detached through its owning session.
-    pub(super) backend_id: Option<crate::backend_id::BackendId>,
     pub(super) sender: mpsc::Sender<ThreadBufferedEvent>,
     pub(super) receiver: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     pub(super) store: Arc<Mutex<ThreadEventStore>>,
@@ -626,7 +610,6 @@ impl ThreadEventChannel {
             sender,
             receiver: Some(receiver),
             store: Arc::new(Mutex::new(ThreadEventStore::new(capacity))),
-            backend_id: None,
             attachment: ThreadEventAttachment::Live,
         }
     }
@@ -656,7 +639,6 @@ impl ThreadEventChannel {
             store: Arc::new(Mutex::new(ThreadEventStore::new_with_session(
                 capacity, session, turns,
             ))),
-            backend_id: None,
             attachment: ThreadEventAttachment::Live,
         }
     }
@@ -1010,7 +992,6 @@ mod tests {
         let mut expected = serde_json::json!({
             "method": "item/completed", "params": {
                 "threadId": "thread", "turnId": "turn", "completedAtMs": 20,
-                "contentTokenCount": null,
                 "item": {
                     "type": "agentMessage", "id": "question", "text": "already in the snapshot",
                     "startedAtMs": 10, "completedAtMs": 20,

@@ -510,7 +510,7 @@ pub struct AppToolsConfig {
 }
 
 /// Approval settings for a connected account within an app.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppLinkConfig {
     /// Reviewer for approval prompts from this account, overriding the app default.
@@ -523,7 +523,7 @@ pub struct AppLinkConfig {
 }
 
 /// Account settings for a single app.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppLinksConfig {
     /// Per-account approval settings keyed by link ID.
@@ -532,7 +532,7 @@ pub struct AppLinksConfig {
 }
 
 /// Config values for a single app/connector.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AppConfig {
     /// When `false`, Codex does not surface this app.
@@ -639,9 +639,6 @@ pub enum OtelExporterKind {
 pub struct OtelConfigToml {
     /// Byte limit for tool-result log output; independent of model-visible output.
     pub tool_result: Option<codex_protocol::config_types::ToolResultLogConfig>,
-    /// Log successful SSE events whose kind ends in `.delta`. Defaults to true.
-    /// Disabling this preserves errors, completion events, and metrics.
-    pub log_sse_deltas: Option<bool>,
     /// Log user prompt in traces
     pub log_user_prompt: Option<bool>,
     /// Opt in to logging final main-agent and spawned-subagent responses to an OTLP log exporter.
@@ -675,7 +672,6 @@ pub struct OtelConfigToml {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtelConfig {
     pub tool_result: codex_protocol::config_types::ToolResultLogConfig,
-    pub log_sse_deltas: bool,
     pub log_user_prompt: bool,
     pub log_agent_responses: bool,
     pub log_guardian_assessments: bool,
@@ -691,7 +687,6 @@ impl Default for OtelConfig {
     fn default() -> Self {
         OtelConfig {
             tool_result: Default::default(),
-            log_sse_deltas: true,
             log_user_prompt: false,
             log_agent_responses: false,
             log_guardian_assessments: false,
@@ -744,7 +739,6 @@ pub enum NotificationMethod {
     #[default]
     Auto,
     Osc9,
-    Osc777,
     Bel,
 }
 
@@ -753,7 +747,6 @@ impl fmt::Display for NotificationMethod {
         match self {
             NotificationMethod::Auto => write!(f, "auto"),
             NotificationMethod::Osc9 => write!(f, "osc9"),
-            NotificationMethod::Osc777 => write!(f, "osc777"),
             NotificationMethod::Bel => write!(f, "bel"),
         }
     }
@@ -874,11 +867,6 @@ impl QuickDial {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct Tui {
-    /// Preferred hosts for new conversations, indexed by project and local user identity.
-    /// Read from the user configuration only; values are never endpoints or credentials.
-    #[serde(default)]
-    pub default_hosts: BTreeMap<String, BTreeMap<String, String>>,
-
     #[serde(default, flatten)]
     pub notification_settings: TuiNotificationSettings,
 
@@ -902,11 +890,6 @@ pub struct Tui {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
-
-    /// Show informational notices about connected app server version differences.
-    /// Defaults to `true`; this does not control compatibility errors or version status.
-    #[serde(default = "default_true")]
-    pub show_server_version_notice: bool,
 
     /// Generate automatic conversation recaps when the terminal is unfocused.
     /// Defaults to `true`. Disabling this leaves `/recap` available on demand.
@@ -1143,34 +1126,9 @@ pub struct PluginConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
-    /// Stable, unique identifier of a ChatGPT-hosted remote plugin.
-    /// Availability to the requesting user is determined by Plugin Service at
-    /// provisioning time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_plugin_id: Option<String>,
-
-    /// Release identifier used to pin the remote plugin to a specific release.
-    /// Omission leaves release selection unchanged.
-    /// Core stores this metadata without selecting or fetching a release.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_id: Option<String>,
-
-    /// Provisioning metadata. Omission does not request provisioning.
-    /// Only applies with `remote_plugin_id` and Plugin Service availability to the
-    /// requesting user at provisioning time. Effective enablement, trusted
-    /// provisioning policy, and authentication and authorization restrictions still apply.
-    /// This value is not trusted authorization and does not trigger provisioning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_provision: Option<bool>,
-
     /// Per-MCP-server policy overlays for MCP servers contributed by this plugin.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub mcp_servers: HashMap<String, PluginMcpServerConfig>,
-
-    /// Connector-wide app settings keyed by connector ID. Ignored when this
-    /// plugin is disabled by configuration. Explicit top-level app fields win.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub apps: HashMap<String, AppConfig>,
 }
 
 /// Policy settings for a plugin-provided MCP server.

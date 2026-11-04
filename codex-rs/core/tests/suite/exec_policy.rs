@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::EnvironmentConfig;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
@@ -27,17 +26,13 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_exec_command_call;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
-use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
-use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_target_windows;
 use core_test_support::skip_if_wine_exec;
-use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::local_requests;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -244,7 +239,7 @@ prefix_rule(pattern=["git", "status"], decision="allow")
 }
 
 #[tokio::test]
-async fn never_complex_forced_rm_denial_explains_why_the_command_was_rejected() -> Result<()> {
+async fn granular_complex_forced_rm_denial_explains_why_the_command_was_rejected() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
 
     let server = start_mock_server().await;
@@ -277,7 +272,13 @@ async fn never_complex_forced_rm_denial_explains_why_the_command_was_rejected() 
     submit_user_turn(
         &test,
         "run the forced rm loop",
-        AskForApproval::Never,
+        AskForApproval::Granular(GranularApprovalConfig {
+            sandbox_approval: false,
+            rules: true,
+            skill_approval: true,
+            request_permissions: true,
+            mcp_elicitations: true,
+        }),
         PermissionProfile::read_only(),
         /*collaboration_mode*/ None,
     )
@@ -301,50 +302,21 @@ async fn never_complex_forced_rm_denial_explains_why_the_command_was_rejected() 
     Ok(())
 }
 
-#[test_case::test_case(PermissionProfile::workspace_write(), ReviewDecision::Approved, false; "approved_with_write_access")]
-#[test_case::test_case(PermissionProfile::read_only(), ReviewDecision::Approved, true; "approval_preserves_read_only_sandbox")]
-#[test_case::test_case(PermissionProfile::workspace_write(), ReviewDecision::denied("rejected by user"), true; "user_can_deny")]
 #[tokio::test]
-async fn granular_dangerous_command_approval_preserves_permissions(
-    permission_profile: PermissionProfile,
-    decision: ReviewDecision,
-    sentinel_survives: bool,
-) -> Result<()> {
+async fn granular_complex_forced_rm_requests_approval_when_allowed() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX shell command fixture");
 
-    let harness =
-        TestCodexHarness::with_auto_env_builder(test_codex().with_config(move |config| {
-            config.permissions.approval_policy =
-                Constrained::allow_any(AskForApproval::Granular(GranularApprovalConfig {
-                    sandbox_approval: false,
-                    rules: false,
-                    skill_approval: false,
-                    request_permissions: true,
-                    mcp_elicitations: true,
-                }));
-            config
-                .permissions
-                .set_permission_profile(permission_profile)
-                .unwrap();
-            config.approvals_reviewer = ApprovalsReviewer::User;
-        }))
-        .await?;
-    let test = harness.test();
-    harness
-        .write_file(
-            "forced-rm-sentinel",
-            "must remain until approved with write access",
-        )
-        .await?;
-    let command = "for target in forced-rm-sentinel; do rm -rf \"$target\"; done";
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build_with_auto_env(&server).await?;
     let call_id = "forced-rm-approval";
     let args = json!({
-        "cmd": command,
+        "cmd": COMPLEX_FORCED_RM_COMMAND,
         "yield_time_ms": 1_000,
     });
 
     mount_sse_once(
-        harness.server(),
+        &server,
         sse(vec![
             ev_response_created("resp-forced-rm-approval-1"),
             ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
@@ -352,8 +324,8 @@ async fn granular_dangerous_command_approval_preserves_permissions(
         ]),
     )
     .await;
-    let results_mock = mount_sse_once(
-        harness.server(),
+    mount_sse_once(
+        &server,
         sse(vec![
             ev_assistant_message("msg-forced-rm-approval-1", "done"),
             ev_completed("resp-forced-rm-approval-2"),
@@ -361,12 +333,20 @@ async fn granular_dangerous_command_approval_preserves_permissions(
     )
     .await;
 
-    test.codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "run the forced rm loop".into(),
-            text_elements: Vec::new(),
-        }]))
-        .await?;
+    submit_user_turn(
+        &test,
+        "run the forced rm loop",
+        AskForApproval::Granular(GranularApprovalConfig {
+            sandbox_approval: true,
+            rules: true,
+            skill_approval: true,
+            request_permissions: true,
+            mcp_elicitations: true,
+        }),
+        PermissionProfile::read_only(),
+        /*collaboration_mode*/ None,
+    )
+    .await?;
 
     let approval_event = wait_for_event(&test.codex, |event| {
         matches!(
@@ -378,17 +358,16 @@ async fn granular_dangerous_command_approval_preserves_permissions(
     let EventMsg::ExecApprovalRequest(approval) = approval_event else {
         panic!("expected forced rm to request approval before turn completion");
     };
-    assert_eq!(approval.command.last().map(String::as_str), Some(command));
-
-    assert!(
-        harness.path_exists("forced-rm-sentinel").await?,
-        "the command must wait for approval"
+    assert_eq!(
+        approval.command.last().map(String::as_str),
+        Some(COMPLEX_FORCED_RM_COMMAND)
     );
+
     test.codex
         .submit(Op::ExecApproval {
             id: approval.effective_approval_id(),
             turn_id: None,
-            decision,
+            decision: ReviewDecision::denied("rejected by user"),
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -396,11 +375,6 @@ async fn granular_dangerous_command_approval_preserves_permissions(
     })
     .await;
 
-    assert_eq!(
-        harness.path_exists("forced-rm-sentinel").await?,
-        sentinel_survives
-    );
-    assert_no_matched_rules_invariant(&results_mock.single_request().function_call_output(call_id));
     Ok(())
 }
 
@@ -712,167 +686,6 @@ async fn execpolicy_blocks_shell_invocation() -> Result<()> {
 
     Ok(())
 }
-
-#[tokio::test]
-async fn inherited_policy_allows_remembered_commands_and_enforces_managed_denials() -> Result<()> {
-    skip_if_target_windows!(Ok(()), "uses POSIX touch");
-    let server = start_mock_server().await;
-    let test = test_codex()
-        .with_cloud_config_bundle(CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            r#"[rules]
-prefix_rules = [{ pattern = [{ token = "touch" }, { token = "denied-marker" }], decision = "forbidden" }]"#,
-        ))
-        .build_with_auto_env(&server)
-        .await?;
-    let mut options = test.start_thread_options().await;
-    options.config.permissions.approval_policy =
-        Constrained::allow_any(AskForApproval::UnlessTrusted);
-    let stack = options
-        .config
-        .config_layer_stack
-        .clone()
-        .with_user_and_project_exec_policy_rules_ignored(
-            /*ignore_user_and_project_exec_policy_rules*/ true,
-        );
-    let managed = stack
-        .requirements()
-        .exec_policy
-        .as_deref()
-        .expect("managed rule")
-        .clone();
-    let mut snapshot = managed.as_ref().clone();
-    snapshot.add_prefix_rule(&["touch".into(), "allowed-marker".into()], Decision::Allow)?;
-    options.config.config_layer_stack = stack;
-    options.set_inherited_exec_policy(snapshot.into(), Some(managed.into()));
-    let child = test.thread_manager.start_thread(options).await?.thread;
-
-    let requests = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("commands"),
-                ev_exec_command_call("allowed", "touch allowed-marker"),
-                ev_exec_command_call("denied", "touch denied-marker"),
-                ev_completed("commands"),
-            ]),
-            sse_completed("done"),
-        ],
-    )
-    .await;
-    child
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "run both commands".into(),
-            text_elements: Vec::new(),
-        }]))
-        .await?;
-    let event = wait_for_event(&child, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
-    })
-    .await;
-    assert!(
-        matches!(event, EventMsg::TurnComplete(_)),
-        "unexpected approval: {event:?}"
-    );
-    let files = test
-        .fs()
-        .read_directory(
-            &test.executor_environment().selection().cwd,
-            /*sandbox*/ None,
-        )
-        .await?;
-    assert!(files.iter().any(|file| file.file_name == "allowed-marker"));
-    assert!(!files.iter().any(|file| file.file_name == "denied-marker"));
-    let denial = requests
-        .function_call_output_text("denied")
-        .expect("denied command output");
-    assert!(
-        denial.contains("policy forbids commands starting with `touch denied-marker`"),
-        "{denial}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn malformed_custom_rules_preserve_managed_forbidden_prefix() -> Result<()> {
-    skip_if_target_windows!(
-        Ok(()),
-        "managed prefix fixture uses POSIX executable semantics"
-    );
-
-    let mut builder = test_codex()
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[rules]
-prefix_rules = [
-    { pattern = [{ token = "echo" }], decision = "forbidden" },
-]
-"#,
-            ),
-        )
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
-            let policy_path = config.codex_home.join("rules").join("broken.rules");
-            fs::create_dir_all(
-                policy_path
-                    .parent()
-                    .expect("policy directory must have a parent"),
-            )
-            .expect("create policy directory");
-            fs::write(policy_path, "prefix_rule(").expect("write malformed policy file");
-        });
-    let server = start_mock_server().await;
-    let test = builder.build_with_auto_env(&server).await?;
-    let call_id = "managed-shell-forbidden";
-    let args = json!({
-        "cmd": "echo blocked",
-        "yield_time_ms": 1_000,
-    });
-
-    mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-managed-1"),
-            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
-            ev_completed("resp-managed-1"),
-        ]),
-    )
-    .await;
-    let results_mock = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_assistant_message("msg-managed-1", "done"),
-            ev_completed("resp-managed-2"),
-        ]),
-    )
-    .await;
-
-    test.submit_turn_with_approval_and_permission_profile(
-        "run shell command",
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
-    )
-    .await?;
-
-    let output_item = results_mock.single_request().function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("function call output should include a string output payload");
-    assert!(
-        output.contains("policy forbids commands starting with `echo`"),
-        "unexpected output: {output}"
-    );
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn environment_command_restrictions_override_saved_prefix_approvals() -> Result<()> {
     skip_if_target_windows!(

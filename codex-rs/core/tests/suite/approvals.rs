@@ -3,7 +3,6 @@
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(unix)]
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
@@ -39,7 +38,6 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
-use core_test_support::managed_network_requirements_loader;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -2888,9 +2886,7 @@ ZDOTDIR = "{}"
             startup_dir.display()
         ),
     )?;
-    let mut builder = builder
-        .with_home(home)
-        .with_cloud_config_bundle(managed_network_requirements_loader());
+    let mut builder = builder.with_home(home);
     if !allow_login_shell {
         let Some(bash) = codex_core::shell::get_shell(codex_core::shell::ShellType::Bash) else {
             return Ok(());
@@ -3210,34 +3206,6 @@ async fn brokered_shell_snapshot_fallback(mode: &'static str) -> Result<()> {
         _ => "network_proxy = { enabled = true, credential_broker = true }",
     };
     let network_enabled = !matches!(mode, "flat_no_proxy" | "flat_policy_without_proxy");
-    let cloud_config_bundle = match mode {
-        "disabled" | "failed" | "managed_disabled" | "managed_failed" => {
-            let feature_requirements = if mode.starts_with("managed_") {
-                format!(
-                    "[features]\ncredential_masking = true\nshell_snapshot = {}\n",
-                    !snapshot_disabled,
-                )
-            } else {
-                String::new()
-            };
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                "{feature_requirements}\n[experimental_network]\nenabled = true\nallow_local_binding = true\n\
-                 [experimental_network.domains]\n\"credential-masking-denied.invalid\" = \"deny\"\n"
-            ))
-        }
-        "flat_no_proxy" | "flat_profile_transition" => {
-            CloudConfigBundleFixture::loader_with_enterprise_requirement("")
-        }
-        "flat_disabled_proxy" => CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            "[experimental_network]\nenabled = false",
-        ),
-        "flat_policy_without_proxy" => {
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                "[experimental_network]\nallow_local_binding = true",
-            )
-        }
-        _ => managed_network_requirements_loader(),
-    };
     let home = Arc::new(TempDir::new()?);
     let default_permissions = if mode == "flat_yolo" {
         ":danger-full-access"
@@ -3279,7 +3247,6 @@ GH_TOKEN = "{REAL_GITHUB_TOKEN}"
     let mut builder = test_codex()
         .with_home(home)
         .with_user_shell(bash)
-        .with_cloud_config_bundle(cloud_config_bundle)
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(approval_policy);
             if mode == "flat_managed" {
@@ -3626,7 +3593,6 @@ ENV = "{}"
     let test = test_codex()
         .with_home(home)
         .with_user_shell(shell)
-        .with_cloud_config_bundle(managed_network_requirements_loader())
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
             config.permissions.allow_login_shell = true;
@@ -4095,15 +4061,12 @@ allow_local_binding = true
         exclude_slash_tmp: true,
     };
     let sandbox_policy_for_config = sandbox_policy.clone();
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_config_bundle(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-            config
-                .set_legacy_sandbox_policy(sandbox_policy_for_config)
-                .expect("set sandbox policy");
-        });
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        config
+            .set_legacy_sandbox_policy(sandbox_policy_for_config)
+            .expect("set sandbox policy");
+    });
     let test = builder.build(&server).await?;
     assert!(
         test.config.managed_network_requirements_enabled(),
@@ -4381,12 +4344,9 @@ allow_local_binding = true
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
     };
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_config_bundle(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-        });
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+    });
     let test = builder.build(&server).await?;
     assert!(
         test.config.managed_network_requirements_enabled(),
@@ -4583,17 +4543,14 @@ allow_local_binding = true
         exclude_tmpdir_env_var: true,
         exclude_slash_tmp: true,
     };
-    let mut builder = test_codex()
-        .with_home(home)
-        .with_cloud_config_bundle(managed_network_requirements_loader())
-        .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
-            let cwd = config.cwd.clone();
-            config
-                .permissions
-                .set_legacy_sandbox_policy(SandboxPolicy::DangerFullAccess, cwd.as_path())
-                .expect("test setup should allow sandbox policy");
-        });
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+        let cwd = config.cwd.clone();
+        config
+            .permissions
+            .set_legacy_sandbox_policy(SandboxPolicy::DangerFullAccess, cwd.as_path())
+            .expect("test setup should allow sandbox policy");
+    });
     let test = builder.build(&server).await?;
     assert!(
         !test.config.managed_network_requirements_enabled(),

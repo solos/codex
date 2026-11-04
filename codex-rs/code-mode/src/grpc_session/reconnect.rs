@@ -1,13 +1,11 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
-use codex_code_mode_protocol::CodeModeOutputTruncation;
 use codex_code_mode_protocol::CodeModeSession;
+use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
 use codex_code_mode_protocol::CodeModeSessionDelegate;
-use codex_code_mode_protocol::CodeModeSessionOptions;
 use codex_code_mode_protocol::CodeModeSessionResultFuture;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::StartedCell;
@@ -32,11 +30,8 @@ pub(super) struct ReconnectableSession {
 
 struct ReconnectInner {
     provider: GrpcCodeModeSessionProvider,
-    options: CodeModeSessionOptions,
+    limits: CodeModeSessionCellExecutionLimits,
     binding: Mutex<Option<SessionBinding>>,
-    // The negotiated mode belongs to the logical session, including after
-    // shutdown releases the binding. Never pin a mode from an unpublished open.
-    output_truncation: OnceLock<CodeModeOutputTruncation>,
     opening_permit: Semaphore,
     shutdown_requested: CancellationToken,
     shutdown_result: Mutex<Option<ShutdownResultReceiver>>,
@@ -51,14 +46,13 @@ struct SessionBinding {
 impl ReconnectableSession {
     pub(super) fn new(
         provider: GrpcCodeModeSessionProvider,
-        options: CodeModeSessionOptions,
+        limits: CodeModeSessionCellExecutionLimits,
     ) -> Self {
         Self {
             inner: Arc::new(ReconnectInner {
                 provider,
-                options,
+                limits,
                 binding: Mutex::new(None),
-                output_truncation: OnceLock::new(),
                 opening_permit: Semaphore::new(/*permits*/ 1),
                 shutdown_requested: CancellationToken::new(),
                 shutdown_result: Mutex::new(None),
@@ -72,14 +66,6 @@ impl ReconnectableSession {
 }
 
 impl CodeModeSession for ReconnectableSession {
-    fn output_truncation(&self) -> CodeModeOutputTruncation {
-        self.inner
-            .output_truncation
-            .get()
-            .copied()
-            .unwrap_or_default()
-    }
-
     fn execute<'a>(
         &'a self,
         request: ExecuteRequest,
@@ -198,7 +184,7 @@ impl ReconnectInner {
             _ = self.shutdown_requested.cancelled() => {
                 return Err(SHUTDOWN_ERROR.to_string());
             }
-            session = self.provider.open_binding(&self.options, self.output_truncation.get().copied()) => session?,
+            session = self.provider.open_binding(self.limits.clone()) => session?,
         };
         let binding = SessionBinding {
             session,
@@ -210,8 +196,6 @@ impl ReconnectInner {
                 false
             } else {
                 *current = Some(binding.clone());
-                self.output_truncation
-                    .get_or_init(|| binding.session.output_truncation());
                 true
             }
         };

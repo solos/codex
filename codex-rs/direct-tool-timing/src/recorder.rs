@@ -17,7 +17,6 @@ pub use runtime::ToolAdmission;
 pub use runtime::ToolGateTiming;
 
 use codex_utils_critical_path::CriticalPath;
-use codex_utils_critical_path::ReviewExecution;
 use codex_utils_critical_path::WorkKind;
 
 /// Completion time and dependency history for one direct invocation.
@@ -90,7 +89,7 @@ struct DirectToolInvocation {
     identity: Arc<()>,
     path: Option<CriticalPath>,
     segment_started_at: Instant,
-    active_auto_reviews: Vec<ReviewExecution>,
+    active_auto_reviews: usize,
     active_user_waits: usize,
     batch: ToolBatchTiming,
 }
@@ -111,7 +110,6 @@ enum BlockingKind {
 /// Records a blocking interval until dropped; user waits take precedence over reviews.
 pub struct ToolBlockingTimingGuard {
     kind: BlockingKind,
-    review: Option<ReviewExecution>,
     identity: Arc<()>,
     timings: DirectToolTimings,
     call_id: String,
@@ -123,22 +121,15 @@ impl DirectToolInvocation {
         // to the human wait; all remaining invocation time is elapsed tool work.
         let kind = if self.active_user_waits > 0 {
             WorkKind::UserWait
-        } else if !self.active_auto_reviews.is_empty() {
+        } else if self.active_auto_reviews > 0 {
             WorkKind::AutoReview
         } else {
             WorkKind::Tools
         };
-        self.path = self.path.take().map(|path| {
-            if matches!(kind, WorkKind::AutoReview) {
-                path.auto_review(
-                    self.segment_started_at,
-                    now,
-                    self.active_auto_reviews.clone(),
-                )
-            } else {
-                path.work(self.segment_started_at, now, kind)
-            }
-        });
+        self.path = self
+            .path
+            .take()
+            .map(|path| path.work(self.segment_started_at, now, kind));
         self.segment_started_at = now;
     }
 
@@ -190,7 +181,7 @@ impl DirectToolTimings {
             identity: Arc::clone(&identity),
             path,
             segment_started_at: started_at,
-            active_auto_reviews: Vec::new(),
+            active_auto_reviews: 0,
             active_user_waits: 0,
             batch,
         });
@@ -264,9 +255,6 @@ impl DirectToolTimings {
         }
         let ended_at = Instant::now();
         work.record_until(ended_at);
-        for review in &work.active_auto_reviews {
-            review.seal();
-        }
         let completed = CompletedWork {
             ended_at,
             path: work.path,
@@ -304,20 +292,12 @@ impl ToolTimingGuard {
             .iter_mut()
             .find(|work| Arc::ptr_eq(&work.identity, &self.identity))?;
         work.record_until(Instant::now());
-        let review = match kind {
-            BlockingKind::AutoReview => {
-                let review = ReviewExecution::default();
-                work.active_auto_reviews.push(review.clone());
-                Some(review)
-            }
-            BlockingKind::UserWait => {
-                work.active_user_waits += 1;
-                None
-            }
-        };
+        match kind {
+            BlockingKind::AutoReview => work.active_auto_reviews += 1,
+            BlockingKind::UserWait => work.active_user_waits += 1,
+        }
         Some(ToolBlockingTimingGuard {
             kind,
-            review,
             identity: Arc::clone(&self.identity),
             timings: self.timings.clone(),
             call_id: self.call_id.clone(),
@@ -336,36 +316,19 @@ impl Drop for ToolTimingGuard {
     }
 }
 
-impl ToolBlockingTimingGuard {
-    /// Returns the observer for this exact review; human waits have no observer.
-    /// Call before submitting child work, including when a cached review runs no child.
-    pub fn review_execution(&self) -> Option<ReviewExecution> {
-        let review = self.review.as_ref()?;
-        review.observe();
-        Some(review.clone())
-    }
-}
-
 impl Drop for ToolBlockingTimingGuard {
     fn drop(&mut self) {
-        if let Some(review) = &self.review {
-            review.seal();
-        }
         if let Some(calls) = self.timings.state().calls.get_mut(&self.call_id)
             && let Some(work) = calls
                 .iter_mut()
                 .find(|work| Arc::ptr_eq(&work.identity, &self.identity))
         {
             work.record_until(Instant::now());
-            match self.kind {
-                BlockingKind::AutoReview => {
-                    work.active_auto_reviews
-                        .retain(|review| Some(review) != self.review.as_ref());
-                }
-                BlockingKind::UserWait => {
-                    work.active_user_waits = work.active_user_waits.saturating_sub(1);
-                }
-            }
+            let counter = match self.kind {
+                BlockingKind::AutoReview => &mut work.active_auto_reviews,
+                BlockingKind::UserWait => &mut work.active_user_waits,
+            };
+            *counter = counter.saturating_sub(1);
         }
     }
 }

@@ -159,7 +159,6 @@ async fn state_recovery_restores_saved_threads() -> Result<()> {
         .await?;
     let request = server
         .send_thread_list_request(ThreadListParams {
-            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,

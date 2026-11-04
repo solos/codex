@@ -5,7 +5,6 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use std::sync::Arc;
 
 use anyhow::Result;
-use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
@@ -181,14 +180,6 @@ pub(super) async fn migration_scenario() -> Result<Vec<responses::ResponsesReque
     let test = test_codex()
         .with_history_mode(ThreadHistoryMode::Paginated)
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-"guardianv2.thread_context" = false
-"#,
-            ),
-        )
         .with_model_info_override("gpt-5.5", |model| {
             model.comp_hash = Some("previous-model".to_owned());
             model.auto_review_model_override = Some(model.slug.clone());

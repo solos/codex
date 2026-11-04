@@ -120,7 +120,6 @@ use rmcp::model::ElicitationCapability;
 use rmcp::model::FormElicitationCapability;
 use rmcp::model::UrlElicitationCapability;
 
-use codex_config::test_support::CloudConfigBundleFixture;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
@@ -493,7 +492,8 @@ web_search = true
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            ..Default::default()
+            experimental_request_user_input: None,
+            update_plan: None,
         })
     );
 }
@@ -512,7 +512,8 @@ web_search = false
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            ..Default::default()
+            experimental_request_user_input: None,
+            update_plan: None,
         })
     );
 }
@@ -529,8 +530,9 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
-            ..Default::default()
+            update_plan: None,
         })
     );
 }
@@ -548,8 +550,9 @@ enabled = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
-            ..Default::default()
+            update_plan: None,
         })
     );
 }
@@ -565,7 +568,6 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
                     enabled: false,
                 }),
                 update_plan: None,
-                ..Default::default()
             }),
             ..ConfigToml::default()
         },
@@ -1390,14 +1392,12 @@ fn config_toml_deserializes_model_availability_nux() {
     assert_eq!(
         cfg.tui.expect("tui config should deserialize"),
         Tui {
-            default_hosts: Default::default(),
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             screen_reader_detection_done: None,
             effects: Default::default(),
             rendering: Default::default(),
             show_tooltips: true,
-            show_server_version_notice: true,
             auto_recap: true,
             disable_paste_burst: None,
             vim_mode_default: false,
@@ -2169,51 +2169,6 @@ sandbox = "elevated"
     Ok(())
 }
 
-#[tokio::test]
-async fn respect_system_proxy_feature_resolves_enabled() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
-        ConfigToml {
-            features: Some(
-                toml::from_str(
-                    r#"
-respect_system_proxy = true
-"#,
-                )
-                .expect("valid features"),
-            ),
-            ..Default::default()
-        },
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
-
-    assert!(config.respect_system_proxy);
-    assert_eq!(
-        config.http_client_factory().outbound_proxy_policy(),
-        codex_http_client::OutboundProxyPolicy::RespectSystemProxy
-    );
-    assert_eq!(
-        config
-            .auth_route_config()
-            .http_client_factory()
-            .outbound_proxy_policy(),
-        codex_http_client::OutboundProxyPolicy::RespectSystemProxy
-    );
-    assert_eq!(
-        config.plugins_config_input().remote_plugin_service_config(),
-        codex_core_plugins::remote::RemotePluginServiceConfig::new(
-            config.chatgpt_base_url,
-            codex_http_client::HttpClientFactory::new(
-                codex_http_client::OutboundProxyPolicy::RespectSystemProxy,
-            ),
-            /*product_sku*/ None,
-        )
-    );
-    Ok(())
-}
-
 #[test]
 fn bootstrap_respect_system_proxy_honors_feature_requirements() -> std::io::Result<()> {
     let configured = ConfigToml {
@@ -2341,43 +2296,6 @@ async fn system_proxy_fallback_config_matches_bootstrap() -> std::io::Result<()>
 }
 
 #[tokio::test]
-async fn system_proxy_fallback_honors_feature_requirements() -> std::io::Result<()> {
-    for (configured, required) in [(true, false), (false, true)] {
-        let cfg = ConfigToml {
-            features: Some(
-                toml::from_str(&format!("system_proxy_fallback = {configured}"))
-                    .expect("valid features"),
-            ),
-            ..Default::default()
-        };
-        let requirements = Sourced::new(
-            FeatureRequirementsToml {
-                entries: BTreeMap::from([("system_proxy_fallback".to_string(), required)]),
-            },
-            RequirementSource::Unknown,
-        );
-        let bootstrap = resolve_bootstrap_http_client_factory(&cfg, Some(&requirements))?;
-        assert_eq!(bootstrap.allows_system_proxy_fallback(), required);
-        let codex_home = TempDir::new()?;
-        std::fs::write(
-            codex_home.path().join(CONFIG_TOML_FILE),
-            format!("[features]\nsystem_proxy_fallback = {configured}\n"),
-        )?;
-        let config = ConfigBuilder::without_managed_config_for_tests()
-            .codex_home(codex_home.path().to_path_buf())
-            .cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                    "[features]\nsystem_proxy_fallback = {required}\n"
-                )),
-            )
-            .build()
-            .await?;
-        assert_eq!(config.http_client_factory(), bootstrap);
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn respect_system_proxy_cli_override_enables_feature() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
@@ -2400,148 +2318,6 @@ respect_system_proxy = false
     assert!(config.respect_system_proxy);
     Ok(())
 }
-
-#[tokio::test]
-async fn experimental_network_requirements_enable_proxy_without_feature() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[experimental_network]
-enabled = true
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::NetworkProxy));
-    assert!(config.managed_network_requirements_enabled());
-    assert!(
-        config
-            .permissions
-            .network
-            .as_ref()
-            .expect("experimental_network should configure the managed proxy")
-            .enabled()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_network_requirements_ignore_disabled_proxy_feature_config() -> std::io::Result<()>
-{
-    let feature_config = r#"
-[features.network_proxy]
-enabled = true
-dangerously_allow_all_unix_sockets = true
-allow_local_binding = true
-domains = { "unmanaged.example" = "allow" }
-unix_sockets = { "/tmp/unmanaged.sock" = "allow" }
-"#;
-    let requirements = r#"
-default_permissions = "managed-primary"
-
-[features]
-network_proxy = false
-
-[allowed_permission_profiles]
-managed-primary = true
-managed-secondary = true
-
-[permissions.network]
-enabled = true
-allow_upstream_proxy = false
-domains = { "shared.example" = "allow", "blocked.example" = "deny" }
-
-[permissions.managed-primary]
-extends = ":workspace"
-
-[permissions.managed-primary.network]
-enabled = true
-proxy_url = "http://127.0.0.1:43128"
-dangerously_allow_all_unix_sockets = false
-domains = { "primary.example" = "allow" }
-unix_sockets = { "/tmp/primary.sock" = "allow" }
-
-[permissions.managed-secondary]
-extends = "managed-primary"
-
-[permissions.managed-secondary.network]
-proxy_url = "http://127.0.0.1:43129"
-"#;
-    let mut baseline: Option<(NetworkProxySpec, NetworkProxySpec)> = None;
-
-    for source in ["baseline", "user", "trusted project"] {
-        let codex_home = TempDir::new()?;
-        let workspace = TempDir::new()?;
-        let workspace_key = TomlValue::String(project_trust_key(workspace.path()));
-        let user_features = if source == "user" { feature_config } else { "" };
-        std::fs::write(
-            codex_home.path().join(CONFIG_TOML_FILE),
-            format!(
-                r#"
-[projects.{workspace_key}]
-trust_level = "trusted"
-{user_features}
-"#
-            ),
-        )?;
-        if source == "trusted project" {
-            let project_config_dir = workspace.path().join(".codex");
-            std::fs::create_dir_all(&project_config_dir)?;
-            std::fs::write(project_config_dir.join(CONFIG_TOML_FILE), feature_config)?;
-        }
-
-        let config = ConfigBuilder::without_managed_config_for_tests()
-            .codex_home(codex_home.path().to_path_buf())
-            .harness_overrides(ConfigOverrides {
-                cwd: Some(workspace.path().to_path_buf()),
-                ..Default::default()
-            })
-            .cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
-            )
-            .build()
-            .await?;
-
-        assert!(!config.features.enabled(Feature::NetworkProxy), "{source}");
-        assert!(config.managed_network_requirements_enabled(), "{source}");
-        let active_profile = config
-            .permissions
-            .active_permission_profile()
-            .expect("managed profile should be active");
-        let initial = config
-            .permissions
-            .network
-            .as_ref()
-            .expect("shared requirements should enable the proxy");
-        let mut selected_profile = active_profile;
-        selected_profile.id = "managed-secondary".to_string();
-        let reselected = config
-            .network_proxy_spec_for_active_permission_profile(
-                &selected_profile,
-                config.permissions.permission_profile(),
-            )?
-            .expect("reselected managed profile should retain the proxy");
-
-        if let Some((baseline_initial, baseline_reselected)) = &baseline {
-            assert_eq!(initial, baseline_initial, "{source} initial");
-            assert_eq!(&reselected, baseline_reselected, "{source} reselected");
-        } else {
-            assert!(initial.enabled());
-            assert!(reselected.enabled());
-            assert_eq!(initial.proxy_host_and_port(), "127.0.0.1:43128");
-            assert_eq!(reselected.proxy_host_and_port(), "127.0.0.1:43129");
-            baseline = Some((initial.clone(), reselected));
-        }
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn network_proxy_feature_uses_profile_network_proxy_settings() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -2898,72 +2674,6 @@ async fn permission_profile_override_populates_runtime_permissions() -> std::io:
     );
     Ok(())
 }
-
-#[tokio::test]
-async fn persisted_permissions_initialize_proxy_with_expandable_managed_allowlist()
--> anyhow::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        "default_permissions = \":danger-full-access\"\n",
-    )?;
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .harness_overrides(ConfigOverrides {
-            persisted_permission_profile: Some(PermissionProfile::read_only()),
-            ..Default::default()
-        })
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                "[experimental_network]\nenabled = true\n[experimental_network.domains]\n'managed.example' = 'allow'\n",
-            ),
-        )
-        .build()
-        .await?;
-    assert_eq!(
-        (
-            config.permissions.permission_profile(),
-            config.permissions.active_permission_profile()
-        ),
-        (&PermissionProfile::read_only(), None),
-    );
-
-    let mut rules = codex_execpolicy::Policy::empty();
-    rules.add_network_rule(
-        "remembered.example",
-        codex_execpolicy::NetworkRuleProtocol::Https,
-        codex_execpolicy::Decision::Allow,
-        /*justification*/ None,
-    )?;
-    let spec = config
-        .permissions
-        .network
-        .as_ref()
-        .expect("managed proxy")
-        .with_exec_policy_network_rules(&rules)?;
-    let state = spec.build_state_with_audit_metadata(
-        Default::default(),
-        codex_utils_path_uri::Platform::native(),
-        codex_network_proxy::LocalBindingPolicy::DefaultFalse,
-    )?;
-    let proxy = codex_network_proxy::NetworkProxy::builder()
-        .state(Arc::new(state))
-        .managed_by_codex(/*managed_by_codex*/ false)
-        .build()
-        .await?;
-    proxy.add_allowed_domain("newly-approved.example").await?;
-    assert_eq!(
-        proxy.current_cfg().await?.allowed_domains(),
-        Some(vec![
-            "managed.example".to_string(),
-            "remembered.example".to_string(),
-            "newly-approved.example".to_string(),
-        ]),
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn persisted_permission_profile_id_wins_over_configured_default() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -4752,14 +4462,12 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
     assert_eq!(
         tui,
         Tui {
-            default_hosts: Default::default(),
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             screen_reader_detection_done: None,
             effects: Default::default(),
             rendering: Default::default(),
             show_tooltips: true,
-            show_server_version_notice: true,
             auto_recap: true,
             disable_paste_burst: None,
             vim_mode_default: false,
@@ -6184,183 +5892,6 @@ enabled = true
 
     Ok(())
 }
-
-#[tokio::test]
-async fn selected_plugin_wins_after_discovered_plugin_requirements() -> anyhow::Result<()> {
-    let codex_home = TempDir::new()?;
-    let plugin_root = codex_home
-        .path()
-        .join("plugins/cache")
-        .join("test/sample/local");
-    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
-    std::fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
-    )?;
-    std::fs::write(
-        plugin_root.join(".mcp.json"),
-        r#"{
-  "mcpServers": {
-    "sample": {
-      "type": "http",
-      "url": "https://sample.example/mcp"
-    },
-    "unlisted": {
-      "type": "http",
-      "url": "https://unlisted.example/mcp"
-    }
-  }
-}"#,
-    )?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
-[features]
-plugins = true
-
-[plugins."sample@test"]
-enabled = true
-"#,
-    )?;
-
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[plugins."sample@test".mcp_servers.sample.identity]
-url = "https://sample.example/mcp"
-"#,
-            ),
-        )
-        .build()
-        .await?;
-    let plugins_manager =
-        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
-    let mcp_config = config.to_mcp_config(&plugins_manager).await;
-    let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
-
-    assert_eq!(
-        configured_servers
-            .get("sample")
-            .map(|server| (server.enabled, server.disabled_reason.clone())),
-        Some((true, None))
-    );
-    assert_eq!(
-        configured_servers
-            .get("unlisted")
-            .map(|server| (server.enabled, server.disabled_reason.clone())),
-        Some((
-            false,
-            Some(McpServerDisabledReason::Requirements {
-                source: RequirementSource::EnterpriseManaged {
-                    id: "req_1".to_string(),
-                    name: "Base requirements".to_string(),
-                },
-            })
-        ))
-    );
-
-    let selected = http_mcp("https://selected.example/mcp");
-    let mcp_config = config
-        .to_mcp_config_with_plugin_registrations(
-            &plugins_manager,
-            [McpServerRegistration::from_selected_plugin(
-                "unlisted".to_string(),
-                McpPluginAttribution::new(
-                    "selected-root".to_string(),
-                    "Selected Plugin".to_string(),
-                ),
-                /*selection_order*/ 0,
-                codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
-                selected.clone(),
-            )],
-        )
-        .await;
-
-    assert_eq!(
-        mcp_config
-            .mcp_server_catalog
-            .server("unlisted")
-            .map(|server| (server.source().clone(), server.config().clone())),
-        Some((
-            codex_mcp::McpServerSource::SelectedPlugin(McpPluginAttribution::new(
-                "selected-root".to_string(),
-                "Selected Plugin".to_string(),
-            )),
-            selected,
-        ))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn to_mcp_config_empty_mcp_requirements_disable_plugin_mcps() -> anyhow::Result<()> {
-    let codex_home = TempDir::new()?;
-    let plugin_root = codex_home
-        .path()
-        .join("plugins/cache")
-        .join("test/sample/local");
-    std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
-    std::fs::write(
-        plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
-    )?;
-    std::fs::write(
-        plugin_root.join(".mcp.json"),
-        r#"{
-  "mcpServers": {
-    "sample": {
-      "type": "http",
-      "url": "https://sample.example/mcp"
-    }
-  }
-}"#,
-    )?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
-[features]
-plugins = true
-
-[plugins."sample@test"]
-enabled = true
-"#,
-    )?;
-
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[mcp_servers]
-"#,
-            ),
-        )
-        .build()
-        .await?;
-    let plugins_manager =
-        plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
-    let mcp_config = config.to_mcp_config(&plugins_manager).await;
-    let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
-
-    assert_eq!(
-        configured_servers
-            .get("sample")
-            .map(|server| (server.enabled, server.disabled_reason.clone())),
-        Some((
-            false,
-            Some(McpServerDisabledReason::Requirements {
-                source: RequirementSource::EnterpriseManaged {
-                    id: "req_1".to_string(),
-                    name: "Base requirements".to_string(),
-                },
-            })
-        ))
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn add_dir_override_extends_workspace_writable_roots() -> std::io::Result<()> {
     let temp_dir = TempDir::new()?;
@@ -8925,9 +8456,6 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
                 "  Configured template: {{ tenant_policy_config }}  ".to_string(),
             ),
             experimental_conversation_history_prompt: None,
-            experimental_denial_reconsideration_prompt: Some(
-                "  Reconsider this review carefully.  ".to_owned(),
-            ),
             conversation_history_max_output_tokens: None,
         }),
         ..Default::default()
@@ -8949,14 +8477,12 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
             config.guardian_policy_config.as_deref(),
             config.guardian_extra_policy.as_deref(),
             config.guardian_policy_template.as_deref(),
-            config.guardian_denial_reconsideration_prompt.as_deref(),
         ),
         (
             expected_mode,
             Some("Use the user-configured guardian policy."),
             Some("Use the user-configured additional policy."),
             Some("Configured template: {{ tenant_policy_config }}"),
-            Some("Reconsider this review carefully."),
         )
     );
 
@@ -8966,34 +8492,6 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
         features.contains("async_classifier_mode"),
     );
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_rejects_oversized_guardian_reconsideration_prompt() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let cfg = ConfigToml {
-        auto_review: Some(AutoReviewToml {
-            experimental_denial_reconsideration_prompt: Some("é".repeat(501)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let error = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides {
-            cwd: Some(codex_home.path().to_path_buf()),
-            ..Default::default()
-        },
-        codex_home.abs(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        error.to_string(),
-        "auto_review.experimental_denial_reconsideration_prompt exceeds 1,000 UTF-8 bytes"
-    );
     Ok(())
 }
 
@@ -9026,7 +8524,6 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
                 extra_policy: Some("Use the user-configured additional policy.".to_string()),
                 experimental_policy_template: None,
                 experimental_conversation_history_prompt: None,
-                experimental_denial_reconsideration_prompt: None,
                 conversation_history_max_output_tokens: None,
             }),
             ..Default::default()
@@ -9069,7 +8566,6 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
             extra_policy: Some("   ".to_string()),
             experimental_policy_template: None,
             experimental_conversation_history_prompt: Some(String::new()),
-            experimental_denial_reconsideration_prompt: Some("  ".to_owned()),
             conversation_history_max_output_tokens: None,
         }),
         ..Default::default()
@@ -9090,9 +8586,8 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
             config.guardian_policy_config,
             config.guardian_extra_policy,
             config.guardian_conversation_history_prompt,
-            config.guardian_denial_reconsideration_prompt,
         ),
-        (None, None, None, None)
+        (None, None, None)
     );
 
     Ok(())
@@ -10473,7 +9968,6 @@ async fn metrics_exporter_defaults_to_statsig_when_missing() -> std::io::Result<
     .await?;
 
     assert_eq!(config.otel.metrics_exporter, OtelExporterKind::Statsig);
-    assert!(config.otel.log_sse_deltas);
     assert!(!config.otel.agent_response_logging_enabled());
     assert!(!config.otel.guardian_assessment_logging_enabled());
     Ok(())
@@ -10485,7 +9979,6 @@ async fn trace_exporter_defaults_to_none_when_log_exporter_is_set() -> std::io::
     let mut cfg = fixture.cfg.clone();
     cfg.otel = Some(OtelConfigToml {
         tool_result: Some(toml::from_str("max_bytes = 8192").expect("tool-result logging config")),
-        log_sse_deltas: Some(false),
         log_agent_responses: Some(true),
         log_guardian_assessments: Some(true),
         exporter: Some(OtelExporterKind::OtlpHttp {
@@ -10509,7 +10002,6 @@ async fn trace_exporter_defaults_to_none_when_log_exporter_is_set() -> std::io::
     .await?;
 
     assert_eq!(config.otel.tool_result.max_bytes, 8192);
-    assert!(!config.otel.log_sse_deltas);
     assert!(config.otel.agent_response_logging_enabled());
     assert!(config.otel.guardian_assessment_logging_enabled());
     assert!(matches!(
@@ -10828,7 +10320,6 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         application: None,
         allow_managed_hooks_only: None,
         allow_appshots: None,
-        allow_remote_control: None,
         allow_browser_and_computer_use: None,
         computer_use: None,
         browser_use: None,
@@ -11387,79 +10878,6 @@ apps_mcp_product_sku = "tpp"
 }
 
 #[tokio::test]
-async fn config_loads_cloud_skills_with_legacy_noop() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    for (settings, expected) in [
-        ("", true),
-        ("[cloud.skills]", true),
-        ("[cloud.skills]\nenabled = false", false),
-        ("[cloud.skills]\nenabled = true", true),
-        ("[orchestrator.skills]\nenabled = false", true),
-        ("[orchestrator.skills]\nenabled = true", true),
-        (
-            "[orchestrator.skills]\nenabled = false\n[cloud.skills]",
-            true,
-        ),
-        (
-            "[orchestrator.skills]\nenabled = true\n[cloud.skills]\nenabled = false",
-            false,
-        ),
-        (
-            "[orchestrator.skills]\nenabled = false\n[cloud.skills]\nenabled = true",
-            true,
-        ),
-    ] {
-        let cfg: ConfigToml = toml::from_str(&format!(
-            "model = \"gpt-5.4\"\n{settings}\n[orchestrator.mcp]\nenabled = false"
-        ))
-        .expect("cloud skill settings should deserialize");
-        let config = Config::load_from_base_config_with_overrides(
-            cfg,
-            ConfigOverrides::default(),
-            codex_home.abs(),
-        )
-        .await?;
-
-        assert_eq!(
-            (config.cloud_skill_enabled, config.orchestrator_mcp_enabled),
-            (expected, false),
-            "{settings}"
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn config_loads_orchestrator_settings_from_toml() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let cfg: ConfigToml = toml::from_str(
-        r#"
-model = "gpt-5.4"
-
-[orchestrator.skills]
-enabled = false
-
-[orchestrator.mcp]
-enabled = false
-"#,
-    )
-    .expect("TOML deserialization should succeed for orchestrator settings");
-
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
-
-    assert_eq!(
-        (config.cloud_skill_enabled, config.orchestrator_mcp_enabled),
-        (true, false)
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn config_loads_mcp_oauth_callback_url_from_toml() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let toml = r#"
@@ -11570,424 +10988,6 @@ async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow:
 
     Ok(())
 }
-
-#[tokio::test]
-async fn oversized_managed_developer_instructions_are_rejected_during_config_load()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    // The policy text alone fits; rendering its required context markers must not.
-    let instructions = "x".repeat(codex_utils_string::approx_bytes_for_tokens(
-        /*tokens*/ 10_000,
-    ));
-
-    let error = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                "additional_developer_instructions = {instructions:?}"
-            )),
-        )
-        .build()
-        .await
-        .expect_err("oversized managed instructions must fail during config loading");
-
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    let message = error.to_string();
-    assert!(
-        message.starts_with(
-            "`additional_developer_instructions` from enterprise-managed requirements Base requirements (req_1) exceeds the model-context limit of 10000 estimated tokens"
-        ),
-        "unexpected config-load error: {message}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn requirements_disallowing_default_sandbox_falls_back_to_required_default()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
-            ),
-        )
-        .build()
-        .await?;
-    assert_eq!(
-        config.legacy_sandbox_policy(),
-        SandboxPolicy::new_read_only_policy()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn explicit_sandbox_mode_falls_back_when_disallowed_by_requirements() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"sandbox_mode = "danger-full-access"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
-            ),
-        )
-        .build()
-        .await?;
-    assert_eq!(
-        config.legacy_sandbox_policy(),
-        SandboxPolicy::new_read_only_policy()
-    );
-    Ok(())
-}
-
-#[test_case::test_case(false; "optional")]
-#[test_case::test_case(true; "required")]
-#[tokio::test]
-async fn local_mxc_preference_preserves_configured_backend(
-    require_mxc: bool,
-) -> anyhow::Result<()> {
-    use codex_sandboxing::SandboxType::WindowsMxc;
-    use codex_sandboxing::SandboxType::WindowsRestrictedToken as RestrictedToken;
-
-    let codex_home = TempDir::new()?;
-    let permission_selection = EffectivePermissionSelection {
-        profiles: None,
-        selected_profile_id: None,
-        persisted_profile_id_was_provided: false,
-        requirements_force_profile_selection: false,
-    };
-    for (prefer, resolved_preference, binding, allow_mxc, mode, expected) in [
-        (true, true, true, true, "unelevated", WindowsMxc),
-        (true, false, true, true, "unelevated", RestrictedToken),
-        (true, false, true, false, "unelevated", RestrictedToken),
-        (true, false, false, true, "unelevated", RestrictedToken),
-        (false, false, true, true, "unelevated", RestrictedToken),
-        (false, false, false, true, "mxc", WindowsMxc),
-    ] {
-        let cfg: ConfigToml = toml::from_str(&format!(
-            "[windows]\nsandbox = {mode:?}\n[features]\nprefer_mxc = {prefer}\n\
-             [features.network_proxy]\nenabled = true\nallow_local_binding = {binding}\n"
-        ))?;
-        std::fs::write(
-            codex_home.path().join(CONFIG_TOML_FILE),
-            toml::to_string(&cfg)?,
-        )?;
-        let loaded = ConfigBuilder::without_managed_config_for_tests()
-            .codex_home(codex_home.path().to_path_buf())
-            .fallback_cwd(Some(codex_home.path().to_path_buf()))
-            .cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(format!(
-                    "[windows]\nallow_mxc = {allow_mxc}\nrequire_mxc = {require_mxc}\n"
-                )),
-            )
-            .build()
-            .await?;
-        let mut config = Config::rebuild_with_session_layers(
-            &loaded.config_layer_stack,
-            loaded.cwd.to_path_buf(),
-            &loaded.config_layer_stack,
-            loaded.codex_home.clone(),
-        )
-        .await?;
-        let mut caller_config = config.clone();
-        caller_config.config_layer_stack = ConfigLayerStack::default();
-        caller_config.prefer_mxc = false;
-        caller_config.permissions.windows_sandbox_type = RestrictedToken;
-        assert_eq!(
-            caller_config
-                .validate_windows_mxc_requirement_from(&config)
-                .is_err(),
-            cfg!(windows) && require_mxc,
-        );
-        let result = config.validate_windows_mxc_requirement();
-        caller_config.config_layer_stack = config.config_layer_stack.clone();
-        assert_eq!(
-            config
-                .resolve_runtime_refresh(&caller_config, RuntimeConfigRefresh::Mcp)
-                .is_err(),
-            result.is_err(),
-        );
-        if cfg!(windows)
-            && require_mxc
-            && mode != "mxc"
-            && !(prefer && binding && allow_mxc && codex_sandboxing::windows_mxc_available())
-        {
-            let error = result.expect_err("MXC must already be selected");
-            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-            assert!(error.to_string().contains("windows.require_mxc = true"));
-            continue;
-        }
-        result?;
-        assert_eq!(
-            config_allows_mxc(
-                &config
-                    .config_layer_stack
-                    .requirements()
-                    .windows_sandbox_mode,
-                &permission_selection,
-                /*profiles_are_active*/ false,
-                /*permission_profile*/ None,
-                /*network_requirements*/ None,
-                &cfg,
-                /*enable_network_proxy*/ true,
-            )?,
-            binding && allow_mxc,
-        );
-        assert_eq!(
-            config.prefer_mxc,
-            prefer && binding && allow_mxc && codex_sandboxing::windows_mxc_available(),
-        );
-        // Exercise both resolved decisions independently of the host's native support.
-        config.prefer_mxc = resolved_preference;
-        assert_eq!(
-            (
-                config.windows_sandbox_type_from_config(),
-                config.effective_local_windows_sandbox_type()
-            ),
-            (
-                if mode == "mxc" {
-                    WindowsMxc
-                } else {
-                    RestrictedToken
-                },
-                expected
-            ),
-            "prefer={prefer}, resolved={resolved_preference}, binding={binding}, mode={mode}"
-        );
-    }
-    for sandbox in ["unelevated", "mxc"] {
-        let cfg: ConfigToml = toml::from_str(&format!(
-            "[windows]\nsandbox = {sandbox:?}\nallow_mxc = false\n[features]\nprefer_mxc = true\n"
-        ))?;
-        assert!(!config_allows_mxc(
-            &ConfigRequirements::default().windows_sandbox_mode,
-            &permission_selection,
-            /*profiles_are_active*/ false,
-            /*permission_profile*/ None,
-            /*network_requirements*/ None,
-            &cfg,
-            /*enable_network_proxy*/ false,
-        )?);
-        let result = Config::load_from_base_config_with_overrides(
-            cfg,
-            ConfigOverrides::default(),
-            codex_home.abs(),
-        )
-        .await;
-        if sandbox == "mxc" {
-            assert_eq!(
-                result
-                    .expect_err("explicit MXC must respect the opt-out")
-                    .to_string(),
-                "windows.sandbox = \"mxc\" is not allowed when windows.allow_mxc = false",
-            );
-        } else {
-            assert!(!result?.prefer_mxc);
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn windows_sandbox_mode_falls_back_when_disallowed_by_requirements() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"[windows]
-sandbox = "unelevated"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"[windows]
-allowed_sandbox_implementations = ["elevated"]
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(
-        config.permissions.windows_sandbox_mode,
-        Some(codex_config::types::WindowsSandboxModeToml::Elevated)
-    );
-    assert!(
-        config.startup_warnings.iter().any(|warning| warning
-            .contains("Configured value for `windows.sandbox` is disallowed by requirements")),
-        "{:?}",
-        config.startup_warnings
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn danger_full_access_with_never_is_rejected_when_requirements_force_read_only()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"approval_policy = "never"
-sandbox_mode = "danger-full-access"
-"#,
-    )?;
-
-    let err = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
-            ),
-        )
-        .build()
-        .await
-        .expect_err("requirements-constrained yolo should require sandbox approval");
-
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        err.to_string(),
-        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn named_full_access_profile_with_never_is_rejected_when_requirements_force_read_only()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"approval_policy = "never"
-default_permissions = "dev"
-
-[permissions.dev.filesystem]
-":root" = "write"
-"#,
-    )?;
-
-    let err = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
-            ),
-        )
-        .build()
-        .await
-        .expect_err("requirements-constrained full-access profile should require sandbox approval");
-
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        err.to_string(),
-        "`approval_policy = \"never\"` cannot be used because requirements do not allow `sandbox_mode = \"danger-full-access\"`; Codex would fall back to read-only permissions with approvals disabled. Choose an `approval_policy` based on what you need, such as `on-request`, or choose an allowed sandbox mode."
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn permission_profile_override_falls_back_when_disallowed_by_requirements()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        "[features.network_proxy]\nenabled = true\nproxy_url = 'http://127.0.0.1:43128'\n",
-    )?;
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .harness_overrides(ConfigOverrides {
-            permission_profile: Some(PermissionProfile::Disabled),
-            ..Default::default()
-        })
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_sandbox_modes = ["read-only"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    let expected_sandbox_policy = SandboxPolicy::new_read_only_policy();
-    assert_eq!(config.legacy_sandbox_policy(), expected_sandbox_policy);
-    assert_eq!(
-        config.permissions.effective_permission_profile(),
-        PermissionProfile::read_only()
-    );
-    // Prepare the proxy while the candidate permits network, before fallback.
-    let expected_network = NetworkProxySpec::from_config_and_constraints(
-        NetworkProxyConfig {
-            enabled: true,
-            proxy_url: "http://127.0.0.1:43128".to_string(),
-            ..Default::default()
-        },
-        /*requirements*/ None,
-        &PermissionProfile::read_only(),
-    )?;
-    assert_eq!(config.permissions.network, Some(expected_network));
-    Ok(())
-}
-
-#[tokio::test]
-async fn active_profile_is_cleared_when_requirements_force_fallback() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    for overrides in [
-        ConfigOverrides {
-            default_permissions: Some(BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string()),
-            ..Default::default()
-        },
-        ConfigOverrides {
-            persisted_permission_profile_id: Some(
-                BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS.to_string(),
-            ),
-            ..Default::default()
-        },
-    ] {
-        let config = ConfigBuilder::without_managed_config_for_tests()
-            .codex_home(codex_home.path().to_path_buf())
-            .fallback_cwd(Some(codex_home.path().to_path_buf()))
-            .harness_overrides(overrides)
-            .cloud_config_bundle(
-                CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                    r#"allowed_sandbox_modes = ["read-only"]"#,
-                ),
-            )
-            .build()
-            .await?;
-
-        assert_eq!(
-            config.permissions.effective_permission_profile(),
-            PermissionProfile::read_only()
-        );
-        assert_eq!(config.permissions.active_permission_profile(), None);
-        assert!(
-            config
-                .startup_warnings
-                .iter()
-                .any(|warning| warning.contains(
-                    "Configured value for `permission_profile` is disallowed by requirements"
-                )),
-            "{:?}",
-            config.startup_warnings
-        );
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn bypass_hook_trust_adds_startup_warning() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -12068,74 +11068,6 @@ async fn permission_profile_override_preserves_split_write_roots() -> std::io::R
     );
     Ok(())
 }
-
-#[tokio::test]
-async fn requirements_web_search_mode_overrides_danger_full_access_default() -> std::io::Result<()>
-{
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"sandbox_mode = "danger-full-access"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_web_search_modes = ["cached"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(config.web_search_mode.value(), WebSearchMode::Cached);
-    assert_eq!(
-        resolve_web_search_mode_for_turn(
-            &config.web_search_mode,
-            &config.permissions.effective_permission_profile(),
-            ProviderCapabilities::default(),
-        ),
-        WebSearchMode::Cached,
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn requirements_disallowing_default_approval_falls_back_to_required_default()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let workspace = TempDir::new()?;
-    let workspace_key = workspace.path().to_string_lossy().replace('\\', "\\\\");
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        format!(
-            r#"
-[projects."{workspace_key}"]
-trust_level = "untrusted"
-"#
-        ),
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(workspace.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approval_policies = ["on-request"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(
-        config.permissions.approval_policy.value(),
-        AskForApproval::OnRequest
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn explicit_untrusted_approval_policy_is_rejected() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -12159,246 +11091,8 @@ async fn explicit_untrusted_approval_policy_is_rejected() -> std::io::Result<()>
     );
     Ok(())
 }
-
-#[tokio::test]
-async fn feature_requirements_normalize_effective_feature_values() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-view_image = true
-shell_tool = false
-use_xaa = true
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(config.features.enabled(Feature::ViewImage));
-    assert!(!config.features.enabled(Feature::ShellTool));
-    assert!(config.features.enabled(Feature::UseXaa));
-    assert!(
-        !config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("Configured value for `features`")),
-        "{:?}",
-        config.startup_warnings
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn feature_requirements_can_still_disable_unified_exec() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        "[features]\nuse_xaa = true\n",
-    )?;
-
-    let mut config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-unified_exec = false
-shell_tool = true
-use_xaa = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::UnifiedExec));
-    assert!(config.features.enabled(Feature::ShellTool));
-    assert!(!config.features.enabled(Feature::UseXaa));
-    assert!(
-        !config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("Ignoring unknown `features` requirement")),
-        "{:?}",
-        config.startup_warnings
-    );
-
-    config
-        .features
-        .enable(Feature::UnifiedExec)
-        .expect("managed feature mutations should normalize successfully");
-    assert!(!config.features.enabled(Feature::UnifiedExec));
-    assert!(config.features.enabled(Feature::ShellTool));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn feature_requirements_auto_review_disables_guardian_approval() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-auto_review = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::GuardianApproval));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn browser_feature_requirements_are_valid() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-in_app_browser = false
-browser_annotation_api = false
-browser_use = false
-browser_use_full_cdp_access = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::InAppBrowser));
-    assert!(!config.features.enabled(Feature::BrowserAnnotationApi));
-    assert!(!config.features.enabled(Feature::BrowserUse));
-    assert!(!config.features.enabled(Feature::BrowserUseFullCdpAccess));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn in_app_chat_feature_requirements_are_valid() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-in_app_chat = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::InAppChat));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn in_app_dictation_feature_requirements_are_valid() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-in_app_dictation = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::InAppDictation));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn in_app_local_automation_feature_requirements_are_valid() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-in_app_local_automation = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(!config.features.enabled(Feature::InAppLocalAutomation));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn explicit_feature_config_is_normalized_by_requirements() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"
-[features]
-view_image = false
-shell_tool = true
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-view_image = true
-shell_tool = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(config.features.enabled(Feature::ViewImage));
-    assert!(!config.features.enabled(Feature::ShellTool));
-    assert!(
-        !config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning.contains("Configured value for `features`")),
-        "{:?}",
-        config.startup_warnings
-    );
-
-    Ok(())
-}
-
 #[test_case::test_case(Feature::Personality; "personality")]
 #[test_case::test_case(Feature::GuardianThreadContext; "guardian thread context")]
-#[test_case::test_case(Feature::DaemonAutoStart; "daemon auto start")]
 #[test_case::test_case(Feature::Worktrees; "worktrees")]
 #[test_case::test_case(Feature::RealtimeConversation; "realtime conversation")]
 #[test_case::test_case(Feature::ShellZshFork; "shell zsh fork")]
@@ -12550,123 +11244,6 @@ async fn approvals_reviewer_can_be_set_in_config_without_guardian_approval() -> 
     assert_eq!(config.approvals_reviewer, ApprovalsReviewer::User);
     Ok(())
 }
-
-#[tokio::test]
-async fn requirements_disallowing_default_approvals_reviewer_falls_back_to_required_default()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["guardian_subagent"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(config.approvals_reviewer, ApprovalsReviewer::AutoReview);
-    Ok(())
-}
-
-#[tokio::test]
-async fn root_approvals_reviewer_falls_back_when_disallowed_by_requirements() -> std::io::Result<()>
-{
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"approvals_reviewer = "user"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["guardian_subagent"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(config.approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert!(
-        config.startup_warnings.iter().any(|warning| {
-            warning
-                .contains("Configured value for `approvals_reviewer` is disallowed by requirements")
-        }),
-        "{:?}",
-        config.startup_warnings
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn profile_approvals_reviewer_falls_back_when_disallowed_by_requirements()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let selected_config = codex_home.path().join("default.config.toml");
-    std::fs::write(
-        &selected_config,
-        r#"approvals_reviewer = "user"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .loader_overrides(LoaderOverrides {
-            user_config_path: Some(selected_config.abs()),
-            user_config_profile: Some("default".parse().expect("profile-v2 name")),
-            ..LoaderOverrides::without_managed_config_for_tests()
-        })
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["guardian_subagent"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(config.approvals_reviewer, ApprovalsReviewer::AutoReview);
-    Ok(())
-}
-
-#[tokio::test]
-async fn approvals_reviewer_preserves_valid_user_choice_when_allowed_by_requirements()
--> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"approvals_reviewer = "guardian_subagent"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"allowed_approvals_reviewers = ["user", "guardian_subagent"]"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert_eq!(config.approvals_reviewer, ApprovalsReviewer::AutoReview);
-    assert!(
-        config
-            .startup_warnings
-            .iter()
-            .all(|warning| !warning.contains("approvals_reviewer")),
-        "{:?}",
-        config.startup_warnings
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn smart_approvals_alias_is_ignored() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -13367,101 +11944,6 @@ max_concurrent_threads_per_session = 1
 
     Ok(())
 }
-
-#[tokio::test]
-async fn feature_requirements_normalize_runtime_feature_mutations() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let mut config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-view_image = true
-shell_tool = false
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    let mut requested = config.features.get().clone();
-    requested
-        .disable(Feature::ViewImage)
-        .enable(Feature::ShellTool);
-    assert!(config.features.can_set(&requested).is_ok());
-    config
-        .features
-        .set(requested)
-        .expect("managed feature mutations should normalize successfully");
-
-    assert!(config.features.enabled(Feature::ViewImage));
-    assert!(!config.features.enabled(Feature::ShellTool));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn feature_requirements_warn_on_collab_legacy_alias() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-collab = true
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(config.features.enabled(Feature::Collab));
-    assert!(
-        config.startup_warnings.iter().any(|warning| {
-            warning.contains("Using legacy `features` requirement `collab`")
-                && warning.contains("prefer canonical feature key `multi_agent`")
-        }),
-        "{:?}",
-        config.startup_warnings
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn feature_requirements_warn_and_ignore_unknown_feature() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                r#"
-[features]
-made_up_feature = true
-"#,
-            ),
-        )
-        .build()
-        .await?;
-
-    assert!(
-        config
-            .startup_warnings
-            .iter()
-            .any(|warning| warning
-                .contains("Ignoring unknown `features` requirement `made_up_feature`")),
-        "{:?}",
-        config.startup_warnings
-    );
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn tool_suggest_discoverables_load_from_config_toml() -> std::io::Result<()> {
     let cfg: ConfigToml = toml::from_str(
@@ -13975,21 +12457,6 @@ fn test_tui_notification_condition_rejects_unknown_value() {
         "unexpected error: {err}"
     );
 }
-
-async fn load_with_enterprise_requirement(
-    codex_home: &TempDir,
-    requirements: impl Into<String>,
-) -> std::io::Result<Config> {
-    ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_config_bundle(
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(requirements),
-        )
-        .build()
-        .await
-}
-
 #[test_case::test_case(true; "enforce_sqlite_journal_mode")]
 #[test_case::test_case(false; "preserve_sqlite_journal_mode")]
 #[tokio::test]
@@ -14124,10 +12591,6 @@ tracestate = { vendor = { tenant = "managed", region = "us" }, other = { keep = 
     "[otel]\nlog_agent_responses = false\nlog_guardian_assessments = true",
     "[otel]\nlog_agent_responses = true\nlog_guardian_assessments = false",
     "[otel]\nlog_agent_responses = true\nlog_guardian_assessments = false", true; "managed_logging_flags"
-)]
-#[test_case::test_case(
-    "[otel]\nlog_sse_deltas = true", "[otel]\nlog_sse_deltas = false",
-    "[otel]\nlog_sse_deltas = false", true; "managed_sse_delta_logs"
 )]
 #[tokio::test]
 async fn otel_requirements_resolve_config(

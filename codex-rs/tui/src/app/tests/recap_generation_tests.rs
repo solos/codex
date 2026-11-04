@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::session_lifecycle::ThreadAttachPresentation;
 use crate::app::tests::session_lifecycle_requests::recorded_params;
-use crate::app::tests::session_lifecycle_requests::start_recording_remote_app_server;
+use crate::app::tests::session_lifecycle_requests::start_recording_cloud_app_server;
 use crate::app_event::RecapTrigger;
 use codex_app_server_client::AppServerClient;
 use codex_model_provider_info::ModelProviderInfo;
@@ -228,159 +228,11 @@ stream_max_retries = 0
 }
 
 #[tokio::test]
-async fn manual_recap_works_when_auto_recap_disabled() -> Result<()> {
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    app.local_settings.tui.auto_recap = false;
-    let thread_id = ThreadId::new();
-    app.active_thread_id = Some(thread_id);
-    app.transcript_cells
-        .push(Arc::new(crate::history_cell::UserHistoryCell {
-            message: "Summarize this conversation".to_string(),
-            presentation: Default::default(),
-            text_elements: Vec::new(),
-            local_image_paths: Vec::new(),
-            remote_image_urls: Vec::new(),
-        }));
-    let (mut app_server, _requests, proxy) = start_recording_remote_app_server(&app.config).await?;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-
-    // An automatic request must not occupy the slot needed by a manual request.
-    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
-    app.handle_event(
-        &mut tui,
-        &mut app_server,
-        AppEvent::GenerateRecap { thread_id },
-    )
-    .await?;
-    assert!(
-        render_chat_widget(&app).contains("Generating conversation recap…"),
-        "manual recap should show progress while generation is in flight"
-    );
-    let started_event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
-        .await?
-        .expect("manual recap start event");
-    let (request, temporary_thread_id) = match &started_event {
-        AppEvent::RecapStarted {
-            thread_id: requested_thread_id,
-            request_id,
-            trigger,
-            completed_turn_count,
-            turn_revision,
-            result: Ok(temporary_thread_id),
-            ..
-        } if *requested_thread_id == thread_id && *trigger == RecapTrigger::Manual => (
-            recap::RecapRequest {
-                thread_id: *requested_thread_id,
-                request_id: *request_id,
-                trigger: *trigger,
-                completed_turn_count: *completed_turn_count,
-                turn_revision: *turn_revision,
-            },
-            ThreadId::from_string(temporary_thread_id).expect("temporary recap thread ID"),
-        ),
-        other => panic!("expected a started manual recap, got {other:?}"),
-    };
-
-    app.handle_event(&mut tui, &mut app_server, started_event)
-        .await?;
-
-    assert_eq!(app.temporary_structured_requests.len(), 1);
-    assert!(
-        app.handle_generated_recap(
-            request,
-            temporary_thread_id,
-            Err("temporary failure".to_string()),
-        )
-        .is_none()
-    );
-    assert!(
-        !render_chat_widget(&app).contains("Generating conversation recap…"),
-        "manual recap progress should clear when generation finishes"
-    );
-
-    let cell = match app_event_rx.try_recv() {
-        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
-        other => panic!("expected visible manual recap error, got {other:?}"),
-    };
-    let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-    assert!(
-        rendered.contains("Could not generate a recap. Please try again."),
-        "rendered error: {rendered:?}"
-    );
-
-    // A completion quarantined during reconnect must not leave the next recap stuck as busy.
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
-            websocket_url: "ws://127.0.0.1:1".into(),
-            auth_token: None,
-        },
-    };
-    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
-    let stale = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv())
-        .await?
-        .expect("recap completion before disconnect");
-    assert!(matches!(stale, AppEvent::RecapStarted { .. }));
-    assert!(app.begin_reconnect());
-    app.handle_event(&mut tui, &mut app_server, stale).await?;
-    while app_event_rx.try_recv().is_ok() {}
-    app.reconnect.offline = false;
-    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
-    let next = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), app_event_rx.recv()).await?;
-    assert!(
-        matches!(next, Some(AppEvent::RecapStarted { .. })),
-        "{next:?}"
-    );
-
-    app_server.shutdown().await?;
-    proxy.await??;
-    Ok(())
-}
-
-#[tokio::test]
-async fn cloud_recap_stays_idle_and_reports_manual_unavailability() -> Result<()> {
-    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
-    let thread_id = ThreadId::new();
-    let (client, mut commands, _server_events) =
-        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
-    let app_server = AppServerSession::new(
-        crate::backend_id::BackendId::new(),
-        AppServerClient::Cloud(client),
-        crate::app_server_session::ThreadParamsMode::Cloud,
-    );
-    while events.try_recv().is_ok() {}
-
-    app.request_recap(&app_server, thread_id, RecapTrigger::Automatic);
-    app.request_recap(&app_server, thread_id, RecapTrigger::Manual);
-
-    assert!(commands.try_recv().is_err());
-    let observed = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event, AppEvent::RecapStarted { .. }))
-    );
-    let messages = observed
-        .into_iter()
-        .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => {
-                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    insta::assert_snapshot!(
-        messages.join("\n"),
-        @"■ Conversation recaps are not available for cloud conversations."
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
     prepare_eligible_recap(&mut app, thread_id).await;
-    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.local_settings.tui.auto_recap = false;
     app.schedule_recap_check(thread_id, Instant::now());
@@ -449,7 +301,7 @@ async fn recap_generation_uses_remote_workspace_cwd() -> Result<()> {
     } else {
         PathBuf::from("/srv/remote/project")
     };
-    let (app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut app_server = app_server.with_remote_cwd_override(Some(remote_cwd.clone()));
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.transcript_cells
@@ -489,7 +341,7 @@ async fn temporary_recap_threads_disable_memories_and_remote_mcp_servers() -> Re
     )?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let (app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
 
     let config = app.chat_widget.config_ref();
     let options = crate::temporary_structured_request::TemporaryStructuredThreadOptions {
@@ -571,7 +423,7 @@ async fn recap_check_rejects_a_non_displayed_thread() -> Result<()> {
     let displayed_thread_id = ThreadId::new();
     prepare_eligible_recap(&mut app, displayed_thread_id).await;
     while app_event_rx.try_recv().is_ok() {}
-    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
     app.handle_event(
@@ -607,7 +459,7 @@ async fn recap_check_rejects_a_running_turn() -> Result<()> {
         /*replay_kind*/ None,
     );
     while app_event_rx.try_recv().is_ok() {}
-    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
     app.handle_event(

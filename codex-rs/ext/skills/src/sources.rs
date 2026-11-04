@@ -40,17 +40,12 @@ impl SkillProviderSource {
         Self::new(SkillSourceKind::Executor, label, provider)
     }
 
-    pub fn cloud(label: impl Into<String>, provider: Arc<dyn SkillProvider>) -> Self {
-        Self::new(SkillSourceKind::Cloud, label, provider)
-    }
-
-    fn should_list(&self, query: &SkillListQuery<'_>) -> bool {
+    fn should_list(&self, query: &SkillListQuery) -> bool {
         match &self.kind {
             SkillSourceKind::Host => query.include_host_skills,
             SkillSourceKind::Executor => {
                 query.executor_capability_discovery_v2.is_some() || !query.executor_roots.is_empty()
             }
-            SkillSourceKind::Cloud => query.include_cloud_skills,
             SkillSourceKind::Custom(_) => true,
         }
     }
@@ -97,76 +92,30 @@ impl SkillProviders {
         self
     }
 
-    pub fn with_cloud_provider(mut self, provider: Arc<dyn SkillProvider>) -> Self {
-        self.sources
-            .push(SkillProviderSource::cloud("cloud", provider));
-        self
-    }
-
-    pub(crate) fn has_cloud_provider(&self) -> bool {
-        self.sources
-            .iter()
-            .any(|source| source.kind == SkillSourceKind::Cloud)
-    }
-
-    pub(crate) fn cloud_mcp_resources<'a>(
-        &self,
-        resources: Option<&'a codex_mcp::McpResourceClient>,
-    ) -> Option<&'a codex_mcp::McpResourceClient> {
-        resources.filter(|_| {
-            self.sources.iter().any(|source| {
-                source.kind == SkillSourceKind::Cloud && source.provider.uses_mcp_resources()
-            })
-        })
-    }
-
     pub(crate) fn has_host_provider(&self) -> bool {
         self.sources
             .iter()
             .any(|source| source.kind == SkillSourceKind::Host)
     }
 
-    pub(crate) async fn list_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
+    pub(crate) async fn list_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
         self.list_matching(&query, |source| source.should_list(&query))
             .await
     }
 
-    pub(crate) async fn list_cloud_for_turn(
-        &self,
-        query: SkillListQuery<'_>,
-    ) -> SkillProviderResult<SkillCatalog> {
-        let mut catalog = SkillCatalog::default();
-
-        for source in self
-            .sources
-            .iter()
-            .filter(|source| source.kind == SkillSourceKind::Cloud)
-        {
-            let source_catalog = source.provider.list(query.clone()).await.map_err(|err| {
-                SkillProviderError::new(format!(
-                    "{} skills unavailable: {}",
-                    source.label, err.message
-                ))
-            })?;
-            catalog.extend(source_catalog);
-        }
-
-        Ok(catalog)
-    }
-
-    pub(crate) async fn list_executor_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
+    pub(crate) async fn list_executor_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
         self.list_matching(&query, |source| source.kind == SkillSourceKind::Executor)
             .await
     }
 
-    pub(crate) async fn list_host_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
+    pub(crate) async fn list_host_for_turn(&self, query: SkillListQuery) -> SkillCatalog {
         self.list_matching(&query, |source| source.kind == SkillSourceKind::Host)
             .await
     }
 
     async fn list_matching(
         &self,
-        query: &SkillListQuery<'_>,
+        query: &SkillListQuery,
         should_list: impl Fn(&SkillProviderSource) -> bool,
     ) -> SkillCatalog {
         let mut catalog = SkillCatalog::default();

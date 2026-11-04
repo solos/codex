@@ -49,18 +49,9 @@ impl NoiseStreamHandler for ConnectionProcessor {
     type Outgoing = JSONRPCMessage;
 
     fn decode(payload: Bytes) -> Result<Self::Incoming, ExecServerError> {
-        let event = JsonRpcConnectionEvent::message(serde_json::from_slice(&payload)?);
-        if let JsonRpcConnectionEvent::QueuedRequest { request_span, .. } = &event {
-            // The request span can remain open while queued or executing. Finish a
-            // payload-free receipt marker now so a stalled executor is distinguishable
-            // from a request that never arrived, without waiting for that span to close.
-            drop(tracing::info_span!(
-                target: "codex_otel.trace_safe",
-                parent: request_span,
-                "codex.exec_server.noise_request_received",
-            ));
-        }
-        Ok(event)
+        Ok(JsonRpcConnectionEvent::message(serde_json::from_slice(
+            &payload,
+        )?))
     }
 
     fn encode(message: Self::Outgoing) -> Result<NoiseOutboundMessage, ExecServerError> {

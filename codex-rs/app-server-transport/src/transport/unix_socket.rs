@@ -13,17 +13,14 @@ use crate::websocket_compression::ZSTD_STREAM_PROTOCOL;
 use codex_uds::UnixListener;
 use codex_uds::UnixStream;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use futures::SinkExt;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_tungstenite::accept_hdr_async_with_config;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::Response as HandshakeResponse;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::http::Response;
-use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -37,20 +34,13 @@ const CONTROL_SOCKET_MODE: u32 = 0o600;
 const MAX_UNFRAGMENTED_MESSAGE_BYTES_HEADER: &str =
     "x-codex-websocket-max-unfragmented-message-bytes";
 
-#[derive(Clone, Copy)]
-pub enum DaemonShutdownAccess {
-    Disabled,
-    Managed,
-}
-
 pub async fn start_control_socket_acceptor(
     socket_path: AbsolutePathBuf,
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
-    daemon_shutdown_access: DaemonShutdownAccess,
     compression: WebSocketCompression,
 ) -> IoResult<JoinHandle<()>> {
-    let (listener, socket_guard) = bind_private_daemon_socket(socket_path.as_path()).await?;
+    let (listener, socket_guard) = bind_private_control_socket(socket_path.as_path()).await?;
     info!(
         socket_path = %socket_guard.socket_path.display(),
         "app-server control socket listening"
@@ -61,16 +51,15 @@ pub async fn start_control_socket_acceptor(
         transport_event_tx,
         shutdown_token,
         socket_guard,
-        daemon_shutdown_access,
         compression,
     )))
 }
 
-/// Binds a private daemon socket, retaining its advertised path as a rendezvous
+/// Binds a private control socket, retaining its advertised path as a rendezvous
 /// alias on Unix. Keep the guard alive for as long as the listener is in use.
-pub async fn bind_private_daemon_socket(
+async fn bind_private_control_socket(
     socket_path: &Path,
-) -> IoResult<(UnixListener, DaemonSocketFileGuard)> {
+) -> IoResult<(UnixListener, ControlSocketFileGuard)> {
     let socket_path = AbsolutePathBuf::from_absolute_path(socket_path)?;
     #[cfg(unix)]
     let (socket_path, rendezvous_path, mut startup_lock) = {
@@ -125,7 +114,7 @@ pub async fn bind_private_daemon_socket(
     {
         startup_lock.remove_on_drop = true;
     }
-    let socket_guard = DaemonSocketFileGuard {
+    let socket_guard = ControlSocketFileGuard {
         socket_path,
         #[cfg(unix)]
         rendezvous_path,
@@ -149,8 +138,7 @@ async fn run_control_socket_acceptor(
     mut listener: UnixListener,
     transport_event_tx: mpsc::Sender<TransportEvent>,
     shutdown_token: CancellationToken,
-    socket_guard: DaemonSocketFileGuard,
-    daemon_shutdown_access: DaemonShutdownAccess,
+    socket_guard: ControlSocketFileGuard,
     compression: WebSocketCompression,
 ) {
     let _socket_guard = socket_guard;
@@ -180,7 +168,6 @@ async fn run_control_socket_acceptor(
 
         let transport_event_tx = transport_event_tx.clone();
         tokio::spawn(async move {
-            let mut shutdown_request = false;
             let mut negotiated_compression = WebSocketCompression::Plain;
             let websocket_config = WebSocketConfig::default();
             let max_unfragmented_message_bytes = [
@@ -194,14 +181,7 @@ async fn run_control_socket_acceptor(
                 stream,
                 |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
                  mut response: HandshakeResponse| {
-                    if request.uri().path() == "/daemon/shutdown" {
-                        if !matches!(daemon_shutdown_access, DaemonShutdownAccess::Managed) {
-                            let mut rejection = Response::new(Some("unmanaged server".to_string()));
-                            *rejection.status_mut() = StatusCode::FORBIDDEN;
-                            return Err(rejection);
-                        }
-                        shutdown_request = true;
-                    } else if compression == WebSocketCompression::Zstd
+                    if compression == WebSocketCompression::Zstd
                         && request
                             .headers()
                             .get(WEBSOCKET_COMPRESSION_HEADER)
@@ -231,10 +211,6 @@ async fn run_control_socket_acceptor(
                     return;
                 }
             };
-            if shutdown_request {
-                run_daemon_shutdown(websocket_stream, transport_event_tx).await;
-                return;
-            }
             let (websocket_writer, websocket_reader) = websocket_stream.split();
             run_websocket_connection(
                 websocket_writer,
@@ -246,24 +222,6 @@ async fn run_control_socket_acceptor(
         });
     }
     info!("control socket acceptor shutting down");
-}
-
-async fn run_daemon_shutdown(
-    mut websocket: tokio_tungstenite::WebSocketStream<UnixStream>,
-    transport_event_tx: mpsc::Sender<TransportEvent>,
-) {
-    let pid = std::process::id().to_string();
-    if !matches!(websocket.next().await, Some(Ok(Message::Text(request))) if request == pid) {
-        return;
-    }
-    if websocket.send(Message::Text(pid.into())).await.is_err() {
-        return;
-    }
-    // Let the manager receive the acknowledgment before the main loop closes connections.
-    let _ = tokio::time::timeout(Duration::from_secs(2), websocket.next()).await;
-    let _ = transport_event_tx
-        .send(TransportEvent::DaemonShutdown)
-        .await;
 }
 
 // Unix callers hold the physical socket's startup lock through bind and publication.
@@ -295,7 +253,7 @@ async fn prepare_control_socket_path(socket_path: &Path) -> IoResult<()> {
         }
     }
 
-    // A crashed daemon can leave a dangling rendezvous symlink. Only recognize
+    // A crashed server can leave a dangling rendezvous symlink. Only recognize
     // our own deterministic alias; never remove an arbitrary symlink target.
     #[cfg(unix)]
     if std::fs::read_link(socket_path).ok().as_deref()
@@ -318,36 +276,6 @@ async fn prepare_control_socket_path(socket_path: &Path) -> IoResult<()> {
         ));
     }
     tokio::fs::remove_file(socket_path).await
-}
-
-/// Return a verified local socket endpoint, independent of the advertised Unix alias.
-/// A socket bound directly at the advertised path (e.g. SSH forwarding) is not ours on Unix.
-pub fn verified_local_daemon_socket(socket_path: &Path) -> IoResult<Option<AbsolutePathBuf>> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        let protected = protected_socket_path(socket_path)?;
-        if std::fs::read_link(socket_path).ok().as_deref() != Some(protected.as_path()) {
-            return Ok(None);
-        }
-        let directory = std::fs::symlink_metadata(codex_uds::shared_daemon_socket_directory()?)?;
-        // Match the daemon's bind-time check without creating or repairing the directory.
-        if directory.is_dir()
-            && directory.uid() == unsafe { libc::geteuid() }
-            && directory.mode() & 0o777 == 0o700
-        {
-            return AbsolutePathBuf::from_absolute_path(protected).map(Some);
-        }
-        Ok(None)
-    }
-    #[cfg(windows)]
-    {
-        // The TUI revalidates this directory and verifies the peer at connection time,
-        // using the same connect_local_daemon path as implicit startup.
-        let (path, _directory) = codex_uds::validate_private_socket_path(socket_path)?;
-        AbsolutePathBuf::from_absolute_path_checked(path).map(Some)
-    }
 }
 
 #[cfg(unix)]
@@ -510,7 +438,7 @@ async fn set_control_socket_permissions(_socket_path: &Path) -> IoResult<()> {
 }
 
 /// Owns the socket files and startup lock until the listener is shut down.
-pub struct DaemonSocketFileGuard {
+struct ControlSocketFileGuard {
     socket_path: AbsolutePathBuf,
     #[cfg(unix)]
     rendezvous_path: AbsolutePathBuf,
@@ -521,7 +449,7 @@ pub struct DaemonSocketFileGuard {
     _directory_guard: std::os::windows::io::OwnedHandle,
 }
 
-impl Drop for DaemonSocketFileGuard {
+impl Drop for ControlSocketFileGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         if std::fs::read_link(self.rendezvous_path.as_path())

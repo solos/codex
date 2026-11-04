@@ -1,7 +1,4 @@
-#![cfg(test)]
-
 use super::ModelAccessPrograms;
-use super::SavedDaybreakChoice;
 use crate::turn_input::CyberAccessProgram;
 use pretty_assertions::assert_eq;
 
@@ -20,20 +17,8 @@ fn selects_only_advertised_programs_with_blue_preferred() {
     ] {
         let programs = ModelAccessPrograms { cyber };
         assert_eq!(
-            (
-                programs.daybreak(),
-                programs.standard(),
-                programs.select_saved(SavedDaybreakChoice::from(Some(true))),
-                programs.select_saved(SavedDaybreakChoice::from(Some(false))),
-                programs.select_saved(SavedDaybreakChoice::from(/* enabled */ None)),
-            ),
-            (
-                expected_daybreak,
-                expected_standard,
-                expected_daybreak,
-                expected_standard,
-                None,
-            )
+            (programs.daybreak(), programs.standard()),
+            (expected_daybreak, expected_standard)
         );
     }
 }

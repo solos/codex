@@ -1,7 +1,5 @@
 //! Exercise the production client against copied helper packages and startup libraries.
 
-mod common;
-
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -16,9 +14,9 @@ use codex_install_context::InstallContext;
 use codex_realtime_webrtc::SessionDescription;
 use codex_realtime_webrtc::VoiceHost;
 use codex_utils_cargo_bin::cargo_bin;
-use common::voice_host_command;
 use futures::future::BoxFuture;
 use pretty_assertions::assert_eq;
+use tokio::process::Command;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -38,7 +36,7 @@ const DEADLINE: Duration = Duration::from_secs(/*secs*/ 10);
 async fn build_commit() -> Result<String> {
     let output = timeout(
         DEADLINE,
-        voice_host_command()?
+        Command::new(cargo_bin("codex-voice-host")?)
             .arg("--build-commit")
             .kill_on_drop(true)
             .output(),
@@ -76,11 +74,6 @@ fn install_startup_libraries(runtime: &Path) -> Result<()> {
     fs::create_dir_all(&destination)?;
     for entry in fs::read_dir(source.join(libraries))? {
         let entry = entry?;
-        // Windows keeps plugins beside startup DLLs. Omit one required plugin
-        // so this startup-only fixture cannot initialize the audio runtime.
-        if cfg!(windows) && entry.file_name() == "gstcoreelements.dll" {
-            continue;
-        }
         if entry.path().is_file() {
             fs::copy(entry.path(), destination.join(entry.file_name()))?;
         }
@@ -126,7 +119,7 @@ async fn installed_client_rejects_mixed_builds_and_missing_helper() -> Result<()
         .close()
         .await?;
     assert!(VoiceHost::connect(&package, "wrong-build").await.is_err());
-    // Startup libraries permit handshakes; missing native plugins prevent readiness.
+    // Startup libraries permit handshakes; the missing runtime receipt prevents readiness.
     let host = VoiceHost::connect(&package, &build_commit().await?).await?;
     assert!(host.initialize_runtime().await.is_err());
     // The same executable elsewhere in the package must not become a fallback.

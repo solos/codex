@@ -76,8 +76,6 @@ const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     "mcp_connection_sharing",
     "memories",
     "mentions_v2",
-    "remote_control",
-    "remote_plugin",
     "tool_suggest",
     "windows_sandbox_service",
 ];
@@ -211,33 +209,6 @@ impl ConfigRequestProcessor {
         Ok(None)
     }
 
-    pub(crate) async fn model_provider_list(
-        &self,
-        params: codex_app_server_protocol::ModelProviderListParams,
-    ) -> Result<codex_app_server_protocol::ModelProviderListResponse, JSONRPCErrorError> {
-        self.config_manager
-            .model_provider_list(params)
-            .await
-            .map_err(map_error)
-    }
-
-    pub(crate) async fn model_provider_config_write(
-        &self,
-        params: codex_app_server_protocol::ModelProviderConfigWriteParams,
-    ) -> Result<codex_app_server_protocol::ModelProviderConfigWriteResponse, JSONRPCErrorError>
-    {
-        let result = self
-            .config_manager
-            .model_provider_config_write(params)
-            .await
-            .map_err(map_error);
-        let response = self.handle_config_mutation_result(result).await?;
-        self.model_catalog
-            .invalidate_if_current_provider(&response.provider.id)
-            .await;
-        Ok(response)
-    }
-
     pub(crate) async fn model_provider_capabilities_read(
         &self,
     ) -> Result<ModelProviderCapabilitiesReadResponse, JSONRPCErrorError> {
@@ -357,9 +328,16 @@ impl ConfigRequestProcessor {
             .map_err(|_| internal_error("failed to update feature enablement"))?;
 
         let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
-        self.thread_manager.set_api_key_model_discovery_enabled(
-            config.features.enabled(Feature::ApiKeyModelDiscovery),
-        );
+        self.thread_manager
+            .get_models_manager()
+            .set_api_key_model_discovery_enabled(
+                config.features.enabled(Feature::ApiKeyModelDiscovery),
+            );
+        self.model_catalog
+            .set_api_key_model_discovery_enabled(
+                config.features.enabled(Feature::ApiKeyModelDiscovery),
+            )
+            .await;
         if should_start_background_rollout_migration && config.features.enabled(feature) {
             self.thread_manager.start_background_rollout_migration();
         }
@@ -473,12 +451,6 @@ pub(crate) fn map_requirements_to_api(
         }
         None => ConfigRequirementsToml::default(),
     };
-    let network = requirements
-        .permissions
-        .as_ref()
-        .and_then(|permissions| permissions.network.as_deref())
-        .cloned()
-        .or_else(|| requirements.network.clone());
 
     Some(ConfigRequirements {
         model_provider: requirements.model_provider,
@@ -581,7 +553,6 @@ pub(crate) fn map_requirements_to_api(
         allow_managed_hooks_only: requirements.allow_managed_hooks_only,
         allow_browser_and_computer_use: requirements.allow_browser_and_computer_use,
         allow_appshots: requirements.allow_appshots,
-        allow_remote_control: requirements.allow_remote_control,
         computer_use: requirements
             .computer_use
             .map(map_computer_use_requirements_to_api),
@@ -604,7 +575,7 @@ pub(crate) fn map_requirements_to_api(
         enforce_residency: requirements
             .enforce_residency
             .map(map_residency_requirement_to_api),
-        network: network.map(map_network_requirements_to_api),
+        network: requirements.network.map(map_network_requirements_to_api),
         auto_review: requirements
             .auto_review
             .map(|auto_review| AutoReviewRequirements {
@@ -972,7 +943,6 @@ mod tests {
     use codex_config::BrowserUseAccessApprovalLifetimeToml;
     use codex_config::BrowserUseOriginPolicyToml;
     use codex_config::BrowserUseRequirementsToml;
-    use codex_config::CloudConfigBundleLoader;
     use codex_config::ComputerUseMacosRequirementsToml;
     use codex_config::ComputerUseRequirementsToml;
     use codex_config::ComputerUseWindowsExeRequirementToml;
@@ -1023,7 +993,6 @@ client_id = "mcp-client"
             home.path().to_path_buf(),
             Vec::new(),
             LoaderOverrides::with_managed_config_path_for_tests(managed_config_path),
-            CloudConfigBundleLoader::default(),
         );
         let initial = config_manager
             .load_latest_config(Some(home.path().to_path_buf()))
@@ -1119,16 +1088,6 @@ client_id = "mcp-client"
 
         assert_eq!(mapped.allow_appshots, Some(false));
         assert_eq!(mapped.hooks, None);
-    }
-
-    #[test]
-    fn requirements_api_includes_allow_remote_control() {
-        let mapped = map_test_requirements(ConfigRequirementsToml {
-            allow_remote_control: Some(false),
-            ..ConfigRequirementsToml::default()
-        });
-
-        assert_eq!(mapped.allow_remote_control, Some(false));
     }
 
     #[test]

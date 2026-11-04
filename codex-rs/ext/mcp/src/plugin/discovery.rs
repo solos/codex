@@ -1,5 +1,3 @@
-use crate::cloud_plugin::MAX_CONNECTOR_IDS_PER_PLUGIN;
-use crate::cloud_plugin::MAX_PLUGIN_DISPLAY_NAME_CHARS;
 use crate::plugin_contributor_state::SelectedPluginMetadata;
 use codex_connectors::parse_plugin_app_config;
 use codex_core_plugins::PluginCatalogEntry;
@@ -16,6 +14,9 @@ use codex_plugin::manifest::PluginManifestMcpServers;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use std::collections::HashSet;
+
+const MAX_CONNECTOR_IDS_PER_PLUGIN: usize = 16;
+const MAX_PLUGIN_DISPLAY_NAME_CHARS: usize = 128;
 
 pub(super) fn manifest_from_discovery<'a>(
     selected_root: &SelectedCapabilityRoot,
@@ -167,7 +168,6 @@ pub(super) fn v2_metadata_from_catalog(
                 plugin_id,
                 root,
             } => Some((environment_id, plugin_id, root)),
-            PluginSourceLocation::Cloud { .. } => None,
         });
     let mut projections = Vec::new();
     for (index, (environment_id, plugin_id, root)) in installations.enumerate() {
@@ -189,20 +189,6 @@ pub(super) fn v2_metadata_from_catalog(
             connector_ids: connector_ids.clone(),
         };
         projections.push((root_id, metadata));
-    }
-    if entry
-        .locations
-        .iter()
-        .any(|location| matches!(location, PluginSourceLocation::Cloud { .. }))
-    {
-        projections.push((
-            format!("cloud:{}", entry.id.as_str()),
-            SelectedPluginMetadata {
-                plugin_display_name,
-                servers: Vec::new(),
-                connector_ids,
-            },
-        ));
     }
     projections
 }

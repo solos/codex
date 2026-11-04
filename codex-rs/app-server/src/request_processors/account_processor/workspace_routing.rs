@@ -114,7 +114,7 @@ pub(super) enum WorkspaceRoutingError {
 }
 
 fn workspace_config_load_reason(error: &io::Error) -> String {
-    // Parser messages and cloud bundle errors can quote secrets, even without
+    // Parser messages and managed configuration errors can quote secrets, even without
     // their source snippets. Retain only structured diagnostics before these
     // errors reach JSON-RPC clients, login notifications, or tracing.
     let mut current = error
@@ -138,39 +138,6 @@ fn workspace_config_load_reason(error: &io::Error) -> String {
                 start.line,
                 start.column
             );
-        }
-        if let Some(cloud) = source.downcast_ref::<CloudConfigBundleLoadError>() {
-            let reason = match cloud.code() {
-                CloudConfigBundleLoadErrorCode::Timeout => "request timed out",
-                CloudConfigBundleLoadErrorCode::Auth
-                | CloudConfigBundleLoadErrorCode::RequestFailed => {
-                    // Cloud loading currently erases the typed denial. Match
-                    // only known safe policy messages, never forward raw text.
-                    let message = cloud.to_string();
-                    if let Some(policy) = [
-                        NetworkPolicyDenied::Unavailable,
-                        NetworkPolicyDenied::Destination,
-                        NetworkPolicyDenied::Revoked,
-                        NetworkPolicyDenied::UnsupportedTransport,
-                    ]
-                    .into_iter()
-                    .find(|policy| policy.to_string() == message)
-                    {
-                        return policy.to_string();
-                    }
-                    if cloud.code() == CloudConfigBundleLoadErrorCode::Auth {
-                        "authentication failed"
-                    } else {
-                        "request failed"
-                    }
-                }
-                CloudConfigBundleLoadErrorCode::InvalidBundle => "invalid bundle",
-                CloudConfigBundleLoadErrorCode::Internal => "internal error",
-            };
-            return match cloud.status_code() {
-                Some(status) => format!("cloud config: {reason} (HTTP {status})"),
-                None => format!("cloud config: {reason}"),
-            };
         }
         if let Some(policy) = source.downcast_ref::<NetworkPolicyDenied>() {
             return policy.to_string();

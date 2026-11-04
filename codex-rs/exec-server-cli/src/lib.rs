@@ -8,8 +8,6 @@ use codex_utils_cli::collect_config_overrides;
 
 mod command;
 mod config;
-mod exec_server_auth;
-mod exec_server_credential;
 mod exec_server_telemetry;
 
 pub use command::ExecServerCommand;

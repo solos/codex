@@ -293,7 +293,6 @@ async fn token_budget_guidance_precedes_standalone_context_window(
     assert!(request.has_content_kinds(&[
         "token_budget.context_window_guidance",
         "permissions.instructions",
-        "tools.deferred_namespaces",
     ]));
     assert!(request.has_content_kinds(&["token_budget.context_window"; 3]));
     let developer_texts = request.message_input_texts("developer");
@@ -1699,7 +1698,6 @@ async fn new_context_tool_skips_auto_compact_fallback() -> Result<()> {
         omit_descriptions: false,
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
-        cloud_skill_enabled: config.cloud_skill_enabled,
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
     });
     let test = test_codex()

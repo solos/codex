@@ -26,11 +26,7 @@ pub use codex_core_plugin_common::installed::DEFAULT_PLUGIN_VERSION;
 pub use codex_core_plugin_common::installed::PLUGINS_CACHE_DIR;
 pub const PLUGINS_DATA_DIR: &str = "plugins/data";
 const AGENT_PLUGINS_DATA_DIR: &str = "agent-plugins";
-use codex_core_plugin_common::installed::REMOTE_PLUGIN_INSTALL_METADATA_FILE;
-use codex_core_plugin_common::installed::REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION;
 const DEFAULT_AGENT_PLUGIN_VERSION: &str = "1.0.0";
-
-use codex_core_plugin_common::installed::RemotePluginInstallMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginInstallResult {
@@ -50,26 +46,6 @@ pub struct PluginStore {
 pub(crate) struct ActivePluginInstallation {
     pub(crate) plugin_id: PluginId,
     pub(crate) root: AbsolutePathBuf,
-    remote_plugin_install_metadata_path: AbsolutePathBuf,
-}
-
-impl ActivePluginInstallation {
-    pub(crate) fn persisted_remote_plugin_id(&self) -> Result<Option<String>, PluginStoreError> {
-        let contents = match fs::read_to_string(self.remote_plugin_install_metadata_path.as_path())
-        {
-            Ok(contents) => contents,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(PluginStoreError::io(
-                    "failed to read remote plugin install metadata",
-                    err,
-                ));
-            }
-        };
-        codex_core_plugin_common::installed::parse_remote_plugin_id(&contents)
-            .map(Some)
-            .map_err(PluginStoreError::Invalid)
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -165,79 +141,11 @@ impl PluginStore {
         Some(ActivePluginInstallation {
             plugin_id: plugin_id.clone(),
             root: self.active_plugin_root(plugin_id)?,
-            remote_plugin_install_metadata_path: self
-                .remote_plugin_install_metadata_path(plugin_id),
         })
     }
 
     pub fn is_installed(&self, plugin_id: &PluginId) -> bool {
         self.active_plugin_version(plugin_id).is_some()
-    }
-
-    pub fn remote_plugin_id(
-        &self,
-        plugin_id: &PluginId,
-    ) -> Result<Option<String>, PluginStoreError> {
-        let Some(installation) = self.active_plugin_installation(plugin_id) else {
-            return Ok(None);
-        };
-        installation.persisted_remote_plugin_id()
-    }
-
-    pub fn write_remote_plugin_id(
-        &self,
-        plugin_id: &PluginId,
-        remote_plugin_id: &str,
-    ) -> Result<(), PluginStoreError> {
-        if !self.is_installed(plugin_id) {
-            return Err(PluginStoreError::Invalid(format!(
-                "cannot write remote identity for uninstalled plugin `{}`",
-                plugin_id.as_key()
-            )));
-        }
-        let remote_plugin_id = remote_plugin_id.trim();
-        if remote_plugin_id.is_empty() {
-            return Err(PluginStoreError::Invalid(
-                "invalid remote plugin install metadata: remote plugin id must not be blank"
-                    .to_string(),
-            ));
-        }
-        let path = self.remote_plugin_install_metadata_path(plugin_id);
-        let parent = path.as_path().parent().ok_or_else(|| {
-            PluginStoreError::Invalid(format!(
-                "remote plugin install metadata path has no parent: {}",
-                path.display()
-            ))
-        })?;
-        let mut contents = serde_json::to_vec_pretty(&RemotePluginInstallMetadata {
-            schema_version: REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION,
-            remote_plugin_id: remote_plugin_id.to_string(),
-        })
-        .map_err(|err| {
-            PluginStoreError::Invalid(format!(
-                "failed to serialize remote plugin install metadata: {err}"
-            ))
-        })?;
-        contents.push(b'\n');
-        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|err| {
-            PluginStoreError::io(
-                "failed to create temporary remote plugin install metadata",
-                err,
-            )
-        })?;
-        temporary.write_all(&contents).map_err(|err| {
-            PluginStoreError::io("failed to write remote plugin install metadata", err)
-        })?;
-        temporary.as_file_mut().flush().map_err(|err| {
-            PluginStoreError::io("failed to flush remote plugin install metadata", err)
-        })?;
-        temporary.persist(path.as_path()).map_err(|err| {
-            PluginStoreError::io(
-                "failed to persist remote plugin install metadata",
-                err.error,
-            )
-        })?;
-        Ok(())
     }
 
     pub fn install(
@@ -331,8 +239,6 @@ impl PluginStore {
             &plugin_version,
             manifest,
         )?;
-        self.remove_remote_plugin_install_metadata(&plugin_id)?;
-
         Ok(PluginInstallResult {
             plugin_id,
             plugin_version,
@@ -342,26 +248,6 @@ impl PluginStore {
 
     pub fn uninstall(&self, plugin_id: &PluginId) -> Result<(), PluginStoreError> {
         remove_existing_target(self.plugin_base_root(plugin_id).as_path())
-    }
-
-    fn remote_plugin_install_metadata_path(&self, plugin_id: &PluginId) -> AbsolutePathBuf {
-        self.plugin_base_root(plugin_id)
-            .join(REMOTE_PLUGIN_INSTALL_METADATA_FILE)
-    }
-
-    fn remove_remote_plugin_install_metadata(
-        &self,
-        plugin_id: &PluginId,
-    ) -> Result<(), PluginStoreError> {
-        let path = self.remote_plugin_install_metadata_path(plugin_id);
-        match fs::remove_file(path.as_path()) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(PluginStoreError::io(
-                "failed to remove remote plugin install metadata",
-                err,
-            )),
-        }
     }
 }
 

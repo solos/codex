@@ -71,13 +71,8 @@ fn from_discovered_plugin(
     (
         PluginCatalogEntry {
             enabled: true,
-            id: match &plugin.remote_plugin_id {
-                Some(remote_plugin_id) => PluginIdentity::Remote {
-                    remote_plugin_id: remote_plugin_id.clone(),
-                },
-                None => PluginIdentity::Local {
-                    plugin_id: plugin.id.clone(),
-                },
+            id: PluginIdentity::Local {
+                plugin_id: plugin.id.clone(),
             },
             display_name: plugin.display_name.clone(),
             version: plugin.version.clone(),

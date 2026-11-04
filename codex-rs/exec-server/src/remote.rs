@@ -180,12 +180,16 @@ impl EnvironmentRegistryClient {
             security_profile: NOISE_RELAY_SECURITY_PROFILE.to_string(),
             executor_public_key: executor_public_key.clone(),
         };
-        let (response, executor_credential) = self
-            .send_authenticated(
-                Request::new(Method::POST, url).with_json(&body),
-                Some(deadline),
-            )
-            .await?;
+        let (response, executor_credential) = timeout_at(
+            deadline,
+            self.send_authenticated(Request::new(Method::POST, url).with_json(&body)),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(ExecServerError::EnvironmentRegistryRequest(
+                codex_http_client::RouteAwareRequestError::Timeout,
+            ))
+        })?;
         let status = response.status();
         // Read diagnostics within the same attempt budget, preserving a known error status.
         let response: EnvironmentRegistryRegistrationResponse = timeout_at(deadline, async {
@@ -260,10 +264,7 @@ impl EnvironmentRegistryClient {
         let response: EnvironmentRegistryConnectResponse =
             timeout_at(tokio::time::Instant::now() + self.connect_timeout, async {
                 let (response, _) = self
-                    .send_authenticated(
-                        Request::new(Method::POST, url).with_json(&body),
-                        /*deadline*/ None,
-                    )
+                    .send_authenticated(Request::new(Method::POST, url).with_json(&body))
                     .await?;
                 self.parse_json_response(response).await
             })
@@ -306,7 +307,11 @@ impl EnvironmentRegistryClient {
             .auth_provider
             .apply_auth_headers(HeaderMap::new())
             .await
-            .map_err(auth::registry_auth_error)?;
+            .map_err(|error| {
+                ExecServerError::EnvironmentRegistryAuth(format!(
+                    "failed to resolve environment registry authentication: {error}"
+                ))
+            })?;
         let executor_credential = if self.auth_mode == RegistryAuthMode::ExecutorCredential {
             // Scoped mode sends exactly one bearer and never accompanying account credentials.
             let token = (headers.len() == 1)
@@ -420,10 +425,7 @@ impl HarnessKeyValidator for RegistryHarnessKeyValidator {
                 })?,
             );
         }
-        let (response, executor_credential) = self
-            .client
-            .send_authenticated(request, /*deadline*/ None)
-            .await?;
+        let (response, executor_credential) = self.client.send_authenticated(request).await?;
         let status = response.status();
         if !status.is_success() {
             // The request contains the short-lived authorization. Do not include
@@ -565,38 +567,6 @@ impl AuthProvider for StaticBearerAuthProvider {
         }
         Ok(())
     }
-}
-
-/// Read a single newline-terminated registration bearer from a parent-owned pipe.
-pub fn registration_auth_from_stdin() -> std::io::Result<SharedAuthProvider> {
-    use std::io::BufRead;
-    use std::io::Read;
-
-    // Deny same-user access to the pipe and credential memory before reading.
-    #[cfg(target_os = "linux")]
-    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
-
-    let mut token = String::new();
-    std::io::stdin()
-        .lock()
-        .take(16 * 1024)
-        .read_line(&mut token)?;
-    if token.pop() != Some('\n') {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "expected a newline-terminated registration bearer of at most 16 KiB",
-        ));
-    }
-    if token.ends_with('\r') {
-        token.pop();
-    }
-    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid registration bearer",
-        ));
-    }
-    static_bearer_auth_provider(token, /*chatgpt_account_id*/ None).map_err(std::io::Error::other)
 }
 
 fn static_bearer_auth_provider(

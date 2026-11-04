@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::HostSkillsSnapshot;
 use crate::InjectedHostSkillPrompts;
 use codex_analytics::InvocationType;
-use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_extension_api::ConfigContributor;
 use codex_extension_api::ContextContributor;
 use codex_extension_api::ContextualUserFragment;
@@ -69,9 +68,6 @@ use crate::tools::SkillToolAuthority;
 use crate::tools::skill_tools;
 use crate::warnings::bounded_warnings;
 use crate::world_state_catalogs::render_world_state_sections;
-
-#[path = "cloud_skill.rs"]
-mod cloud_skill;
 
 struct SkillsExtension<C> {
     providers: SkillProviders,
@@ -150,14 +146,8 @@ where
                 mcp_resources: input.mcp_resource_client.clone(),
                 extension_metrics: input.extension_metrics.clone(),
             });
-            let cloud_skills_available = self.providers.has_cloud_provider()
-                && !input
-                    .environments
-                    .iter()
-                    .any(|environment| environment.environment_id == LOCAL_ENVIRONMENT_ID);
             input.thread_store.insert(SkillsThreadState::new(
                 (self.config_from_host)(input.config),
-                cloud_skills_available,
                 input.extension_metrics,
             ));
         })
@@ -179,10 +169,8 @@ where
         if let Some(state) = thread_store.get::<SkillsThreadState>() {
             state.set_config(next_config);
         } else {
-            let cloud_skills_available = self.providers.has_cloud_provider();
             thread_store.insert(SkillsThreadState::new(
                 next_config,
-                cloud_skills_available,
                 session_store
                     .get::<SkillsSessionState>()
                     .and_then(|state| state.extension_metrics.clone()),
@@ -213,10 +201,10 @@ where
                 .list_for_turn(SkillListQuery {
                     turn_id: thread_store.level_id().to_string(),
                     executor_roots: Vec::new(),
+                    resolved_executor_roots: Vec::new(),
                     host_snapshot: None,
                     include_host_skills: false,
                     include_bundled_skills: config.bundled_skills_enabled,
-                    include_cloud_skills: false,
                     mcp_resources: session_store
                         .get::<SkillsSessionState>()
                         .and_then(|state| state.mcp_resources.clone()),
@@ -346,7 +334,7 @@ where
             let mcp_resources = session_store
                 .get::<SkillsSessionState>()
                 .and_then(|state| state.mcp_resources.clone());
-            let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, turn_store);
+            let host_snapshot = turn_store.get::<HostSkillsSnapshot>();
             let host_catalog_in_world_state =
                 turn_store.get::<HostSkillsCatalogInWorldState>().is_some();
             let Some(step_state) = input.step_store.get::<SkillsStepState>() else {
@@ -357,11 +345,10 @@ where
             let query = SkillListQuery {
                 turn_id: input.turn_id.clone(),
                 executor_roots: Vec::new(),
+                resolved_executor_roots: Vec::new(),
                 host_snapshot: host_snapshot.clone(),
                 include_host_skills: host_skills.is_none() && !host_catalog_in_world_state,
                 include_bundled_skills: config.bundled_skills_enabled,
-                // Cloud and executor catalogs come from the prepared step snapshot.
-                include_cloud_skills: false,
                 mcp_resources: mcp_resources.clone(),
                 executor_capability_discovery: None,
                 executor_capability_discovery_v2: None,
@@ -399,10 +386,9 @@ where
             let mut fragments: Vec<Box<dyn ContextualUserFragment + Send>> = Vec::new();
             if config.include_instructions && !host_catalog_in_world_state {
                 let mut turn_catalog = catalog.clone();
-                turn_catalog.entries.retain(|entry| {
-                    entry.authority.kind != SkillSourceKind::Executor
-                        && entry.authority.kind != SkillSourceKind::Cloud
-                });
+                turn_catalog
+                    .entries
+                    .retain(|entry| entry.authority.kind != SkillSourceKind::Executor);
                 let model_info = thread_store.get::<ModelInfo>();
                 let include_usage = model_info
                     .as_deref()
@@ -433,13 +419,7 @@ where
             let analytics = SkillAnalytics::from_stores(session_store, thread_store);
             for entry in &selected_entries {
                 match self
-                    .read_main_prompt(
-                        entry,
-                        host_snapshot.clone(),
-                        mcp_resources.clone(),
-                        &thread_state,
-                        &input,
-                    )
+                    .read_main_prompt(entry, host_snapshot.clone(), mcp_resources.clone(), &input)
                     .await
                 {
                     Ok(read_result) => {
@@ -533,20 +513,11 @@ impl<C> SkillsExtension<C> {
         entry: &SkillCatalogEntry,
         host_snapshot: Option<Arc<HostSkillsSnapshot>>,
         mcp_resources: Option<Arc<McpResourceClient>>,
-        thread_state: &SkillsThreadState,
         input: &TurnInputContext<'_>,
     ) -> Result<SkillReadResult, String> {
         let context = match entry.authority.kind {
-            SkillSourceKind::Cloud => SkillReadContext::Cloud { mcp_resources },
             SkillSourceKind::Custom(_) => SkillReadContext::Custom { mcp_resources },
-            SkillSourceKind::Host => SkillReadContext::Host {
-                host_snapshot,
-                accessors: input
-                    .environments
-                    .iter()
-                    .map(|environment| environment.fs)
-                    .collect(),
-            },
+            SkillSourceKind::Host => SkillReadContext::Host { host_snapshot },
             SkillSourceKind::Executor => {
                 let fs = entry
                     .main_prompt
@@ -564,16 +535,13 @@ impl<C> SkillsExtension<C> {
                 SkillReadContext::Executor { fs }
             }
         };
-        thread_state
-            .read_skill(
-                &self.providers,
-                SkillReadRequest {
-                    authority: entry.authority.clone(),
-                    package: entry.id.clone(),
-                    resource: entry.main_prompt.clone(),
-                    context,
-                },
-            )
+        self.providers
+            .read(SkillReadRequest {
+                authority: entry.authority.clone(),
+                package: entry.id.clone(),
+                resource: entry.main_prompt.clone(),
+                context,
+            })
             .await
             .map_err(|err| err.message)
     }

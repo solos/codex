@@ -3,7 +3,7 @@
 //! hosts may shorten historical instructions after compaction cannot make room.
 //! Every reduction reserves an omission notice and preserves source order.
 //! JSON recovery shortens only the body; line mode shortens the whole rendered entry.
-//! Native deduplication prefers required and protected copies before optional eviction.
+//! Native messages and tool calls are reconciled with current history before budgeting.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -13,6 +13,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::TruncationPolicy;
 
 use crate::ComposedContext;
 use crate::RequestBudget;
@@ -24,9 +25,6 @@ use crate::budget::section_tokens;
 use crate::composition::SectionContent;
 use crate::composition::SectionDelivery;
 use crate::composition::SectionOutput;
-use crate::truncation::truncate_content_to_fit;
-
-const MIN_HISTORICAL_TEXT_TOKENS: usize = 32;
 
 /// Eviction priority within a profile; older items at the same priority go first.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -38,13 +36,10 @@ pub(crate) enum BudgetPriority {
 }
 
 /// Content and its selection policy move together through rendering and admission.
-/// Required support uses the section minimum in Elastic mode. Protected host framing
-/// and exact actions stay complete; Fixed retention remains unchanged.
+/// Consumers may add required content; optional priorities stay crate-owned.
 #[derive(Clone, PartialEq)]
 pub struct Budgeted<T> {
     pub content: T,
-    /// Host framing and exact actions use global space, outside section quotas.
-    pub(crate) protected: bool,
     pub(crate) source: Option<codex_history::RetainedSource>,
     pub(crate) retention: Retention,
 }
@@ -53,32 +48,14 @@ impl<T> Budgeted<T> {
     pub fn required(content: T) -> Self {
         Self {
             content,
-            protected: false,
             source: None,
             retention: Retention::Required,
-        }
-    }
-
-    pub(crate) fn protected(content: T) -> Self {
-        Self {
-            protected: true,
-            ..Self::required(content)
-        }
-    }
-
-    pub(crate) fn map<U>(self, transform: impl FnOnce(T) -> U) -> Budgeted<U> {
-        Budgeted {
-            content: transform(self.content),
-            protected: self.protected,
-            source: self.source,
-            retention: self.retention,
         }
     }
 
     pub(crate) fn historical(content: T) -> Self {
         Self {
             content,
-            protected: false,
             source: None,
             retention: Retention::Historical,
         }
@@ -87,7 +64,6 @@ impl<T> Budgeted<T> {
     pub(crate) fn optional(content: T, priority: BudgetPriority) -> Self {
         Self {
             content,
-            protected: false,
             source: None,
             retention: Retention::Optional(priority),
         }
@@ -99,7 +75,6 @@ impl<T> std::fmt::Debug for Budgeted<T> {
         formatter
             .debug_struct("Budgeted")
             .field("retention", &self.retention)
-            .field("protected", &self.protected)
             .finish_non_exhaustive()
     }
 }
@@ -122,9 +97,8 @@ pub enum HistoryTruncation {
 
 impl ComposedContext {
     /// Omits native messages and tool calls already present in the effective reviewer history
-    /// or another pending copy, preferring required and protected copies.
-    /// Hosts repeat this check after compaction; missing evidence may be delivered again.
-    /// Identity excludes host annotations.
+    /// or earlier in this input. Hosts must repeat this check after compaction;
+    /// missing evidence may be delivered again. Identity excludes host annotations.
     /// Conflicting payloads under one ID reject the input without changing it.
     pub fn retain_new_native_messages(
         &mut self,
@@ -143,24 +117,14 @@ impl ComposedContext {
         let mut seen_messages = HashMap::new();
         let mut seen_calls = HashMap::new();
         let mut duplicates = HashSet::new();
-        let mut pending = self
-            .sections
-            .iter()
-            .enumerate()
-            .filter_map(|(index, section)| match &section.delivery {
-                SectionDelivery::Message(message) => Some((index, message)),
-                SectionDelivery::UserContent(_) => None,
-            })
-            .collect::<Vec<_>>();
-        pending.sort_by_key(|(_, message)| {
-            (
-                matches!(message.retention, Retention::Optional(_)),
-                !message.protected,
-            )
-        });
-        let pending = pending
-            .into_iter()
-            .map(|(index, message)| (Some(index), &message.content.item));
+        let pending =
+            self.sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| match &section.delivery {
+                    SectionDelivery::Message(message) => Some((Some(index), &message.content.item)),
+                    SectionDelivery::UserContent(_) => None,
+                });
         for (index, item) in reviewer_history
             .iter()
             .map(|item| (None, &item.item))
@@ -312,19 +276,47 @@ impl ComposedContext {
                         continue;
                     }
                     let original_tokens = section_content_tokens(&item.content);
-                    let original_bytes = item.content.evidence_bytes();
+                    let original_bytes = match &item.content {
+                        SectionContent::Transcript(record) => record.rendered().text_bytes,
+                        SectionContent::Other(ContentItem::InputText { text }) => text.len(),
+                        _ => continue,
+                    };
+                    let Some(original_body) = item.content.replace_text(String::new()) else {
+                        continue;
+                    };
                     let target = original_tokens.saturating_sub(required_tokens - remaining);
-                    truncate_content_to_fit(&mut item.content, target, MIN_HISTORICAL_TEXT_TOKENS);
+                    let mut upper = TruncationPolicy::Bytes(original_body.len()).token_budget();
+                    let mut lower = 32.min(upper);
+                    let mut selected = lower;
+                    while lower < upper {
+                        let mid = lower + (upper - lower).div_ceil(2);
+                        let _ = item
+                            .content
+                            .replace_text(crate::truncate_text(&original_body, mid));
+                        if section_content_tokens(&item.content) <= target {
+                            lower = mid;
+                            selected = mid;
+                        } else {
+                            upper = mid - 1;
+                        }
+                    }
+                    let _ = item
+                        .content
+                        .replace_text(crate::truncate_text(&original_body, selected));
                     let saved =
                         original_tokens.saturating_sub(section_content_tokens(&item.content));
                     if saved == 0 {
+                        let _ = item.content.replace_text(original_body);
                         continue;
                     }
                     self.truncations.push(TruncationObservation {
-                        source: None,
                         component: section.id,
                         original_bytes,
-                        retained_bytes: item.content.evidence_bytes(),
+                        retained_bytes: match &item.content {
+                            SectionContent::Transcript(record) => record.rendered().text_bytes,
+                            SectionContent::Other(ContentItem::InputText { text }) => text.len(),
+                            _ => 0,
+                        },
                     });
                     history_truncated = true;
                     required_tokens = required_tokens.saturating_sub(saved);
@@ -383,7 +375,6 @@ impl ComposedContext {
                 && removed.contains(&(section_index, 0))
             {
                 self.truncations.push(TruncationObservation {
-                    source: None,
                     component: section.id,
                     original_bytes: serde_json::to_vec(&message.content.item)
                         .map_or(usize::MAX, |bytes| bytes.len()),
@@ -405,7 +396,7 @@ impl ComposedContext {
     }
 }
 
-pub(crate) fn retain_content(
+fn retain_content(
     section: &mut SectionOutput,
     truncations: &mut Vec<TruncationObservation>,
     mut retain: impl FnMut(usize, &mut SectionContent) -> bool,
@@ -418,9 +409,22 @@ pub(crate) fn retain_content(
         let keep = retain(index, &mut item.content);
         index += 1;
         if !keep {
-            let original_bytes = item.content.evidence_bytes();
+            let original_bytes = match &item.content {
+                SectionContent::Transcript(record) => record.rendered().text_bytes,
+                SectionContent::Other(
+                    ContentItem::InputText { text } | ContentItem::OutputText { text, .. },
+                ) => text.len(),
+                SectionContent::Other(ContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                }) => image_url.len(),
+                SectionContent::Other(ContentItem::InputImage {
+                    image: ImageReference::File { .. },
+                    ..
+                }) => 0,
+                SectionContent::Other(ContentItem::InputAudio { audio_url }) => audio_url.len(),
+            };
             truncations.push(TruncationObservation {
-                source: None,
                 component: section.id,
                 original_bytes,
                 retained_bytes: 0,

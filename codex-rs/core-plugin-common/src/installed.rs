@@ -2,22 +2,11 @@
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 use semver::Version;
-use serde::Deserialize;
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::fs;
 
 pub const DEFAULT_PLUGIN_VERSION: &str = "local";
 pub const PLUGINS_CACHE_DIR: &str = "plugins/cache";
-pub const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
-pub const REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION: u8 = 1;
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct RemotePluginInstallMetadata {
-    pub schema_version: u8,
-    pub remote_plugin_id: String,
-}
-
 pub fn validate_plugin_version_segment(plugin_version: &str) -> Result<(), String> {
     if plugin_version.is_empty() {
         return Err("invalid plugin version: must not be empty".to_string());
@@ -65,24 +54,4 @@ pub fn active_plugin_version(plugin_base_root: &AbsolutePathBuf) -> Option<Strin
     } else {
         discovered_versions.pop()
     }
-}
-
-/// Validates persisted installation metadata and returns its normalized remote identity.
-pub fn parse_remote_plugin_id(contents: &str) -> Result<String, String> {
-    let metadata: RemotePluginInstallMetadata = serde_json::from_str(contents)
-        .map_err(|err| format!("failed to parse remote plugin install metadata: {err}"))?;
-    if metadata.schema_version != REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION {
-        return Err(format!(
-            "unsupported remote plugin install metadata schema version: {}",
-            metadata.schema_version
-        ));
-    }
-    let remote_plugin_id = metadata.remote_plugin_id.trim();
-    if remote_plugin_id.is_empty() {
-        return Err(
-            "invalid remote plugin install metadata: remote plugin id must not be blank"
-                .to_string(),
-        );
-    }
-    Ok(remote_plugin_id.to_string())
 }

@@ -24,7 +24,6 @@ use crate::named_session_lookup::display_label;
 use crate::named_session_lookup::lookup;
 use codex_app_server_protocol::Thread as AppServerThread;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadOptions;
 use codex_config::LoaderOverrides;
 use codex_exec_server::EnvironmentManager;
@@ -36,8 +35,6 @@ use codex_utils_oss::get_default_model_for_oss_provider;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 use color_eyre::eyre::eyre;
-
-use super::RemoteAppServerEndpoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteConfirmation {
@@ -55,7 +52,6 @@ pub enum SessionArchiveAction {
 pub struct SessionArchiveCommandOptions {
     pub cli: Cli,
     pub arg0_paths: Arg0DispatchPaths,
-    pub explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 }
 
 fn success_message(
@@ -173,7 +169,7 @@ async fn resolve_session_target(
         &[super::resume_source_kinds(
             /*include_non_interactive*/ false,
         )],
-        /*model_providers*/ None,
+        /*model_provider*/ None,
     )
     .await?
     {
@@ -226,14 +222,7 @@ pub(super) async fn start_app_server_for_session_command(
     options: SessionArchiveCommandOptions,
     codex_home: PathBuf,
 ) -> Result<AppServerSession> {
-    let SessionArchiveCommandOptions {
-        cli,
-        arg0_paths,
-        explicit_remote_endpoint,
-    } = options;
-    if cli.no_daemon && explicit_remote_endpoint.is_some() {
-        return Err(eyre!("--no-daemon cannot be used with --remote."));
-    }
+    let SessionArchiveCommandOptions { cli, arg0_paths } = options;
     let loader_overrides = LoaderOverrides::default();
     let strict_config = cli.strict_config;
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
@@ -250,48 +239,7 @@ pub(super) async fn start_app_server_for_session_command(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
 
-    if let Some(endpoint) = explicit_remote_endpoint {
-        // Validate config before connecting, but leave authentication and execution
-        // to the selected server even when this caller has workload identity set.
-        launch_loader_overrides.ignore_login_requirements = true;
-        ConfigBuilder::default()
-            .codex_home(codex_home)
-            .cli_overrides(cli_kv_overrides)
-            .loader_overrides(launch_loader_overrides)
-            .strict_config(strict_config)
-            .build()
-            .await
-            .wrap_err("failed to load config.toml")?;
-        return Ok(AppServerSession::new(
-            crate::backend_id::BackendId::new(),
-            super::connect_remote_app_server(endpoint).await?,
-            ThreadParamsMode::Remote,
-        )
-        .with_remote_cwd_override(cli.cwd.clone()));
-    }
-
-    let workload_identity_selected = codex_login::is_workload_identity_selected();
-    let reuse_implicit_local_daemon = !cli.no_daemon
-        && !workload_identity_selected
-        && super::daemon_startup::config_exclusion(
-            &cli_kv_overrides,
-            &launch_loader_overrides,
-            strict_config,
-            cli.bypass_hook_trust,
-        )
-        .is_none();
-    let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
-        super::maybe_probe_default_daemon_socket(codex_home.as_path()).await
-    } else {
-        None
-    };
-    let mut app_server_target = super::app_server_target_for_launch(
-        explicit_remote_endpoint,
-        default_daemon,
-        reuse_implicit_local_daemon,
-        workload_identity_selected,
-        std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
-    )?;
+    let app_server_target = super::app_server_target_for_launch();
     let remote_cwd_override = cli
         .cwd
         .clone()
@@ -331,19 +279,11 @@ pub(super) async fn start_app_server_for_session_command(
         ConfigLoadOptions {
             loader_overrides: loader_overrides.clone(),
             strict_config,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
         },
     )
     .await
     .wrap_err("failed to load config.toml")?;
     let config_toml = &bootstrap_config.config_toml;
-    let cloud_config_bundle = super::cloud_config_bundle_for_app_server_target(
-        &app_server_target,
-        &bootstrap_config,
-        codex_home.as_path(),
-        &embedded_network_policy,
-    )
-    .await?;
 
     let model_provider = if cli.oss {
         resolve_oss_provider(cli.oss_provider.as_deref(), config_toml)
@@ -375,7 +315,6 @@ pub(super) async fn start_app_server_for_session_command(
         })
         .loader_overrides(loader_overrides.clone())
         .strict_config(strict_config)
-        .cloud_config_bundle(cloud_config_bundle.clone())
         .build()
         .await
         .wrap_err("failed to load configuration")?;
@@ -398,7 +337,6 @@ pub(super) async fn start_app_server_for_session_command(
         cli_kv_overrides,
         loader_overrides,
         strict_config,
-        cloud_config_bundle,
         codex_feedback::CodexFeedback::new(),
         /*log_db*/ None,
         &mut state_db,

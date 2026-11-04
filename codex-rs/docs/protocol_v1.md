@@ -116,7 +116,7 @@ sequenceDiagram
     box UI
     participant user as User
     end
-    box Daemon
+    box Codex
     participant codex as Codex
     participant session as Session
     participant task as Task
@@ -157,7 +157,7 @@ sequenceDiagram
     box UI
     participant user as User
     end
-    box Daemon
+    box Codex
     participant session as Session
     participant task1 as Task1
     participant task2 as Task2

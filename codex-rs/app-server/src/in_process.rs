@@ -82,7 +82,6 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_arg0::Arg0DispatchPaths;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigLoader;
 use codex_core::check_execpolicy_for_warnings;
@@ -104,8 +103,8 @@ mod bootstrap;
 
 const IN_PROCESS_CONNECTION_ID: ConnectionId = ConnectionId(0);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-// Covers both bounded runtime drains plus the analytics client's 25-second best-effort flush.
-const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(35);
+// Covers the bounded processor and outbound-router drains during shutdown.
+const SHUTDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default bounded channel capacity for in-process runtime queues.
 pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = CHANNEL_CAPACITY;
 
@@ -150,8 +149,6 @@ pub struct InProcessStartArgs {
     pub loader_overrides: LoaderOverrides,
     /// Whether config API paths should reject unknown config fields.
     pub strict_config: bool,
-    /// Preloaded cloud config bundle provider.
-    pub cloud_config_bundle: CloudConfigBundleLoader,
     /// Policy shared with transports created by the embedder before startup.
     pub embedded_network_policy: EmbeddedNetworkPolicy,
     /// Loader used to fetch typed thread config sources before a thread starts.
@@ -393,7 +390,6 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
-    // Keep embedded startup state off callers' stacks, which are smaller on Windows.
     let client = Box::pin(start_uninitialized(args)).await?;
 
     let initialize_response = client
@@ -439,7 +435,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         args.cli_overrides,
         args.loader_overrides,
         args.strict_config,
-        args.cloud_config_bundle,
         args.arg0_paths.clone(),
         args.thread_config_loader,
     )
@@ -462,7 +457,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
-        let analytics_events_flush_client = analytics_events_client.clone();
         // A client can be waiting for process/kill while nobody is polling next_event.
         let (process_reply_tx, mut process_reply_rx) = mpsc::channel(channel_capacity);
         let outgoing_message_sender = Arc::new(
@@ -510,7 +504,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let mut processor_handle = tokio::spawn(async move {
             let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
-                cloud_skill_provider: None,
                 outgoing: Arc::clone(&processor_outgoing),
                 analytics_events_client,
                 arg0_paths: args.arg0_paths,
@@ -531,7 +524,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
-                remote_control_handle: None,
                 plugin_startup_tasks: Some(PluginStartupConfig::Current),
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
@@ -841,8 +833,6 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
             let _ = outbound_handle.await;
         }
 
-        analytics_events_flush_client.flush().await;
-
         if let Some(done_tx) = shutdown_ack {
             let _ = done_tx.send(());
         }
@@ -914,7 +904,6 @@ mod tests {
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             strict_config: false,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
             embedded_network_policy: Default::default(),
             thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
             feedback: CodexFeedback::new(),
@@ -1091,35 +1080,6 @@ mod tests {
             .expect("outbound router should not wait for its retained sender")
             .expect("outbound router should complete successfully");
         assert!(retained_outgoing_tx.is_closed());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn in_process_shutdown_waits_for_analytics_flush_budget() {
-        let (client_tx, mut client_rx) = mpsc::channel(/*buffer*/ 1);
-        let (_event_tx, event_rx) = mpsc::channel(/*buffer*/ 1);
-        let completed = Arc::new(AtomicBool::new(false));
-        let runtime_completed = Arc::clone(&completed);
-        let runtime_handle = tokio::spawn(async move {
-            let done_tx = match client_rx.recv().await {
-                Some(InProcessClientMessage::Shutdown { done_tx }) => done_tx,
-                _ => panic!("expected in-process shutdown request"),
-            };
-            tokio::time::sleep(SHUTDOWN_TIMEOUT + SHUTDOWN_TIMEOUT + Duration::from_secs(24)).await;
-            runtime_completed.store(true, Ordering::Release);
-            let _ = done_tx.send(());
-        });
-        let client = InProcessClientHandle {
-            client: InProcessClientSender { client_tx },
-            event_rx,
-            runtime_handle,
-            _test_codex_home: None,
-        };
-
-        client
-            .shutdown()
-            .await
-            .expect("in-process runtime should shutdown cleanly");
-        assert!(completed.load(Ordering::Acquire));
     }
 
     #[test]

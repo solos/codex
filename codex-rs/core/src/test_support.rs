@@ -32,7 +32,6 @@ use codex_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 
 use crate::ThreadManager;
-pub use crate::code_mode_host::ProcessOwnedGrpcCodeModeSessionProvider;
 use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -40,30 +39,6 @@ use crate::responses_metadata::subagent_header_value;
 use crate::responses_metadata::subagent_metadata_kind;
 use crate::thread_manager;
 use crate::unified_exec;
-
-/// Supply fixed model metadata to tests without implementing a provider.
-pub fn fixed_model_catalog(
-    manager: SharedModelsManager,
-) -> Arc<dyn codex_model_provider::ModelCatalogFactory> {
-    struct FixedCatalog(SharedModelsManager);
-
-    impl codex_model_provider::ModelCatalogFactory for FixedCatalog {
-        fn build(
-            &self,
-            _provider: codex_model_provider::SharedModelProvider,
-            _config_model_catalog: Option<codex_protocol::openai_models::ModelsResponse>,
-            _api_key_model_discovery_default: bool,
-        ) -> SharedModelsManager {
-            Arc::clone(&self.0)
-        }
-
-        fn set_api_key_model_discovery_enabled(&self, enabled: bool) {
-            self.0.set_api_key_model_discovery_enabled(enabled);
-        }
-    }
-
-    Arc::new(FixedCatalog(manager))
-}
 
 static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     let mut response = bundled_models_response()
@@ -143,7 +118,7 @@ pub async fn observe_turn_timing(
         timing.snapshot_path(end).map(|path| {
             let totals = path.durations(start, end);
             [
-                totals.sampling.saturating_add(totals.compaction),
+                totals.inference,
                 totals.auto_review,
                 totals.tools,
                 totals.overhead,
@@ -266,9 +241,7 @@ pub fn get_model_offline(model: Option<&str>) -> String {
 }
 
 pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {
-    Arc::unwrap_or_clone(
-        construct_model_info_offline_for_tests(model, &config.to_models_manager_config()).model,
-    )
+    construct_model_info_offline_for_tests(model, &config.to_models_manager_config())
 }
 
 #[derive(Clone, Copy)]

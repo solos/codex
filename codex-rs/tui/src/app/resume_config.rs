@@ -143,8 +143,7 @@ impl App {
                 | Ok(crate::session_resume::ResolveCwdOutcome::ContinueAfterPrompt(cwd)) => cwd,
                 Ok(crate::session_resume::ResolveCwdOutcome::Continue(None)) => current_cwd.clone(),
                 Ok(crate::session_resume::ResolveCwdOutcome::Exit) => {
-                    self.app_event_tx.send(AppEvent::Exit(ExitMode::Immediate));
-                    return Err(AppRunControl::Continue);
+                    return Err(AppRunControl::Exit(ExitReason::UserRequested));
                 }
             }
         };
@@ -174,21 +173,7 @@ impl App {
         if self.reject_remote_resume_permission_override(&resume_config.0, &target) {
             return Err(AppRunControl::Continue);
         }
-        let resumed_thread = if matches!(target, AppServerTarget::LocalDaemon { .. }) {
-            Some(
-                app_server
-                    .thread_read(target_session.thread_id, /*include_turns*/ false)
-                    .await
-                    .map_err(|error| {
-                        self.add_session_picker_error(format!(
-                            "Unable to check resumed folder: {error}"
-                        ));
-                        AppRunControl::Continue
-                    })?,
-            )
-        } else {
-            None
-        };
+        let resumed_thread = None;
         let trust_cwd = resume_config.0.cwd.to_path_buf();
         if let Some(local_settings) = self
             .confirm_directory_trust_for_target(
@@ -239,7 +224,7 @@ impl App {
         clippy::too_many_arguments,
         reason = "The destination target is explicit alongside the existing trust interaction inputs."
     )]
-    pub(super) async fn confirm_directory_trust_for_target(
+    async fn confirm_directory_trust_for_target(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
@@ -277,6 +262,9 @@ impl App {
         if result.should_exit {
             if options.cancel == Some(crate::onboarding::TrustCancelAction::CurrentTask) {
                 return Err(AppRunControl::Continue);
+            }
+            if !target.supports_command_center() {
+                return Err(AppRunControl::Exit(ExitReason::UserRequested));
             }
             if self
                 .chat_widget

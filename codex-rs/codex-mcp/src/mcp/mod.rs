@@ -32,7 +32,6 @@ use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::connector_runtime_context_key;
-use codex_exec_server::FileSystemSandboxContext;
 use codex_login::CodexAuth;
 use codex_model_provider::CHATGPT_CODEX_BASE_URL;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -44,7 +43,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_rmcp_client::McpOAuthRefreshMode;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::ReadResourceRequestParams;
@@ -116,13 +114,6 @@ pub struct McpPermissionPromptAutoApproveContext {
     pub tool_approval_mode: Option<AppToolApproval>,
 }
 
-/// Which rules a registered MCP server uses.
-#[derive(Debug, Clone)]
-pub enum McpServerPermissions {
-    Thread,
-    Environment(Arc<FileSystemSandboxContext>),
-}
-
 /// MCP runtime settings derived from `codex_core::config::Config`.
 ///
 /// Each published runtime and prepared call owns one immutable copy of these
@@ -167,8 +158,6 @@ pub struct McpConfig {
     pub approval_policy: Constrained<AskForApproval>,
     /// Permission profile captured with the connections and approval policy.
     pub permission_profile: PermissionProfile,
-    /// Host working directory used to interpret thread permissions.
-    pub host_cwd: AbsolutePathBuf,
     /// Configuration layers used to evaluate Apps tool policy and reviewer selection.
     pub config_layer_stack: ConfigLayerStack,
     pub plugins: codex_config::types::PluginsConfigToml,
@@ -178,8 +167,8 @@ pub struct McpConfig {
     pub environment_cwds: HashMap<String, PathUri>,
     /// Effective backends captured with the environment handles, including local fallback.
     pub environment_use_mxc: HashMap<String, bool>,
-    /// Permissions for registered servers. Unavailable servers have no entry.
-    pub server_permissions: HashMap<String, McpServerPermissions>,
+    /// Explicit server permissions; unresolved or unavailable servers have no entry.
+    pub server_permission_profiles: HashMap<String, PermissionProfile>,
     /// Host-supplied re-exec binary. Probe its sandbox capability before advertising it.
     /// Never infer this from PATH or an MCP server's configuration.
     pub codex_self_exe: Option<PathBuf>,
@@ -194,8 +183,6 @@ pub struct McpConfig {
     /// ChatGPT auth is checked separately before a materialized host-owned Apps
     /// server can be used.
     pub apps_enabled: bool,
-    /// Allow hosted Apps catalog reads after MCP initialization, before tools are ready.
-    pub apps_early_resource_discovery: bool,
     /// Whether model-visible MCP tool namespaces should keep the legacy
     /// `mcp__` prefix.
     pub prefix_mcp_tool_names: bool,
@@ -223,54 +210,51 @@ pub const DEFAULT_OPTIONAL_MCP_STARTUP_GRACE: Duration = Duration::from_secs(1);
 
 impl McpConfig {
     /// Resolves enabled runtime servers against the exact attachment permissions being published.
-    pub fn set_server_permissions(
+    pub fn set_server_permission_profiles(
         &mut self,
         servers: &HashMap<String, EffectiveMcpServer>,
-        environment_sandboxes: impl IntoIterator<Item = (String, Arc<FileSystemSandboxContext>)>,
+        environment_profiles: impl IntoIterator<Item = (String, PermissionProfile)>,
     ) {
-        let environment_sandboxes = environment_sandboxes.into_iter().collect::<HashMap<_, _>>();
-        self.server_permissions = servers
+        let environment_profiles = environment_profiles.into_iter().collect::<HashMap<_, _>>();
+        self.server_permission_profiles = servers
             .iter()
             .filter(|(_, server)| server.enabled())
             .filter_map(|(server_name, _)| {
                 let server = self.mcp_server_catalog.server(server_name)?;
-                let permissions = if server
+                let permission_profile = if server
                     .source()
                     .is_host_owned_apps(server_name, server.config())
                 {
-                    McpServerPermissions::Thread
-                } else if let Some(sandbox) =
-                    environment_sandboxes.get(&server.config().environment_id)
+                    &self.permission_profile
+                } else if let Some(permission_profile) =
+                    environment_profiles.get(&server.config().environment_id)
                 {
-                    McpServerPermissions::Environment(Arc::clone(sandbox))
+                    permission_profile
                 } else if server.config().is_local_environment()
                     || matches!(server.source(), McpServerSource::SelectedPlugin(_))
                 {
-                    McpServerPermissions::Thread
+                    &self.permission_profile
                 } else {
                     return None;
                 };
-                Some((server_name.clone(), permissions))
+                Some((server_name.clone(), permission_profile.clone()))
             })
             .collect();
     }
 
     /// Returns this server's published permission authority.
     pub fn permission_profile_for_server(&self, server_name: &str) -> Option<&PermissionProfile> {
-        Some(match self.server_permissions.get(server_name)? {
-            McpServerPermissions::Thread => &self.permission_profile,
-            McpServerPermissions::Environment(sandbox) => &sandbox.permissions,
-        })
+        self.server_permission_profiles.get(server_name)
     }
 
     /// Standalone discovery and resource reads must not inherit thread execution authority.
     pub fn for_threadless_operations(&self, servers: &HashMap<String, EffectiveMcpServer>) -> Self {
         let mut config = self.clone();
         config.permission_profile = PermissionProfile::default();
-        config.server_permissions = servers
+        config.server_permission_profiles = servers
             .iter()
             .filter(|(_, server)| server.enabled())
-            .map(|(name, _)| (name.clone(), McpServerPermissions::Thread))
+            .map(|(name, _)| (name.clone(), PermissionProfile::default()))
             .collect();
         config
     }

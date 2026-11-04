@@ -12,7 +12,6 @@
 //! appear to accept a remap while some handlers still respond to the old keys.
 
 use codex_config::types::TuiKeymap;
-use codex_features::Feature;
 
 use super::ChatWidget;
 use crate::app_event::KeymapCaptureMode;
@@ -28,10 +27,7 @@ impl ChatWidget {
     /// overrides. If the config is invalid, the user sees the parse error instead of a partial
     /// picker that could commit edits against stale runtime state.
     pub(crate) fn open_keymap_picker(&mut self) {
-        match RuntimeKeymap::for_session(
-            &self.local_settings.tui.keymap,
-            self.local_settings.workspace_enabled(self.config_ref()),
-        ) {
+        match RuntimeKeymap::from_config(&self.local_settings.tui.keymap) {
             Ok(runtime_keymap) => {
                 let params = keymap_setup::build_keymap_picker_params_with_filter(
                     &runtime_keymap,
@@ -158,8 +154,6 @@ impl ChatWidget {
     fn keymap_action_filter(&self) -> keymap_setup::KeymapActionFilter {
         keymap_setup::KeymapActionFilter {
             fast_mode_enabled: self.fast_mode_enabled(),
-            multi_backend_enabled: self.config.features.enabled(Feature::TuiMultiBackend),
-            workspace_enabled: self.local_settings.workspace_enabled(self.config_ref()),
         }
     }
 

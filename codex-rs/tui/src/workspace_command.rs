@@ -4,7 +4,7 @@
 //! the active workspace lives. Callers describe a command in terms of argv, cwd, environment
 //! overrides and timeout; the runner translates that request to app-server
 //! `command/exec`. Keeping this as a TUI-local abstraction lets status surfaces avoid knowing
-//! whether the current app-server is embedded or remote.
+//! through the current embedded app-server.
 //!
 //! Commands sent through this path should not prompt for stdin. Most callers should keep output
 //! bounded so metadata refreshes cannot grow into unbounded background processes; callers that own a

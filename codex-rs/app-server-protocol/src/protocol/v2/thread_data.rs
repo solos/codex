@@ -295,7 +295,7 @@ pub struct Thread {
 }
 
 // TODO: Remove this compatibility decoder after app-server versions that omitted
-// `projectId` have aged out of the supported TUI -> remote app-server version-skew window.
+// `projectId` have aged out of the supported TUI -> app-server version-skew window.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadCompatibility {

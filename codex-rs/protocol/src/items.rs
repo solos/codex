@@ -4,7 +4,6 @@ use crate::ThreadId;
 use crate::dynamic_tools::DynamicToolCallOutputContentItem;
 use crate::mcp::CallToolResult;
 use crate::memory_citation::MemoryCitation;
-use crate::models::AudioReference;
 use crate::models::ContentItem;
 use crate::models::ContentItemMetadata;
 use crate::models::FunctionCallOutputBody;
@@ -25,7 +24,6 @@ use crate::protocol::PatchApplyStatus;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::ReviewTarget;
 use crate::protocol::SubAgentActivityKind;
-use crate::protocol::UserMessageAudioKind;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
@@ -637,52 +635,7 @@ impl UserMessageItem {
         self.content
             .iter()
             .filter_map(|c| match c {
-                UserInput::Audio {
-                    audio: AudioReference::Inline { audio_url },
-                } => Some(audio_url.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Returns file-backed audio references when the message includes an upload.
-    /// Inline payloads remain exclusively in the legacy `audio` field.
-    pub fn audio_references(&self) -> Option<Vec<AudioReference>> {
-        let audio = self
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                UserInput::Audio {
-                    audio: audio @ AudioReference::File { .. },
-                } => Some(audio.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        (!audio.is_empty()).then_some(audio)
-    }
-
-    /// Returns the original inline/file ordering when uploaded audio is present.
-    pub fn audio_order(&self) -> Vec<UserMessageAudioKind> {
-        if !self.content.iter().any(|content| {
-            matches!(
-                content,
-                UserInput::Audio {
-                    audio: AudioReference::File { .. }
-                }
-            )
-        }) {
-            return Vec::new();
-        }
-
-        self.content
-            .iter()
-            .filter_map(|content| match content {
-                UserInput::Audio {
-                    audio: AudioReference::Inline { .. },
-                } => Some(UserMessageAudioKind::Inline),
-                UserInput::Audio {
-                    audio: AudioReference::File { .. },
-                } => Some(UserMessageAudioKind::File),
+                UserInput::Audio { audio_url } => Some(audio_url.clone()),
                 _ => None,
             })
             .collect()
@@ -859,14 +812,7 @@ mod tests {
                 text_elements: Vec::new(),
             },
             UserInput::Audio {
-                audio: AudioReference::Inline {
-                    audio_url: "https://example.com/remote.mp3".to_string(),
-                },
-            },
-            UserInput::Audio {
-                audio: AudioReference::File {
-                    file_id: "file_audio".to_string(),
-                },
+                audio_url: "https://example.com/remote.mp3".to_string(),
             },
             UserInput::LocalAudio {
                 path: std::path::PathBuf::from("local.wav"),
@@ -879,16 +825,6 @@ mod tests {
                 vec!["https://example.com/remote.mp3".to_string()],
                 vec![std::path::PathBuf::from("local.wav")],
             )
-        );
-        assert_eq!(
-            item.audio_references(),
-            Some(vec![AudioReference::File {
-                file_id: "file_audio".to_string(),
-            }])
-        );
-        assert_eq!(
-            item.audio_order(),
-            vec![UserMessageAudioKind::Inline, UserMessageAudioKind::File]
         );
     }
 

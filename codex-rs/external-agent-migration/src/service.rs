@@ -276,21 +276,20 @@ impl ExternalAgentConfigService {
                                 return Err(err);
                             }
                         };
-                        let (local_details, remote_details) = match self
-                            .partition_plugin_migration_details(cwd.as_deref(), details)
-                        {
-                            Ok(details) => details,
-                            Err(err) => {
-                                record_import_error(
-                                    &mut item_result,
-                                    "plugin_import",
-                                    /*sub_error_type*/ None,
-                                    err.to_string(),
-                                    /*source*/ None,
-                                );
-                                return Err(err);
-                            }
-                        };
+                        let local_details =
+                            match self.local_plugin_migration_details(cwd.as_deref(), details) {
+                                Ok(details) => details,
+                                Err(err) => {
+                                    record_import_error(
+                                        &mut item_result,
+                                        "plugin_import",
+                                        /*sub_error_type*/ None,
+                                        err.to_string(),
+                                        /*source*/ None,
+                                    );
+                                    return Err(err);
+                                }
+                            };
 
                         if let Some(local_details) = local_details {
                             let plugin_outcome = match self
@@ -319,13 +318,6 @@ impl ExternalAgentConfigService {
                             for raw_error in plugin_outcome.raw_errors {
                                 item_result.record_error(raw_error);
                             }
-                        }
-                        if let Some(remote_details) = remote_details {
-                            outcome.pending_plugin_imports.push(PendingPluginImport {
-                                cwd,
-                                description: description.clone(),
-                                details: remote_details,
-                            });
                         }
                         emit_migration_metric(
                             EXTERNAL_AGENT_CONFIG_IMPORT_METRIC,

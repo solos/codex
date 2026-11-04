@@ -45,7 +45,6 @@ use super::rate_limits::compose_rate_limit_data;
 use super::rate_limits::compose_rate_limit_data_many;
 use super::rate_limits::format_status_limit_summary;
 use super::rate_limits::render_status_limit_progress_bar;
-use super::remote_connection::RemoteConnectionStatus;
 use super::thread_usage::StatusThreadUsage;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
@@ -133,7 +132,6 @@ struct StatusHistoryCell {
     agents_summary: Arc<RwLock<String>>,
     collaboration_mode: Option<String>,
     model_provider: Option<String>,
-    remote_connection: Option<RemoteConnectionStatus>,
     show_chatgpt_usage_link: bool,
     account: Option<StatusAccountDisplay>,
     thread_name: Option<String>,
@@ -203,7 +201,6 @@ pub(crate) fn new_status_output_with_rate_limits(
         config,
         config.model_provider.requires_openai_auth,
         /*model_provider_id*/ None,
-        /*remote_connection*/ None,
         account_display,
         token_info,
         total_usage,
@@ -227,7 +224,6 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
     requires_openai_auth: bool,
     model_provider_id: Option<&str>,
-    remote_connection: Option<&RemoteConnectionStatus>,
     account_display: Option<&StatusAccountDisplay>,
     token_info: Option<&TokenUsageInfo>,
     total_usage: &TokenUsage,
@@ -248,7 +244,6 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         config,
         requires_openai_auth,
         model_provider_id,
-        remote_connection,
         account_display,
         token_info,
         total_usage,
@@ -280,7 +275,6 @@ impl StatusHistoryCell {
         config: &Config,
         requires_openai_auth: bool,
         model_provider_id: Option<&str>,
-        remote_connection: Option<&RemoteConnectionStatus>,
         account_display: Option<&StatusAccountDisplay>,
         token_info: Option<&TokenUsageInfo>,
         total_usage: &TokenUsage,
@@ -324,15 +318,13 @@ impl StatusHistoryCell {
                 .map(|effort| effort.to_string())
                 .unwrap_or_else(|| "none".to_string());
             config_entries.push(("reasoning effort", effort_value));
-            if remote_connection.is_none() {
-                config_entries.push((
-                    "reasoning summaries",
-                    config
-                        .model_reasoning_summary
-                        .map(|summary| summary.to_string())
-                        .unwrap_or_else(|| "auto".to_string()),
-                ));
-            }
+            config_entries.push((
+                "reasoning summaries",
+                config
+                    .model_reasoning_summary
+                    .map(|summary| summary.to_string())
+                    .unwrap_or_else(|| "auto".to_string()),
+            ));
         }
         let (model_name, model_details) = compose_model_display(model_name, &config_entries);
         let approval = config_entries
@@ -354,21 +346,14 @@ impl StatusHistoryCell {
         );
         let show_chatgpt_usage_link = requires_openai_auth;
         let mut account = compose_account_display(account_display);
-        let workspace_matches_provider = if remote_connection.is_some() {
-            // A connected server owns the provider definitions; only the built-in ID is certain.
-            model_provider
-                .as_deref()
-                .is_none_or(|provider| provider == OPENAI_PROVIDER_ID)
-        } else {
-            config
-                .model_providers
-                .get(
-                    model_provider
-                        .as_deref()
-                        .unwrap_or(&config.model_provider_id),
-                )
-                .is_some_and(provider_uses_first_party_auth_path)
-        };
+        let workspace_matches_provider = config
+            .model_providers
+            .get(
+                model_provider
+                    .as_deref()
+                    .unwrap_or(&config.model_provider_id),
+            )
+            .is_some_and(provider_uses_first_party_auth_path);
         if !workspace_matches_provider
             && let Some(StatusAccountDisplay::ChatGpt { workspace, .. }) = &mut account
         {
@@ -412,7 +397,6 @@ impl StatusHistoryCell {
             permissions,
             collaboration_mode: collaboration_mode.map(ToString::to_string),
             model_provider,
-            remote_connection: remote_connection.cloned(),
             show_chatgpt_usage_link,
             account,
             thread_name,
@@ -826,26 +810,6 @@ impl StatusHistoryCell {
 
         let formatter = FieldFormatter::from_labels(labels.iter().map(String::as_str));
         let value_width = formatter.value_width(available_width);
-
-        if let Some(remote_connection) = self.remote_connection.as_ref() {
-            let value = if remote_connection.is_local_daemon {
-                Line::from("Local background server")
-            } else {
-                Line::from(vec![
-                    Span::from(remote_connection.address.clone()),
-                    Span::from(" (").dim(),
-                    Span::from(remote_connection.version.clone()).dim(),
-                    Span::from(")").dim(),
-                ])
-            };
-            let wrapped_remote = word_wrap_lines([value], RtOptions::new(value_width.max(1)));
-            let mut wrapped_remote = wrapped_remote.into_iter();
-            if let Some(first) = wrapped_remote.next() {
-                lines.push(formatter.line("Server", first.spans));
-                lines.extend(wrapped_remote.map(|line| formatter.continuation(line.spans)));
-            }
-            lines.push(Line::from(Vec::<Span<'static>>::new()));
-        }
 
         let mut model_spans = vec![Span::from(self.model_name.clone())];
         if !self.model_details.is_empty() {

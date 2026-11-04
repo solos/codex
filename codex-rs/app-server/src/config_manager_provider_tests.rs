@@ -2,17 +2,22 @@
 
 use super::*;
 use anyhow::Result;
-use codex_config::CloudConfigBundleLoadError;
-use codex_config::CloudConfigBundleLoadErrorCode;
 use codex_config::ThreadConfigContext;
 use codex_config::ThreadConfigLoadError;
 use codex_config::ThreadConfigLoadErrorCode;
 use codex_config::ThreadConfigLoaderFuture;
 use codex_config::ThreadConfigSource;
-use codex_config::test_support::CloudConfigBundleFixture;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 use test_case::test_case;
+
+fn requirements_overrides(home: &std::path::Path, requirements: &str) -> Result<LoaderOverrides> {
+    let requirements_path = home.join("requirements.toml");
+    std::fs::write(&requirements_path, requirements)?;
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.system_requirements_path = Some(requirements_path);
+    Ok(overrides)
+}
 
 #[test_case(AMAZON_BEDROCK_PROVIDER_ID, "aws.region = 'us-west-2'", "us-west-2", "us-east-1", None; "bedrock")]
 #[test_case(AMAZON_BEDROCK_RUNTIME_PROVIDER_ID, "aws.region = 'us-west-2'", "us-west-2", "us-east-1", None; "bedrock_runtime")]
@@ -43,8 +48,7 @@ async fn provider_requirements_resolve_builtin_overrides(
     let manager = ConfigManager::new_for_tests(
         home.path().to_path_buf(),
         Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(&requirements),
+        requirements_overrides(home.path(), &requirements)?,
     );
     let current = manager
         .load_latest_config(Some(workspace.path().to_path_buf()))
@@ -62,10 +66,7 @@ async fn provider_requirements_resolve_builtin_overrides(
     let changed = ConfigManager::new_for_tests(
         home.path().to_path_buf(),
         Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            requirements.replace(original, replacement),
-        ),
+        requirements_overrides(home.path(), &requirements.replace(original, replacement))?,
     );
     assert_eq!(
         changed
@@ -98,7 +99,12 @@ impl ThreadConfigLoader for UnavailableThreadConfig {
 #[tokio::test]
 async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
     let home = tempdir()?;
-    let mut manager = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+    let requirements_path = home.path().join("requirements.toml");
+    std::fs::write(&requirements_path, "model_provider = 'retained'")?;
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.system_requirements_path = Some(requirements_path.clone());
+    let mut manager =
+        ConfigManager::new_for_tests(home.path().to_path_buf(), Vec::new(), overrides);
     manager.thread_config_loader = Arc::new(codex_config::StaticThreadConfigLoader::new(vec![
         ThreadConfigSource::Session(codex_config::SessionThreadConfig {
             model_provider: Some("retained".into()),
@@ -115,9 +121,6 @@ async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
             .is_err()
     );
     manager.check_thread_model_provider(&current).await?;
-    manager.cloud_config_bundle = Arc::new(RwLock::new(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'retained'"),
-    ));
     let retained = manager
         .load_retained_session_config(&current.config_layer_stack, &current.cwd)
         .await?;
@@ -125,9 +128,7 @@ async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
     let factory = current.http_client_factory();
     assert_eq!(retained.http_client_factory(), factory);
 
-    manager.cloud_config_bundle = Arc::new(RwLock::new(
-        CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'other'"),
-    ));
+    std::fs::write(requirements_path, "model_provider = 'other'")?;
     assert_eq!(
         manager
             .check_thread_model_provider(&current)
@@ -150,12 +151,7 @@ async fn provider_requirements_ignore_system_defaults_but_reject_requirement_cha
     overrides.system_config_path = Some(system_config_path.clone());
     overrides.system_requirements_path = Some(requirements_path.clone());
     overrides.managed_config_path = Some(managed_config_path.clone());
-    let manager = ConfigManager::new_for_tests(
-        home.path().to_path_buf(),
-        Vec::new(),
-        overrides,
-        CloudConfigBundleLoader::default(),
-    );
+    let manager = ConfigManager::new_for_tests(home.path().to_path_buf(), Vec::new(), overrides);
     let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
 
     std::fs::write(&system_config_path, "invalid toml !!!")?;
@@ -213,29 +209,17 @@ async fn provider_requirement_load_errors_reject_input() -> Result<()> {
     let previous = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf())
         .load_latest_config(/*fallback_cwd*/ None)
         .await?;
-    for loader in [
-        CloudConfigBundleFixture::loader_with_enterprise_requirement("invalid toml !!!"),
-        CloudConfigBundleLoader::new(async {
-            Err(CloudConfigBundleLoadError::new(
-                CloudConfigBundleLoadErrorCode::RequestFailed,
-                /*status_code*/ None,
-                "policy unavailable",
-            ))
-        }),
-    ] {
-        let manager = ConfigManager::new_for_tests(
-            home.path().to_path_buf(),
-            Vec::new(),
-            LoaderOverrides::without_managed_config_for_tests(),
-            loader,
-        );
-        assert!(
-            manager
-                .check_thread_model_provider(&previous)
-                .await
-                .is_err()
-        );
-    }
+    let manager = ConfigManager::new_for_tests(
+        home.path().to_path_buf(),
+        Vec::new(),
+        requirements_overrides(home.path(), "invalid toml !!!")?,
+    );
+    assert!(
+        manager
+            .check_thread_model_provider(&previous)
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -243,16 +227,17 @@ async fn provider_requirement_load_errors_reject_input() -> Result<()> {
 #[tokio::test]
 async fn catalog_reload_uses_latest_model_provider() -> Result<()> {
     let home = tempdir()?;
-    let manager = ConfigManager::new_for_tests(
-        home.path().to_path_buf(),
-        Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        CloudConfigBundleFixture::loader_with_enterprise_requirement(
-            "model_provider = 'gateway'\n[model_providers.gateway]\nname = 'Gateway'\nbase_url = 'https://example.test'",
-        ),
-    );
+    let managed_config_path = home.path().join("managed_config.toml");
+    std::fs::write(
+        &managed_config_path,
+        "model_provider = 'gateway'\n[model_providers.gateway]\nname = 'Gateway'\nbase_url = 'https://example.test'",
+    )?;
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.managed_config_path = Some(managed_config_path.clone());
+    let manager = ConfigManager::new_for_tests(home.path().to_path_buf(), Vec::new(), overrides);
     let startup = manager.load_non_project_config().await?;
     assert_eq!(startup.model_provider_id, "gateway");
+    std::fs::remove_file(managed_config_path)?;
     manager.clear_chatgpt_config_loader();
     let refreshed = manager
         .load_startup_config(/*fallback_cwd*/ None)
@@ -290,12 +275,8 @@ name = "Gateway"
     } else {
         vec![(key.into(), TomlValue::String(value.into()))]
     };
-    let manager = ConfigManager::new_for_tests(
-        home.path().to_path_buf(),
-        cli_overrides,
-        loader_overrides,
-        CloudConfigBundleLoader::default(),
-    );
+    let manager =
+        ConfigManager::new_for_tests(home.path().to_path_buf(), cli_overrides, loader_overrides);
     let current = manager
         .load_latest_config(Some(home.path().to_path_buf()))
         .await?;

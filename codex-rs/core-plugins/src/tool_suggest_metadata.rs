@@ -23,7 +23,7 @@ use crate::loader::load_plugin_apps_from_manifest;
 use crate::loader::load_plugin_mcp_servers_from_manifest_with_format;
 use crate::loader::load_plugin_skill_inventory;
 use crate::manager::ConfiguredMarketplacePlugin;
-use crate::manager::remote_plugin_install_required_description;
+use crate::manager::plugin_install_required_description;
 use crate::manifest::ManifestCache;
 use crate::marketplace::MarketplaceError;
 use crate::marketplace::MarketplacePluginSource;
@@ -217,7 +217,7 @@ async fn load_plugin_metadata(
             display_name: plugin.name.clone(),
             plugin_namespace: Some(plugin.name.clone()),
             description: prompt_safe_plugin_description(Some(
-                &remote_plugin_install_required_description(&plugin.source),
+                &plugin_install_required_description(&plugin.source),
             )),
             mcp_server_names: Vec::new(),
             app_declarations: Vec::new(),
@@ -232,7 +232,6 @@ async fn load_plugin_metadata(
         .ok_or_else(|| "missing or invalid plugin.json".to_string())?;
     let plugin_identity = PluginIdentity {
         plugin_id: plugin_id.as_key(),
-        remote_plugin_id: None,
     };
     let manifest = loaded_manifest.manifest;
     let skill_inventory = load_plugin_skill_inventory(

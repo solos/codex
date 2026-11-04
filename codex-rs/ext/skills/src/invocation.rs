@@ -31,7 +31,6 @@ impl SkillCatalogEntry {
                 scope: self.analytics_scope,
             },
             plugin_id: source.plugin_id.clone(),
-            remote_plugin_id: self.remote_plugin_id.clone(),
             invocation_type,
         }
     }
@@ -48,7 +47,7 @@ pub fn detect_implicit_skill_invocation(
 ) -> Option<SkillInvocation> {
     if environment_id == LOCAL_ENVIRONMENT_ID
         && let Some(native_workdir) = native_workdir
-        && let Some(host_snapshot) = HostSkillsSnapshot::for_step(step_store, turn_store)
+        && let Some(host_snapshot) = turn_store.get::<HostSkillsSnapshot>()
         && let Some(skill) = detect_implicit_skill_invocation_for_command(
             host_snapshot.outcome(),
             command,
@@ -62,7 +61,6 @@ pub fn detect_implicit_skill_invocation(
                 scope: skill.scope,
             },
             plugin_id: skill.plugin_id,
-            remote_plugin_id: skill.remote_plugin_id,
             invocation_type: InvocationType::Implicit,
         });
     }
@@ -91,12 +89,12 @@ pub fn detect_implicit_skill_invocation(
                     .is_some_and(|scripts_dir| path.starts_with(&scripts_dir)),
             }
         };
-        for entry in step_catalog.merged.entries.iter().filter(|entry| {
-            matches!(
-                entry.authority.kind,
-                SkillSourceKind::Cloud | SkillSourceKind::Executor
-            )
-        }) {
+        for entry in step_catalog
+            .merged
+            .entries
+            .iter()
+            .filter(|entry| entry.authority.kind == SkillSourceKind::Executor)
+        {
             if entry.enabled && matches_route(&entry.authority, &entry.main_prompt) {
                 return Some(entry.invocation(&entry.primary_source(), InvocationType::Implicit));
             }

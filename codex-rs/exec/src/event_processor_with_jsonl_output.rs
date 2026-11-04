@@ -15,7 +15,6 @@ use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WebSearchAction as ApiWebSearchAction;
 use codex_core::config::Config;
-use codex_exec_server::BoundOutput;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use serde_json::json;
@@ -631,13 +630,12 @@ impl EventProcessor for EventProcessorWithJsonOutput {
         collected.status
     }
 
-    fn print_final_output(&mut self, output: Option<BoundOutput>) -> anyhow::Result<()> {
+    fn print_final_output(&mut self) {
         if self.emit_final_message_on_shutdown
-            && let (Some(path), Some(file)) = (self.last_message_path.as_deref(), output)
+            && let Some(path) = self.last_message_path.as_deref()
         {
-            handle_last_message(self.final_message.as_deref(), path, file)?;
+            handle_last_message(self.final_message.as_deref(), path);
         }
-        Ok(())
     }
 }
 

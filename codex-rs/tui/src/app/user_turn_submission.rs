@@ -120,21 +120,20 @@ pub(super) async fn try_submit_user_turn(
     });
     let selected_active =
         selected_profile.map(|profile| ActivePermissionProfile::new(profile.profile_id.clone()));
-    // Ordinary turns inherit the server reviewer; echoing its effective value loses the request.
     let (turn_approval_policy, turn_approvals_reviewer) = if let Some(profile) = selected_profile {
         (
             profile.approval_policy,
             profile.approvals_reviewer.map(Into::into),
         )
-    } else if app.app_server_target.thread_params_mode()
-        == crate::app_server_session::ThreadParamsMode::Remote
-    {
-        (
-            Some(config.permissions.approval_policy.value().into()),
-            approvals_reviewer.map(Into::into),
-        )
     } else {
-        (Some(*approval_policy), approvals_reviewer.map(Into::into))
+        (
+            Some(*approval_policy),
+            Some(
+                approvals_reviewer
+                    .unwrap_or(config.approvals_reviewer)
+                    .into(),
+            ),
+        )
     };
     // Only explicit choices may override the saved server profile.
     let explicit_profile = app

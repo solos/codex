@@ -45,7 +45,7 @@ use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display;
 use codex_utils_redacted_string::RedactedString;
 
-use crate::cloud_config;
+use crate::config_load;
 use crate::mcp_login::McpLoginMode;
 use crate::mcp_login::perform_oauth_login_retry_without_scopes;
 use crate::plugin_cmd::load_cli_auth_manager;
@@ -250,26 +250,26 @@ impl McpCli {
 
         match subcommand {
             McpSubcommand::List(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = config_load::load_config(&config_overrides, loader_overrides).await?;
                 run_list(&config, args).await?;
             }
             McpSubcommand::Get(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = config_load::load_config(&config_overrides, loader_overrides).await?;
                 run_get(&config, args).await?;
             }
             McpSubcommand::Add(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = config_load::load_config(&config_overrides, loader_overrides).await?;
                 run_add(&config, args).await?;
             }
             McpSubcommand::Remove(args) => {
                 run_remove(&config_overrides, args).await?;
             }
             McpSubcommand::Login(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = config_load::load_config(&config_overrides, loader_overrides).await?;
                 run_login(&config, args).await?;
             }
             McpSubcommand::Logout(args) => {
-                let config = cloud_config::load_config(&config_overrides, loader_overrides).await?;
+                let config = config_load::load_config(&config_overrides, loader_overrides).await?;
                 run_logout(&config, args).await?;
             }
         }

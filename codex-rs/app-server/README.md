@@ -1,20 +1,3 @@
-# Managed human command checkpoints (experimental)
-
-A matching managed `requirements.toml` prefix rule with `decision = "prompt-user"`
-requires a fresh human decision, including when the thread uses automatic review.
-Prefix matching, exact-path precedence, and executable mappings stay unchanged. Clients
-supporting this workflow must initialize with `experimentalApi: true` and
-`requiredHumanApproval: true`.
-
-The server sends `item/commandExecution/requestApproval` with `kind: "humanCommand"`,
-a unique `approvalId`, and the command to display. Only `accept`, `decline`, and
-`cancel` are valid responses. Session and persistent approvals cannot satisfy the
-checkpoint. Only capable clients receive or answer these requests. Pending prompts
-use the normal approval replay flow when a capable client reconnects. With no capable
-connection when approval is requested, the command is rejected. The prompt itself
-does not start an execution item; normal command execution events report execution
-after approval.
-
 # Thread memory summary (experimental)
 
 `thread/memory/read` takes `{threadId}` for a loaded thread and returns
@@ -22,16 +5,6 @@ after approval.
 resolved memory version, including thread-specific configuration overrides.
 It is `null` when memory use is disabled or the selected summary is missing,
 unreadable, or blank. It never falls back to the other memory version.
-
-# Local history by account
-
-Pass `currentAccountOnly: true` on `thread/list` or `thread/search` to scope local
-discovery to the current ChatGPT login. Newly created threads record that discovery
-is account-scoped, and each recorded creator user or account ID must match.
-Threads created before this change and threads without creator IDs stay visible
-across account switches. Resume and revert preserve that distinction; forks are new threads.
-Scoped requests skip candidates whose rollout header cannot be read. API-key
-logins see all local history. Direct access by thread ID remains available.
 
 # Thread list exclusions
 
@@ -53,13 +26,6 @@ Listing also returns `-32603` if the store repeats a cursor while filling a page
 These errors are not evidence that history is exhausted; callers can retry.
 A successful response with `nextCursor: null` still indicates exhaustion.
 Default scan-and-repair requests retain their filesystem fallback.
-
-# Thread section moves
-
-After a successful `thread/section/move`, the app-server broadcasts
-`thread/section/changed` to its connected clients. The notification carries
-`threadId` and the destination `sectionId`, which is null for a removal.
-Moves within a section also emit this event so clients can refresh its order.
 
 # Shutdown admission errors
 
@@ -298,8 +264,8 @@ context before calling. Verify does not require a pending elicitation; a UI with
 its own authenticator can return proof directly in elicitation response content.
 The calling flow owns pending-request checks and discards late proofs.
 Native enroll, delete, and verify accept local stdio and in-process connections.
-WebSocket and remote-control peers must use their own device authenticator;
-status remains available for local readiness. Dropping an embedded RPC, disconnecting,
+WebSocket peers must use their own device authenticator; status remains
+available for local readiness. Dropping an embedded RPC, disconnecting,
 or changing authentication cancels its native operation. Responses recheck the
 captured identity after waiting for outbound queue capacity.
 Canceling or resolving an elicitation does not itself stop a separate
@@ -356,33 +322,19 @@ fallback for unrecognized structured error variants.
 
 ## Managed network requirements
 
-In `requirements.toml`, put shared network constraints directly in `[permissions.network]`,
-alongside `[permissions.filesystem]`:
-
-```toml
-[permissions.network]
-enabled = true
-```
-
-`[network_proxy]` and its compatibility alias `[experimental_network]` still work.
-Do not mix either with `[permissions.network]`, even across requirements layers. A single
-layer cannot use both top-level names; across layers the top-level names merge with normal
-precedence. `configRequirements/read` returns the result in `requirements.network`.
+Use `[network_proxy]` in `requirements.toml` for shared managed network constraints.
+`[experimental_network]` remains a compatibility alias. A single requirements layer cannot
+contain both names; across layers, they merge with normal precedence. The
+`configRequirements/read.network` response exposes the resulting constraints.
 
 In `config.toml`, `[features.network_proxy]` configures the proxy, while
 `[permissions.<profile>.network]` configures a profile's network settings. Managed requirements
 remain separate and override conflicting profile settings. They can start the proxy without
 enabling the feature; feature settings apply only when the feature is enabled.
 
-In `requirements.toml`, `network` is reserved, like `filesystem`. Rename any managed profile
-named `network` and update its references before upgrading. An empty `[permissions.network]`
-is rejected because it is indistinguishable from an old empty profile. Omit the table when
-there are no shared network settings. A profile named `network` is still allowed in `config.toml`.
-
 Policy publishers must continue using `[experimental_network]` until every client and policy
-validation layer supports the chosen new spelling. Older clients or intermediaries may ignore or
-strip constraints in `[network_proxy]` or `[permissions.network]`; intermediaries may also skip
-host-local validation. This reader change does not migrate or
+validation layer supports `[network_proxy]`. Older clients or intermediaries may ignore or strip
+the new spelling, or skip host-local validation. This reader change does not migrate or
 version-gate published policy bundles.
 
 # Amazon Bedrock authentication
@@ -656,8 +608,8 @@ Status notifications include `providerId`. During browser sign-in, inference
 requests fail promptly and can be retried when sign-in succeeds.
 
 `model/list` also checks gateway authentication before returning cached models.
-If authentication fails and the catalog's provider differs from the current configuration,
-it asks the client to restart Codex so the catalog and gateway sign-in use the same provider.
+If authentication fails after the provider configuration changes, it asks the client
+to restart Codex so the retained catalog and gateway sign-in use the same provider.
 
 ## Application network policy
 
@@ -735,104 +687,6 @@ that URL and wait for `account/login/completed`. The browser can reuse an
 existing SSO session. Core accepts the callback only for the requesting login
 and target workspace. Cancel through `account/login/cancel` to keep the current
 workspace. Government workspaces require a separate sign-in.
-
-# Model provider configuration
-
-Use `modelProvider/list` with `{}` to list OpenAI and providers explicitly defined
-under `[model_providers.<id>]` in the effective configuration, including requirements.
-Clients can filter the complete list by `settings.type === "customGateway"`.
-`defaultProviderId` reports the selected default even if it has no provider table.
-`canChangeDefault` accounts for required selection and higher-precedence overrides.
-
-Every entry contains `id`, `name`, `canEdit`, `baseUrl`, and `settings`.
-The shared `baseUrl` includes a configured endpoint override, including for
-Bedrock and GCP. It is null if unset or unsuitable for display.
-The `settings.type` field selects the provider-specific fields.
-
-- `openai` has no additional settings.
-- `bedrock` contains `profile` and `region` for either Bedrock provider.
-- `gcp` contains `projectId`, `location`, and `credentialFile`. The last field
-  is a path on the server host.
-- `customGateway` contains an `auth` object. Mode `none` has no other fields.
-  Mode `environmentVariable` includes the variable name in `envKey`. Mode
-  `externallyConfigured` includes a nullable `envKey` and indicates that the
-  gateway form cannot fully represent the authentication. Preserve this
-  authentication when editing other fields.
-
-Settings include inherited values and use null for unset nullable fields.
-Credential values are never resolved.
-
-`canEdit` indicates that at least one supported configuration field can be changed
-in the active user layer. Supported built-in fields are AWS profile/region for
-Bedrock and project/location/credential file for GCP. Custom providers support
-name, URL, and environment-variable authentication where applicable. Individual
-writes still require validation. Lower-precedence definitions can be overridden;
-required definitions are read-only. Both capabilities are false when user
-configuration is ignored. The flag does not establish credential validity or
-whether a setup flow that also selects a default provider will succeed.
-`account/bedrock/setup` targets `amazon-bedrock`; edits to `amazon-bedrock-runtime`
-must use that provider's configuration paths instead.
-
-Use `modelProvider/config/write` with a tagged `settings` patch. To create a
-custom gateway, send `type: "customGateway"`, `name`, and `baseUrl`. Omit
-`providerId` or pass null to allocate an ID. To edit an existing gateway,
-include its ID inside `settings`.
-
-```json
-{
-  "settings": {
-    "type": "customGateway",
-    "providerId": "team",
-    "name": "New name",
-    "envKey": null
-  }
-}
-```
-
-The Bedrock branch requires `amazon-bedrock` or `amazon-bedrock-runtime` and
-accepts `profile` and `region`. This patch changes only the runtime region.
-
-```json
-{
-  "settings": {
-    "type": "bedrock",
-    "providerId": "amazon-bedrock-runtime",
-    "region": "us-east-1"
-  }
-}
-```
-
-The GCP branch requires `gcp` and accepts `projectId`, `location`, and
-`credentialFile`. This patch clears the credential-file override.
-
-```json
-{ "settings": { "type": "gcp", "providerId": "gcp", "credentialFile": null } }
-```
-
-Omitted patch fields preserve their values. Setting a nullable field such as
-`region` to `null` removes its user-level override, so any inherited value takes effect.
-A supplied name must be a string. A supported built-in can receive its first
-override even when absent from the list. Custom gateways can share a display
-name with a built-in, except for names that select built-in behavior
-(`OpenAI`, `Amazon Bedrock`, `Amazon Bedrock Runtime`, and `Google Cloud Vertex AI`).
-Built-in provider IDs remain reserved.
-
-Send only edited configuration fields. A null `baseUrl` in a summary can mean
-that the endpoint was redacted. When `settings.auth.mode` is `externallyConfigured`,
-including for an endpoint with embedded credentials, writes to `envKey` are rejected. Other edits preserve unexposed authentication,
-headers, query parameters, and commands, including when changing the endpoint.
-Each supplied field must be writable. A new user-layer custom override retains the
-inherited name because custom provider tables require a name.
-
-The response is `{ "provider": ModelProviderSummary }`, using the same safe summary
-as list. There are no public version tokens. Provider, value, and batch writes in
-one app-server share the config queue: the last write to a field wins while omitted
-siblings are preserved. Patches apply without an expected-version check. The
-response summarizes the saved configuration.
-
-Saving does not select a default, authenticate, or contact the provider. Use setup
-RPCs for authentication and selection. Saving the provider used by `model/list`
-invalidates its catalog for the next access. Existing threads keep their configuration.
 
 # GCP provider account
 

@@ -8,7 +8,6 @@ use codex_http_client::RequestBuilder;
 use codex_http_client::RouteAwareClientPool;
 use codex_http_client::RouteAwareRequestError;
 use futures::Stream;
-use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
 use http::header::CONTENT_LENGTH;
@@ -155,7 +154,7 @@ where
         "file_size": file_size_bytes,
         "use_case": OPENAI_FILE_USE_CASE,
     });
-    let request = authorized_request(client_pool, auth, Method::POST, &create_url).await?;
+    let request = authorized_request(client_pool, auth, Method::POST, &create_url)?;
     let create_request = match hosted_upload {
         Some(context) => serde_json::json!({
             "file_name": file_name.as_str(),
@@ -366,8 +365,7 @@ where
     };
     let finalize_started_at = Instant::now();
     loop {
-        let finalize_response = authorized_request(client_pool, auth, Method::POST, &finalize_url)
-            .await?
+        let finalize_response = authorized_request(client_pool, auth, Method::POST, &finalize_url)?
             .json(&finalize_request)
             .send()
             .await
@@ -434,13 +432,14 @@ where
     }
 }
 
-async fn authorized_request(
+fn authorized_request(
     client_pool: &RouteAwareClientPool,
     auth: &dyn AuthProvider,
     method: Method,
     url: &str,
 ) -> Result<RequestBuilder, OpenAiFileError> {
-    let headers = auth.apply_auth_headers(HeaderMap::new()).await?;
+    let mut headers = http::HeaderMap::new();
+    auth.add_auth_headers(&mut headers)?;
 
     Ok(client_pool
         .request(method, url)

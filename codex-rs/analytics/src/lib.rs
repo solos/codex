@@ -1,6 +1,4 @@
 mod accepted_lines;
-#[cfg(debug_assertions)]
-mod analytics_capture;
 mod client;
 mod events;
 mod facts;
@@ -85,9 +83,6 @@ pub use thread_hint::ThreadHintStatus;
 pub use thread_hint::ThreadHintStatusEvent;
 pub use turn_critical_path::TurnCriticalPath;
 pub use turn_critical_path::TurnCriticalPathDurations;
-
-#[cfg(test)]
-mod tests;
 
 pub fn now_unix_seconds() -> u64 {
     SystemTime::now()

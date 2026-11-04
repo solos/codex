@@ -74,7 +74,6 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: delivery.clone(),
         };
         let info = ModelProviderInfo {
@@ -211,7 +210,6 @@ async fn gateway_preserves_runtime_auth_and_rejects_header_collisions() {
                 resource: None,
                 scopes: vec![],
                 redirect_port: None,
-                credentials_store: Default::default(),
                 delivery: GatewayOAuthDelivery::Header {
                     name: "x-gateway-auth".into(),
                     scheme: "Bearer".into(),
@@ -313,7 +311,6 @@ async fn gateway_refresh_preserves_primary_auth_and_hides_issuer_errors() {
                 resource: None,
                 scopes: vec![],
                 redirect_port: None,
-                credentials_store: Default::default(),
                 delivery: GatewayOAuthDelivery::Header {
                     name: "x-gateway-auth".into(),
                     scheme: "Bearer".into(),
@@ -408,7 +405,6 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
@@ -489,7 +485,6 @@ async fn models_observe_gateway_rotation(instance: ProviderInstance) {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
@@ -604,7 +599,6 @@ async fn gateway_setup_errors_are_reported_when_authentication_is_requested() {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
@@ -672,7 +666,6 @@ async fn gateway_login_required_invalidates_the_last_successful_catalog() {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),
@@ -757,7 +750,6 @@ async fn gateway_login_states_stop_request_retries() {
             resource: None,
             scopes: vec![],
             redirect_port: None,
-            credentials_store: Default::default(),
             delivery: GatewayOAuthDelivery::Header {
                 name: "x-gateway-auth".into(),
                 scheme: "Bearer".into(),

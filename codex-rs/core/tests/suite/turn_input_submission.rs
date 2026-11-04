@@ -311,30 +311,6 @@ async fn host_drain_allows_spawned_agent_input_but_not_automatic_work() -> anyho
             reason: NotSubmittedReason::ServerDraining
         },
     );
-    // A remote agent submission has not already been admitted by this host,
-    // even when its caller supplies parent lineage.
-    assert_eq!(
-        child
-            .start_or_steer_turn(
-                TurnInputRequest::new(TurnInput::InterAgentCommunication(
-                    InterAgentCommunication::new(
-                        AgentPath::root(),
-                        AgentPath::try_from("/root/worker").expect("valid agent path"),
-                        Vec::new(),
-                        "agent input while draining".to_string(),
-                        /*trigger_turn*/ true,
-                    ),
-                ))
-                .on_start(TurnStartOptions {
-                    parent_turn_id: Some("parent-turn".to_string()),
-                    ..Default::default()
-                }),
-            )
-            .await?,
-        TurnInputSubmission::NotSubmitted {
-            reason: NotSubmittedReason::ServerDraining
-        },
-    );
     assert!(matches!(
         child
             .start_or_steer_turn(user_message_request("delegated input").on_start(
@@ -1057,7 +1033,7 @@ async fn continue_turn_if_idle_starts_new_turn_with_internal_input() {
     ThreadIdle::wait(&test.codex).await;
     let mock = responses::mount_sse_once(&server, responses::sse_completed("continued")).await;
     let input = ContextualUserFragment::into(InternalModelContextFragment::new(
-        InternalContextSource::from_static("daemon_recovery"),
+        InternalContextSource::from_static("interrupted_turn"),
         "Continue the interrupted work.",
     ));
     let schema = serde_json::json!({"type":"object","properties":{},"additionalProperties":false});
@@ -1088,7 +1064,7 @@ async fn continue_turn_if_idle_starts_new_turn_with_internal_input() {
     .await;
     ThreadIdle::wait(&test.codex).await;
     let request = mock.single_request();
-    assert!(request.has_content_kinds(&["daemon_recovery.internal_context"]));
+    assert!(request.has_content_kinds(&["interrupted_turn.internal_context"]));
     let metadata: Value = serde_json::from_str(
         &request
             .header("x-codex-turn-metadata")
@@ -1105,7 +1081,7 @@ async fn continue_turn_if_idle_starts_new_turn_with_internal_input() {
             .continue_turn_if_idle(
                 TurnInputRequest::new(TurnInput::ResponseItem(ContextualUserFragment::into(
                     InternalModelContextFragment::new(
-                        InternalContextSource::from_static("daemon_recovery"),
+                        InternalContextSource::from_static("interrupted_turn"),
                         "Continue."
                     ),
                 ))),
@@ -1483,7 +1459,7 @@ async fn start_or_steer_turn_requires_matching_active_output_schema() {
 #[test_case(vec![UserInput::Text { text: "Do the work".into(), text_elements: Vec::new() }], "local"; "user")]
 #[cfg_attr(unix, test_case(Vec::new(), "remote"; "remote_stays_idle"))]
 #[tokio::test]
-async fn sampling_is_ready_for_daemon_recovery(
+async fn sampling_is_ready_for_interrupted_turn_recovery(
     input: Vec<UserInput>,
     executor: &str,
 ) -> anyhow::Result<()> {
@@ -1531,7 +1507,8 @@ async fn sampling_is_ready_for_daemon_recovery(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn daemon_recovery_includes_local_environment_that_finished_starting() -> anyhow::Result<()> {
+async fn interrupted_turn_recovery_includes_local_environment_that_finished_starting()
+-> anyhow::Result<()> {
     let (release, gate) = oneshot::channel();
     let (server, _completions) = start_streaming_sse_server(vec![
         vec![StreamingSseChunk {

@@ -3,8 +3,8 @@
 use super::*;
 use crate::app::tests::session_lifecycle_requests::RealtimeRequestBehavior;
 use crate::app::tests::session_lifecycle_requests::recorded_params;
+use crate::app::tests::session_lifecycle_requests::start_recording_cloud_app_server;
 use crate::app::tests::session_lifecycle_requests::start_recording_realtime_speech_app_server;
-use crate::app::tests::session_lifecycle_requests::start_recording_remote_app_server;
 use crate::chatwidget::commit_realtime_history_events;
 use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
 use crate::local_settings::LocalSettings;
@@ -110,7 +110,7 @@ async fn check_remote_voice_start(
             capabilities,
             /*blocked_thread_list*/ None,
             /*failed_thread_name*/ None,
-            crate::app_server_session::ThreadParamsMode::Remote,
+            crate::app_server_session::ThreadParamsMode::Embedded,
             RealtimeRequestBehavior::AcceptStart,
             codex_config::LoaderOverrides::default(),
         )
@@ -762,7 +762,7 @@ async fn retained_caption_consumes_only_one_matching_answer_fallback_on_reattach
         empty_thread_snapshot(&app, source),
         /*resume_restored_queue*/ false,
     );
-    let (mut app_server, _requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, _requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     while let Ok(event) = events.try_recv() {
         Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
@@ -1186,7 +1186,7 @@ async fn rejected_realtime_speech_restores_the_delegated_final_answer() -> Resul
     let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
     // This proxy forwards appendSpeech to an embedded server with no voice
     // session for the synthetic thread, which rejects the request.
-    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);
     app.chat_widget
@@ -1278,250 +1278,6 @@ async fn rejected_realtime_speech_restores_the_delegated_final_answer() -> Resul
     proxy.await??;
     Ok(())
 }
-
-#[tokio::test]
-async fn switching_threads_retains_undelivered_voice_answer_after_replay_eviction() -> Result<()> {
-    let (mut app, _events, mut ops) = make_test_app_with_channels().await;
-    let (mut app_server, requests, proxy) = start_recording_realtime_speech_app_server(
-        &app.config,
-        RealtimeRequestBehavior::AcceptSpeech,
-    )
-    .await?;
-    let original = ThreadId::new();
-    app.active_thread_id = Some(original);
-    app.chat_widget
-        .handle_thread_session_quiet(test_thread_session(original, app.config.cwd.to_path_buf()));
-    crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, original);
-    while ops.try_recv().is_ok() {}
-    send_item(
-        &mut app,
-        original,
-        "switched-turn",
-        test_user_message(
-            "voice-input",
-            "<realtime_delegation><input>hello</input></realtime_delegation>",
-        ),
-        ItemEventKind::Started,
-    );
-    let answer = test_agent_message("switched-final", "Answer survives a thread switch.");
-    send_item(
-        &mut app,
-        original,
-        "switched-turn",
-        answer.clone(),
-        ItemEventKind::Started,
-    );
-    send_item(
-        &mut app,
-        original,
-        "switched-turn",
-        answer.clone(),
-        ItemEventKind::Completed,
-    );
-    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
-        ServerNotification::TurnCompleted(TurnCompletedNotification {
-            thread_id: original.to_string(),
-            turn: Turn {
-                id: "switched-turn".to_string(),
-                root_turn_id: None,
-                items: vec![ThreadItem::untimed(answer)],
-                items_view: TurnItemsView::Summary,
-                status: TurnStatus::Completed,
-                error: None,
-                started_at: None,
-                completed_at: None,
-                duration_ms: None,
-            },
-        }),
-    )));
-    let speech = ops.try_recv()?;
-    let (side_widget, _, mut side_events, _) = make_chatwidget_manual_with_sender().await;
-    let side = ThreadId::new();
-    app.active_thread_id = Some(side);
-    app.replace_chat_widget(side_widget);
-    app.chat_widget
-        .handle_thread_session_quiet(test_thread_session(side, app.config.cwd.to_path_buf()));
-    app.stop_realtime_conversation(&mut app_server).await;
-    app.enqueue_thread_notification(
-        original,
-        ServerNotification::ThreadRealtimeClosed(
-            codex_app_server_protocol::ThreadRealtimeClosedNotification {
-                thread_id: original.to_string(),
-                reason: Some("requested".into()),
-            },
-        ),
-    )
-    .await?;
-    assert_eq!(app.pending_realtime_speech_replay[&original].len(), 1);
-    // Reconnect discards the old AppEvent receiver before installing a new widget.
-    let (replacement_tx, _replacement_rx) = tokio::sync::mpsc::unbounded_channel();
-    app.app_event_tx = crate::app_event_sender::AppEventSender::new(replacement_tx);
-
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::CodexOp(speech))).await?;
-    assert!(recorded_params(&requests, "thread/realtime/appendSpeech").is_empty());
-    while let Ok(event) = side_events.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            assert!(cell.display_lines(/*width*/ 80).iter().all(|line| {
-                !line
-                    .to_string()
-                    .contains("Answer survives a thread switch.")
-            }));
-        }
-    }
-
-    let (original_widget, _, mut original_events, _) = make_chatwidget_manual_with_sender().await;
-    app.active_thread_id = Some(original);
-    app.replace_chat_widget(original_widget);
-    // The ordinary bounded event buffer has lost ItemCompleted and TurnCompleted.
-    app.replay_thread_snapshot(
-        empty_thread_snapshot(&app, original),
-        /*resume_restored_queue*/ false,
-    );
-    assert!(!app.pending_realtime_speech_replay.contains_key(&original));
-    let mut restored = 0;
-    while let Ok(event) = original_events.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event
-            && cell.display_lines(/*width*/ 80).iter().any(|line| {
-                line.to_string()
-                    .contains("Answer survives a thread switch.")
-            })
-        {
-            restored += 1;
-        }
-    }
-    assert_eq!(restored, 1);
-    let replayed_item = test_agent_message("replayed-final", "Already in the thread snapshot.");
-    let mut older_item = replayed_item.clone();
-    if let ThreadItemPayload::AgentMessage { text, .. } = &mut older_item {
-        *text = "Older pending text.".to_string();
-    }
-    app.pending_realtime_speech_replay
-        .insert(original, vec![("replayed-turn".to_string(), older_item)]);
-    app.replay_thread_snapshot(
-        ThreadEventSnapshot {
-            delegated_turns: Vec::new(),
-            session: Some(test_thread_session(original, app.config.cwd.to_path_buf())),
-            turns: vec![Turn {
-                id: "replayed-turn".to_string(),
-                root_turn_id: None,
-                items: vec![ThreadItem::untimed(replayed_item)],
-                items_view: TurnItemsView::Summary,
-                status: TurnStatus::Completed,
-                error: None,
-                started_at: None,
-                completed_at: None,
-                duration_ms: None,
-            }],
-            events: Vec::new(),
-            active_reasoning_item: None,
-            input_state: None,
-        },
-        /*resume_restored_queue*/ false,
-    );
-    let mut snapshot_cells = 0;
-    while let Ok(event) = original_events.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            for line in cell.display_lines(/*width*/ 80) {
-                assert!(!line.to_string().contains("Older pending text."));
-                snapshot_cells +=
-                    usize::from(line.to_string().contains("Already in the thread snapshot."));
-            }
-        }
-    }
-    assert_eq!(snapshot_cells, 1);
-    assert!(!app.pending_realtime_speech_replay.contains_key(&original));
-
-    // Switch before TurnCompleted exists at all. A hidden ItemCompleted must
-    // survive without relying on a later turn event in the bounded buffer.
-    crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, original);
-    send_item(
-        &mut app,
-        original,
-        "early-switch-turn",
-        test_user_message(
-            "early-voice-input",
-            "<realtime_delegation><input>early</input></realtime_delegation>",
-        ),
-        ItemEventKind::Started,
-    );
-    let early_answer =
-        test_agent_message("early-switch-final", "Hidden final before turn completion.");
-    send_item(
-        &mut app,
-        original,
-        "early-switch-turn",
-        early_answer.clone(),
-        ItemEventKind::Started,
-    );
-    send_item(
-        &mut app,
-        original,
-        "early-switch-turn",
-        early_answer,
-        ItemEventKind::Completed,
-    );
-    assert!(ops.try_recv().is_err());
-    let (side_widget, _, _, _) = make_chatwidget_manual_with_sender().await;
-    app.active_thread_id = Some(side);
-    app.replace_chat_widget(side_widget);
-    app.app_server_target = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
-            socket_path: test_path_buf("/tmp/unused.sock").abs(),
-        },
-    };
-    assert!(app.begin_reconnect());
-    assert_eq!(app.pending_realtime_speech_replay[&original].len(), 1);
-    let (original_widget, _, mut early_events, _) = make_chatwidget_manual_with_sender().await;
-    app.active_thread_id = Some(original);
-    app.replace_chat_widget(original_widget);
-    app.replay_thread_snapshot(
-        empty_thread_snapshot(&app, original),
-        /*resume_restored_queue*/ false,
-    );
-    let mut early_restored = 0;
-    while let Ok(event) = early_events.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event
-            && cell.display_lines(/*width*/ 80).iter().any(|line| {
-                line.to_string()
-                    .contains("Hidden final before turn completion.")
-            })
-        {
-            early_restored += 1;
-        }
-    }
-    assert_eq!(early_restored, 1);
-    assert!(!app.pending_realtime_speech_replay.contains_key(&original));
-    // Primary resume/fork uses a different replay entry point than a thread
-    // switch; it must also drain the old widget's per-thread delivery stash.
-    let resumed_answer = test_agent_message("primary-resume-final", "Recovered on primary resume.");
-    app.pending_realtime_speech_replay.insert(
-        original,
-        vec![("primary-resume-turn".to_string(), resumed_answer)],
-    );
-    app.enqueue_primary_thread_session_with_presentation(
-        test_thread_session(original, app.config.cwd.to_path_buf()),
-        Vec::new(),
-        crate::app::session_lifecycle::ThreadAttachPresentation::SessionLineage,
-    )
-    .await?;
-    assert!(!app.pending_realtime_speech_replay.contains_key(&original));
-    let primary_restored = std::iter::from_fn(|| early_events.try_recv().ok())
-        .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => Some(cell.raw_lines()),
-            _ => None,
-        })
-        .flatten()
-        .filter(|line| line.to_string() == "Recovered on primary resume.")
-        .count();
-    assert_eq!(primary_restored, 1);
-    assert!(recorded_params(&requests, "thread/realtime/appendSpeech").is_empty());
-    app_server.shutdown().await?;
-    proxy.await??;
-    Ok(())
-}
-
 fn send_item(
     app: &mut App,
     thread_id: ThreadId,
@@ -1745,7 +1501,7 @@ async fn delegated_final_speech_reaches_app_server_once_and_stale_speech_is_reje
 #[tokio::test]
 async fn rejected_voice_setting_preserves_current_selection() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
-    let (mut app_server, _requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, _requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let previous = (
         app.config.realtime.voice,
         app.chat_widget.config_ref().realtime.voice,
@@ -1789,7 +1545,7 @@ async fn rejected_voice_setting_preserves_current_selection() -> Result<()> {
 #[tokio::test]
 async fn remote_voice_config_read_failure_does_not_start_with_local_voice() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
-    let (mut app_server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut app_server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     std::fs::write(app.config.codex_home.join("config.toml"), "realtime = [")?;
     let thread_id = ThreadId::new();
     let error = app
@@ -1891,7 +1647,7 @@ async fn remote_voice_picker_reads_server_preference() -> Result<()> {
     )?;
     app.chat_widget
         .set_realtime_voice(Some(codex_protocol::protocol::RealtimeVoice::Maple));
-    let (server, requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (server, requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     app.open_realtime_voices(&server).await;
     assert_eq!(
         recorded_params(&requests, "thread/realtime/listVoices").len(),
@@ -1920,7 +1676,7 @@ async fn remote_voice_catalog_success_and_failure() -> Result<()> {
                 capabilities,
                 /*blocked_thread_list*/ None,
                 /*failed_thread_name*/ None,
-                crate::app_server_session::ThreadParamsMode::Remote,
+                crate::app_server_session::ThreadParamsMode::Embedded,
                 RealtimeRequestBehavior::Forward,
                 codex_config::LoaderOverrides::default(),
             )
@@ -2052,7 +1808,6 @@ async fn overridden_voice_save_keeps_effective_voice() -> Result<()> {
             overrides,
             codex_config::LoaderOverrides::without_managed_config_for_tests(),
             /*strict_config*/ false,
-            codex_config::CloudConfigBundleLoader::default(),
             codex_feedback::CodexFeedback::new(),
             /*log_db*/ None,
             /*state_db*/ None,
@@ -2208,74 +1963,10 @@ async fn audio_devices_are_persisted_and_input_changes_clear_channels() -> Resul
     );
     Ok(())
 }
-
-#[tokio::test]
-async fn microphone_channel_is_machine_local_across_project_and_remote_transitions() -> Result<()> {
-    let mut app = make_test_app().await;
-    let project = tempfile::tempdir()?;
-    let remote = tempfile::tempdir()?;
-    std::fs::create_dir_all(project.path().join(".codex"))?;
-    std::fs::write(
-        project.path().join(".codex/config.toml"),
-        "default_permissions = \"work\"\n[audio]\nmicrophone_channel = 2\n[permissions.work]\nextends = \":workspace\"\n",
-    )?;
-    crate::legacy_core::config::set_project_trust_level(
-        &app.config.codex_home,
-        project.path(),
-        codex_protocol::config_types::TrustLevel::Trusted,
-    )
-    .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
-    app.cli_kv_overrides = vec![("default_permissions".into(), "work".into())];
-    app.config = app.rebuild_config_for_cwd(project.path().into()).await?;
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: crate::resolve_remote_addr("ws://127.0.0.1:9")?,
-    };
-    app.chat_widget
-        .handle_thread_session_quiet(test_thread_session(
-            ThreadId::new(),
-            remote.path().to_path_buf(),
-        ));
-    app.persist_realtime_input_channel(
-        std::num::NonZeroU16::new(/*n*/ 1)
-            .map(codex_config::config_toml::MicrophoneChannels::Single),
-    )
-    .await;
-    app.cli_kv_overrides.clear();
-    assert_eq!(
-        LocalSettings::from(&app.config).audio,
-        app.local_settings.audio
-    );
-    for cwd in [project.path(), remote.path()] {
-        let config = app.rebuild_config_for_cwd(cwd.to_path_buf()).await?;
-        let reloaded = app.local_settings.reloaded(&config);
-        assert_eq!(reloaded.audio, app.chat_widget.local_settings.audio);
-        assert_eq!(
-            reloaded.audio.as_ref().unwrap().microphone_channel,
-            std::num::NonZeroU16::new(/*n*/ 1)
-                .map(codex_config::config_toml::MicrophoneChannels::Single)
-        );
-    }
-    // A project value must not hide invalid machine audio and silently enable mixed capture.
-    std::fs::write(
-        app.local_settings.user_config_path.as_path(),
-        std::fs::read_to_string(app.local_settings.user_config_path.as_path())?
-            .replace("microphone_channel = 1", "microphone_channel = 0"),
-    )?;
-    let config = app
-        .rebuild_config_for_cwd(project.path().to_path_buf())
-        .await?;
-    app.chat_widget.local_settings = app.local_settings.reloaded(&config);
-    assert!(app.chat_widget.local_settings.audio.is_err());
-    app.chat_widget.open_realtime_sound_devices();
-    assert!(!app.chat_widget.has_active_view());
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn microphone_discovery_ignores_another_threads_completion() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
-    let (mut server, _requests, proxy) = start_recording_remote_app_server(&app.config).await?;
+    let (mut server, _requests, proxy) = start_recording_cloud_app_server(&app.config).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     app.active_thread_id = Some(ThreadId::new());
     for origin in [Some(ThreadId::new()), app.active_thread_id] {

@@ -4,7 +4,6 @@
 use super::*;
 
 pub(super) struct ForkNetwork {
-    pub cloud_config_bundle: CloudConfigBundleLoader,
     pub policy: codex_app_server_client::EmbeddedNetworkPolicy,
 }
 
@@ -28,7 +27,6 @@ pub(super) async fn fork_source(
     )
     .await?;
     let client = InProcessAppServerClient::start(InProcessClientStartArgs {
-        required_human_approval: false,
         arg0_paths: arg0_paths.clone(),
         config: std::sync::Arc::new(config.clone()),
         cli_overrides: cli_overrides.to_vec(),
@@ -37,7 +35,6 @@ pub(super) async fn fork_source(
             ..loader_overrides.clone()
         },
         strict_config,
-        cloud_config_bundle: network.cloud_config_bundle,
         embedded_network_policy: network.policy,
         feedback: CodexFeedback::new(),
         log_db: None,

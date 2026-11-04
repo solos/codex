@@ -2,7 +2,7 @@
 
 use super::session_lifecycle_requests::recorded_params;
 use super::session_lifecycle_requests::start_recording_app_server;
-use super::session_lifecycle_requests::start_recording_remote_app_server;
+use super::session_lifecycle_requests::start_recording_cloud_app_server;
 use super::*;
 use crate::app_server_session::ThreadParamsMode;
 use app_test_support::create_fake_rollout;
@@ -11,11 +11,11 @@ use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn remote_fork_dispatch_preserves_server_workspace_roots() -> Result<()> {
-    check_fork_dispatch(ThreadParamsMode::Remote).await
+    check_fork_dispatch(ThreadParamsMode::Embedded).await
 }
 
 #[tokio::test]
-async fn local_daemon_fork_dispatch_preserves_idle_source_and_children() -> Result<()> {
+async fn local_app_server_fork_dispatch_preserves_idle_source_and_children() -> Result<()> {
     check_fork_dispatch(ThreadParamsMode::Embedded).await
 }
 
@@ -46,8 +46,8 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
         .build()
         .await?;
     let (server, requests, proxy) = match mode {
-        ThreadParamsMode::Remote | ThreadParamsMode::Cloud => {
-            Box::pin(start_recording_remote_app_server(&server_config)).await?
+        ThreadParamsMode::Embedded => {
+            Box::pin(start_recording_cloud_app_server(&server_config)).await?
         }
         ThreadParamsMode::Embedded => {
             app.config = server_config.clone();
@@ -86,7 +86,7 @@ async fn check_fork_dispatch(mode: ThreadParamsMode) -> Result<()> {
     app.thread_event_listener_tasks
         .insert(source_thread_id, tokio::spawn(std::future::pending::<()>()));
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    let pending = if mode == ThreadParamsMode::Remote {
+    let pending = if mode == ThreadParamsMode::Embedded {
         let approval = exec_approval_request(
             source_thread_id,
             "source-turn",

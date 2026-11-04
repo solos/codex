@@ -539,17 +539,6 @@ fn use_legacy_landlock_config_records_deprecation_notice() {
 }
 
 #[test]
-fn remote_control_config_is_ignored() {
-    let mut entries = BTreeMap::new();
-    entries.insert("remote_control".to_string(), true);
-
-    let mut features = Features::with_defaults();
-    features.apply_map(&entries);
-
-    assert_eq!(features.enabled(Feature::RemoteControl), false);
-}
-
-#[test]
 fn telepathy_is_legacy_alias_for_chronicle() {
     assert_eq!(feature_for_key("chronicle"), Some(Feature::Chronicle));
     assert_eq!(feature_for_key("telepathy"), Some(Feature::Chronicle));
@@ -977,23 +966,5 @@ fn retired_worktree_and_voice_config_overrides_are_ignored() {
             FeatureOverrides::default(),
         );
         assert_eq!(features, Features::with_defaults());
-    }
-}
-
-#[test]
-fn model_change_suppression_config_preserves_omission_and_explicit_values() {
-    for (input, expected) in [
-        ("", false),
-        ("suppress_model_change_announcements = false", false),
-        ("suppress_model_change_announcements = true", true),
-    ] {
-        let config: FeaturesToml = toml::from_str(input).unwrap();
-        let mut features = Features::with_defaults();
-        features.apply_toml(&config);
-        assert_eq!(
-            features.enabled(Feature::SuppressModelChangeAnnouncements),
-            expected,
-            "{input}"
-        );
     }
 }

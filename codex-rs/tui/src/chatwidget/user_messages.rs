@@ -145,7 +145,6 @@ impl ThreadComposerState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThreadInputState {
-    pub(crate) provider_error: Option<codex_app_server_protocol::ModelProviderError>,
     pub(crate) questions: Option<crate::bottom_pane::QuestionState>,
     pub(crate) pending_thread_settings:
         Option<codex_app_server_protocol::ThreadSettingsUpdatedNotification>,

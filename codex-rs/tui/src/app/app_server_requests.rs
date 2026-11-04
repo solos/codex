@@ -1205,7 +1205,3 @@ mod tests {
         assert_eq!(second_response.request_id, AppServerRequestId::Integer(9));
     }
 }
-
-#[cfg(test)]
-#[path = "retained_reply_tests.rs"]
-mod retained_reply_tests;

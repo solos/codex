@@ -1,9 +1,7 @@
-//! Root request preparation, including legacy source matching and omission notices.
-//! Fixed mode keeps its existing caps; elastic mode leaves size selection to admission.
+//! Fixed root request selection, including legacy source matching and omission notices.
 //! Collection and persistent storage keep their existing bounds and source ownership.
 //! Assistant candidates borrow one immutable host snapshot until synchronous preparation ends.
 
-use crate::ContextBudgeting;
 use crate::GuardianRootMessage;
 use codex_history::RetainedContextOrder;
 use codex_history::RetainedUserMessage;
@@ -71,8 +69,7 @@ impl std::fmt::Debug for RootConversationCandidates<'_> {
 /// An immutable host snapshot that lends sources only during synchronous preparation.
 /// Implementations must preserve capture-time provenance and avoid reading live session state.
 pub trait RootConversationSource: Send + Sync {
-    /// Prepares one request view without changing captured sources or storage policy.
-    fn prepare(&self, budgeting: ContextBudgeting) -> PreparedRootContext;
+    fn prepare(&self) -> PreparedRootContext;
 }
 
 /// Shared ownership keeps captured source payloads alive without copying them.
@@ -85,8 +82,8 @@ impl RootConversationInput {
         Self(std::sync::Arc::new(source))
     }
 
-    pub fn prepare(&self, budgeting: ContextBudgeting) -> PreparedRootContext {
-        self.0.prepare(budgeting)
+    pub fn prepare(&self) -> PreparedRootContext {
+        self.0.prepare()
     }
 }
 
@@ -177,15 +174,11 @@ fn prepare_root_assistant_messages(
     retained_assistants: &[crate::RootRetainedAssistant<'_>],
     delivered_messages: &[crate::RootDeliveredMessage<'_>],
     mut missing_assistant_context: bool,
-    budgeting: ContextBudgeting,
 ) -> PreparedRootAssistants {
     let delivered = delivered_messages
         .iter()
-        .enumerate()
-        .take_while(|(index, _)| {
-            budgeting == ContextBudgeting::Elastic || *index < MAX_ROOT_MESSAGES
-        })
-        .map(|(_, message)| (message.call_id, message.text))
+        .take(MAX_ROOT_MESSAGES)
+        .map(|message| (message.call_id, message.text))
         .collect::<HashMap<_, _>>();
     let live = assistant_messages
         .iter()
@@ -212,11 +205,8 @@ fn prepare_root_assistant_messages(
             });
             let order = retained.map(|retained| retained.order).or(source.order);
             let text = retained
-                .and_then(|retained| root_retained_assistant(retained.message, budgeting))
-                .unwrap_or_else(|| match budgeting {
-                    ContextBudgeting::Fixed => crate::truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS),
-                    ContextBudgeting::Elastic => text,
-                });
+                .and_then(|retained| root_retained_assistant(retained.message))
+                .unwrap_or_else(|| crate::truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS));
             let message = if order.is_some() {
                 GuardianRootMessage::Assistant(text)
             } else {
@@ -239,7 +229,7 @@ fn prepare_root_assistant_messages(
             {
                 return None;
             }
-            let text = root_retained_assistant(source.message, budgeting);
+            let text = root_retained_assistant(source.message);
             missing_assistant_context |= text.is_none();
             text.map(|text| RootMessageCandidate {
                 order: Some(source.order),
@@ -254,16 +244,8 @@ fn prepare_root_assistant_messages(
     }
 }
 
-fn root_retained_assistant(
-    message: &codex_history::RetainedUserMessage,
-    budgeting: ContextBudgeting,
-) -> Option<String> {
-    match budgeting {
-        ContextBudgeting::Fixed => {
-            crate::retained_assistant_message(message).map(|_| message.text.clone())
-        }
-        ContextBudgeting::Elastic => message.complete.then(|| message.text.clone()),
-    }
+fn root_retained_assistant(message: &codex_history::RetainedUserMessage) -> Option<String> {
+    crate::retained_assistant_message(message).map(|_| message.text.clone())
 }
 
 /// Bounded root view plus the existing cache and skill-scope selection metadata.
@@ -274,11 +256,10 @@ pub struct PreparedRootContext {
     pub latest_user_turn_id: Option<String>,
 }
 
-/// Prepares the selected request policy without changing the captured sources.
+/// Applies the fixed root request policy without discarding the captured sources.
 pub fn prepare_root_context(
     input: &RootConversationCandidates<'_>,
     legacy_candidates: impl IntoIterator<Item = RetainedUserMessage>,
-    budgeting: ContextBudgeting,
 ) -> PreparedRootContext {
     let mut missing_root_instructions = input.missing_root_instructions;
     let mut missing_verified_answers = input.missing_verified_answers;
@@ -288,14 +269,11 @@ pub fn prepare_root_context(
         .iter()
         .filter_map(|candidate| {
             if let GuardianRootMessage::UserInput(text) = &candidate.message
-                && budgeting == ContextBudgeting::Fixed
                 && !crate::verified_answers::answer_fits(text.len())
             {
                 return None;
             }
-            let message = if let GuardianRootMessage::User(text) = &candidate.message
-                && budgeting == ContextBudgeting::Fixed
-            {
+            let message = if let GuardianRootMessage::User(text) = &candidate.message {
                 GuardianRootMessage::User(crate::truncate_text(text, MAX_ROOT_MESSAGE_TOKENS))
             } else {
                 candidate.message.clone()
@@ -310,29 +288,23 @@ pub fn prepare_root_context(
     let legacy_capacity = MAX_ROOT_MESSAGES.saturating_sub(messages.len());
     let mut legacy_messages = VecDeque::new();
     let mut latest_legacy_turn_id = None;
-    if missing_root_instructions && (budgeting == ContextBudgeting::Elastic || legacy_capacity > 0)
-    {
+    if missing_root_instructions && legacy_capacity > 0 {
         for candidate in legacy_candidates {
-            // ID-less checkpoints identify sources by their stored excerpt, independently
-            // of whether request preparation will render the original text.
-            let retained_text = crate::truncate_text(&candidate.text, MAX_ROOT_MESSAGE_TOKENS);
+            let text = crate::truncate_text(&candidate.text, MAX_ROOT_MESSAGE_TOKENS);
+            // Legacy records without IDs historically match after the request-size cap.
             if input.retained_user_sources.iter().any(|source| {
                 if let Some(id) = &source.message_id {
                     candidate.message_id.as_ref() == Some(id)
                 } else {
-                    candidate.turn_id == source.turn_id && retained_text == source.text
+                    candidate.turn_id == source.turn_id && text == source.text
                 }
             }) {
                 continue;
             }
-            let text = match budgeting {
-                ContextBudgeting::Fixed => retained_text,
-                ContextBudgeting::Elastic => candidate.text,
-            };
             latest_legacy_turn_id =
                 (!candidate.turn_id.is_empty()).then(|| candidate.turn_id.clone());
             legacy_messages.push_back(GuardianRootMessage::User(text));
-            if budgeting == ContextBudgeting::Fixed && legacy_messages.len() > legacy_capacity {
+            if legacy_messages.len() > legacy_capacity {
                 legacy_messages.pop_front();
             }
         }
@@ -342,17 +314,11 @@ pub fn prepare_root_context(
         &input.retained_assistants,
         &input.delivered_messages,
         input.missing_assistant_context,
-        budgeting,
     );
     let mut missing_assistant_context = assistants.missing_context;
     messages.extend(assistants.messages);
     messages.sort_by_key(|message| message.order);
-    let handoff_selection = match budgeting {
-        ContextBudgeting::Fixed => {
-            select_root_handoff_indices(&messages, &input.handoff_boundaries)
-        }
-        ContextBudgeting::Elastic => None,
-    };
+    let handoff_selection = select_root_handoff_indices(&messages, &input.handoff_boundaries);
     if let Some(selected) = &handoff_selection {
         messages = messages
             .into_iter()
@@ -371,10 +337,7 @@ pub fn prepare_root_context(
             })
             .collect();
     }
-    let removed = match budgeting {
-        ContextBudgeting::Fixed => messages.len().saturating_sub(MAX_ROOT_MESSAGES),
-        ContextBudgeting::Elastic => 0,
-    };
+    let removed = messages.len().saturating_sub(MAX_ROOT_MESSAGES);
     for message in &messages[..removed] {
         missing_root_instructions |= matches!(
             message.message,
@@ -387,13 +350,11 @@ pub fn prepare_root_context(
     }
     messages.drain(..removed);
     messages.sort_by_key(|message| (message.order.is_none(), message.order));
-    if budgeting == ContextBudgeting::Fixed {
-        legacy_messages.drain(
-            ..legacy_messages
-                .len()
-                .saturating_sub(MAX_ROOT_MESSAGES - messages.len()),
-        );
-    }
+    legacy_messages.drain(
+        ..legacy_messages
+            .len()
+            .saturating_sub(MAX_ROOT_MESSAGES - messages.len()),
+    );
     let mut messages = messages
         .into_iter()
         .map(|message| message.message)

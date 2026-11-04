@@ -31,30 +31,13 @@ pub async fn load_managed_requirements_state(
     let ConfigLoadOptions {
         loader_overrides: overrides,
         strict_config,
-        cloud_config_bundle,
     } = options.into();
     if overrides.ignore_managed_requirements {
         return Ok(ConfigRequirementsToml::default());
     }
 
-    let mut bundle_requirements = Vec::new();
-    if let Some(bundle) = cloud_config_bundle.get().await.map_err(io::Error::other)? {
-        let base_dir = AbsolutePathBuf::from_absolute_path(codex_home)?;
-        bundle_requirements = bundle
-            .requirements_toml
-            .into_layers()
-            .into_iter()
-            .map(|layer| layer.with_base_dir(base_dir.clone()))
-            .collect();
-    }
-    let (requirements, _, _) = load_requirements_from_sources(
-        fs,
-        codex_home,
-        &overrides,
-        strict_config,
-        bundle_requirements,
-    )
-    .await?;
+    let (requirements, _, _) =
+        load_requirements_from_sources(fs, codex_home, &overrides, strict_config).await?;
     let _: ConfigRequirements = requirements.clone().try_into()?;
     let requirements_toml = requirements.into_toml();
     // Full config loads also validate required provider definitions when
@@ -71,7 +54,6 @@ pub(super) async fn load_requirements_from_sources(
     codex_home: &Path,
     overrides: &LoaderOverrides,
     strict_config: bool,
-    bundle_requirements: Vec<RequirementsLayerEntry>,
 ) -> io::Result<(
     ConfigRequirementsWithSources,
     LoadedConfigLayers,
@@ -108,7 +90,6 @@ pub(super) async fn load_requirements_from_sources(
             .await?;
     if !overrides.ignore_managed_requirements {
         requirements_layers.extend(system_requirements_layer);
-        requirements_layers.extend(bundle_requirements);
         // Legacy managed_config.toml contributes approval and sandbox requirements.
         requirements_layers.extend(requirements_layers_from_legacy_scheme(
             loaded_config_layers.clone(),

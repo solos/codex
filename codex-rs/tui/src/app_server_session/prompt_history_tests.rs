@@ -25,7 +25,7 @@ async fn lifecycle_metadata_uses_local_prompt_history() -> Result<()> {
     });
     assert_eq!(entry_count, 1);
 
-    for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
+    for mode in [ThreadParamsMode::Embedded] {
         let server_home = tempfile::tempdir()?;
         let mut config = ConfigBuilder::default()
             .codex_home(server_home.path().to_path_buf())

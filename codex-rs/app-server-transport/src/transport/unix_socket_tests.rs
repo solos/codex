@@ -1,6 +1,5 @@
 use super::AppServerTransport;
 use super::CHANNEL_CAPACITY;
-use super::DaemonShutdownAccess;
 use super::TransportEvent;
 use super::acquire_app_server_startup_lock;
 use super::app_server_control_socket_path;
@@ -62,7 +61,7 @@ fn listen_unix_socket_accepts_relative_custom_path() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn long_control_socket_paths_connect_to_distinct_daemons() {
+async fn long_control_socket_paths_connect_to_distinct_servers() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let long_parent = temp_dir.path().join("x".repeat(120));
     let mut sockets = Vec::new();
@@ -79,7 +78,6 @@ async fn long_control_socket_paths_connect_to_distinct_daemons() {
             socket_path.clone(),
             transport_event_tx,
             shutdown_token.clone(),
-            DaemonShutdownAccess::Disabled,
             WebSocketCompression::Plain,
         )
         .await
@@ -114,7 +112,6 @@ async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_a
         socket_path.clone(),
         transport_event_tx,
         shutdown_token.clone(),
-        DaemonShutdownAccess::Disabled,
         WebSocketCompression::Plain,
     )
     .await
@@ -214,89 +211,6 @@ async fn control_socket_acceptor_upgrades_and_forwards_websocket_text_messages_a
 }
 
 #[tokio::test]
-async fn shutdown_is_only_accepted_on_managed_local_socket_for_its_own_pid() {
-    let temp_dir = tempfile::TempDir::new().expect("temp dir");
-    let socket_path = test_socket_path(temp_dir.path());
-    let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let shutdown = CancellationToken::new();
-    let acceptor = start_control_socket_acceptor(
-        socket_path.clone(),
-        tx,
-        shutdown.clone(),
-        DaemonShutdownAccess::Disabled,
-        WebSocketCompression::Plain,
-    )
-    .await
-    .expect("acceptor");
-
-    let stream = connect_to_socket(socket_path.as_path())
-        .await
-        .expect("connect");
-    assert!(
-        client_async("ws://localhost/daemon/shutdown", stream)
-            .await
-            .is_err()
-    );
-    assert!(rx.try_recv().is_err());
-    shutdown.cancel();
-    acceptor.await.expect("acceptor shutdown");
-
-    let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-    let shutdown = CancellationToken::new();
-    let acceptor = start_control_socket_acceptor(
-        socket_path.clone(),
-        tx,
-        shutdown.clone(),
-        DaemonShutdownAccess::Managed,
-        WebSocketCompression::Plain,
-    )
-    .await
-    .expect("managed acceptor");
-    let stream = connect_to_socket(socket_path.as_path())
-        .await
-        .expect("connect");
-    let (mut websocket, _) = client_async("ws://localhost/daemon/shutdown", stream)
-        .await
-        .expect("upgrade");
-    websocket
-        .send(WebSocketMessage::Text("0".into()))
-        .await
-        .expect("wrong pid");
-    assert!(!matches!(
-        websocket.next().await,
-        Some(Ok(WebSocketMessage::Text(_)))
-    ));
-    assert!(rx.try_recv().is_err());
-
-    let stream = connect_to_socket(socket_path.as_path())
-        .await
-        .expect("connect");
-    let (mut websocket, _) = client_async("ws://localhost/daemon/shutdown", stream)
-        .await
-        .expect("upgrade");
-    let pid = std::process::id().to_string();
-    websocket
-        .send(WebSocketMessage::Text(pid.clone().into()))
-        .await
-        .expect("request");
-    assert_eq!(
-        websocket.next().await.expect("ack").expect("ack frame"),
-        WebSocketMessage::Text(pid.into())
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "server must wait until the ack is received"
-    );
-    websocket.close(None).await.expect("confirm receipt");
-    assert!(matches!(
-        timeout(Duration::from_secs(2), rx.recv()).await,
-        Ok(Some(TransportEvent::DaemonShutdown))
-    ));
-    shutdown.cancel();
-    acceptor.await.expect("acceptor shutdown");
-}
-
-#[tokio::test]
 async fn app_server_startup_lock_serializes_waiters() {
     let temp_dir = tempfile::TempDir::new().expect("temp dir");
     let lock_path = test_startup_lock_path(temp_dir.path());
@@ -369,7 +283,6 @@ async fn control_socket_rejects_writable_parent_without_changing_permissions() {
         path.clone(),
         tx,
         CancellationToken::new(),
-        DaemonShutdownAccess::Disabled,
         WebSocketCompression::Plain,
     )
     .await
@@ -403,7 +316,6 @@ async fn control_socket_file_is_private_after_bind() {
         socket_path.clone(),
         transport_event_tx,
         shutdown_token.clone(),
-        DaemonShutdownAccess::Disabled,
         WebSocketCompression::Plain,
     )
     .await
@@ -418,10 +330,6 @@ async fn control_socket_file_is_private_after_bind() {
         0o755
     );
     let physical_path = std::fs::read_link(socket_path.as_path()).expect("rendezvous symlink");
-    assert_eq!(
-        super::verified_local_daemon_socket(socket_path.as_path()).unwrap(),
-        Some(AbsolutePathBuf::from_absolute_path(physical_path.clone()).unwrap())
-    );
     assert_eq!(
         physical_path.parent(),
         Some(
@@ -438,15 +346,6 @@ async fn control_socket_file_is_private_after_bind() {
     assert!(!physical_path.with_extension("lock").exists());
     assert!(std::fs::symlink_metadata(socket_path.as_path()).is_err());
 
-    // SSH/socat may bind directly at the same advertised path.
-    let forwarded = tokio::net::UnixListener::bind(socket_path.as_path()).unwrap();
-    assert_eq!(
-        super::verified_local_daemon_socket(socket_path.as_path()).unwrap(),
-        None
-    );
-    drop(forwarded);
-    std::fs::remove_file(socket_path.as_path()).unwrap();
-
     // Simulate a dangling rendezvous left by an interrupted cleanup.
     std::os::unix::fs::symlink(&physical_path, socket_path.as_path()).unwrap();
     let (sender, _receiver) = mpsc::channel::<TransportEvent>(CHANNEL_CAPACITY);
@@ -456,14 +355,12 @@ async fn control_socket_file_is_private_after_bind() {
             socket_path.clone(),
             sender.clone(),
             shutdown.clone(),
-            DaemonShutdownAccess::Disabled,
             WebSocketCompression::Plain,
         ),
         start_control_socket_acceptor(
             socket_path.clone(),
             sender,
             shutdown.clone(),
-            DaemonShutdownAccess::Disabled,
             WebSocketCompression::Plain,
         ),
     );
@@ -499,7 +396,6 @@ async fn control_socket_pins_directory_until_shutdown() {
         socket_path.clone(),
         tx,
         shutdown.clone(),
-        DaemonShutdownAccess::Disabled,
         WebSocketCompression::Plain,
     )
     .await

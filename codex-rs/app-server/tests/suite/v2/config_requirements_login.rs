@@ -52,7 +52,6 @@ async fn config_requirements_read_preserves_unrestricted_default(config: &str) -
     Ok(())
 }
 
-#[test_case("allow_remote_control = false", "", &[ForcedLoginMethod::Api, ForcedLoginMethod::Chatgpt]; "unrestricted_with_other_requirements")]
 #[test_case("allowed_login_methods = ['api']", "", &[ForcedLoginMethod::Api]; "managed_api")]
 #[test_case("allowed_login_methods = ['chatgpt']", "", &[ForcedLoginMethod::Chatgpt]; "managed_chatgpt")]
 #[test_case("allowed_login_methods = ['chatgpt', 'api', 'api']", "", &[ForcedLoginMethod::Api, ForcedLoginMethod::Chatgpt]; "both_normalized")]

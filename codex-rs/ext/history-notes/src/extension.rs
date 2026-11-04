@@ -18,6 +18,7 @@ use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
 use codex_login::AuthManager;
+use codex_model_provider::create_model_provider;
 use codex_protocol::AgentPath;
 use codex_protocol::openai_models::HistoryToolMessages;
 use codex_protocol::openai_models::NotesToolMessages;
@@ -45,24 +46,19 @@ struct HistoryNotesAgentIdentity {
 
 impl HistoryNotesExtension {
     fn update_config(&self, thread_store: &ExtensionData, config: &Config) {
-        let auth = thread_store
-            .get::<codex_model_provider::ProviderAuthContext>()
-            .unwrap_or_else(|| {
-                Arc::new(codex_model_provider::ProviderAuthContext {
-                    credentials: Arc::clone(&self.auth_manager),
-                    runtime_auth: None,
-                })
-            });
         if config
             .token_budget
             .as_ref()
             .is_some_and(|token_budget| token_budget.use_history_notes_extension)
             && config.model_provider.is_openai()
-            && auth.credentials.current_auth_uses_codex_backend()
+            && self.auth_manager.current_auth_uses_codex_backend()
         {
             thread_store.insert(HistoryNotesExtensionConfig {
                 backend: HistoryNotesBackend::new(
-                    auth.model_provider(config.model_provider.clone()),
+                    create_model_provider(
+                        config.model_provider.clone(),
+                        Some(self.auth_manager.clone()),
+                    ),
                     config.http_client_factory(),
                 ),
             });

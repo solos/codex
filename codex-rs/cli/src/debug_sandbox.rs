@@ -1,4 +1,3 @@
-mod cloud_config;
 #[cfg(target_os = "macos")]
 mod pid_tracker;
 #[cfg(target_os = "macos")]
@@ -8,7 +7,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use anyhow::Context as _;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -646,20 +644,11 @@ async fn load_debug_sandbox_config(
     options: DebugSandboxConfigOptions,
     strict_config: bool,
 ) -> anyhow::Result<Config> {
-    let cloud_config_bundle = cloud_config::bootstrap_cloud_config_bundle(
-        &cli_overrides,
-        &options,
-        find_codex_home,
-        strict_config,
-    )
-    .await?;
-
     load_debug_sandbox_config_with_codex_home(
         cli_overrides,
         codex_linux_sandbox_exe,
         options,
         /*codex_home*/ None,
-        cloud_config_bundle,
         strict_config,
     )
     .await
@@ -670,7 +659,6 @@ async fn load_debug_sandbox_config_with_codex_home(
     codex_linux_sandbox_exe: Option<PathBuf>,
     options: DebugSandboxConfigOptions,
     codex_home: Option<PathBuf>,
-    cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
 ) -> anyhow::Result<Config> {
     let DebugSandboxConfigOptions {
@@ -704,7 +692,6 @@ async fn load_debug_sandbox_config_with_codex_home(
         codex_home.clone(),
         managed_requirements_mode,
         loader_overrides.clone(),
-        cloud_config_bundle.clone(),
         strict_config,
     )
     .await?;
@@ -724,7 +711,6 @@ async fn load_debug_sandbox_config_with_codex_home(
         codex_home,
         managed_requirements_mode,
         loader_overrides,
-        cloud_config_bundle,
         strict_config,
     )
     .await
@@ -737,13 +723,11 @@ async fn build_debug_sandbox_config_with_loader_overrides(
     codex_home: Option<PathBuf>,
     managed_requirements_mode: ManagedRequirementsMode,
     mut loader_overrides: LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
 ) -> std::io::Result<Config> {
     let mut builder = ConfigBuilder::default()
         .cli_overrides(cli_overrides)
         .harness_overrides(harness_overrides)
-        .cloud_config_bundle(cloud_config_bundle)
         .strict_config(strict_config);
     if matches!(managed_requirements_mode, ManagedRequirementsMode::Ignore) {
         loader_overrides.ignore_managed_requirements = true;
@@ -765,524 +749,4 @@ fn config_uses_permission_profiles(config: &Config) -> bool {
         .effective_config()
         .get("default_permissions")
         .is_some()
-}
-
-fn cli_overrides_use_legacy_sandbox_mode(cli_overrides: &[(String, TomlValue)]) -> bool {
-    cli_overrides.iter().any(|(key, _)| key == "sandbox_mode")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use codex_config::ConfigRequirementsToml;
-    use codex_config::test_support::CloudConfigBundleFixture;
-    use pretty_assertions::assert_eq;
-    use tempfile::TempDir;
-
-    const CLOUD_MANAGED_PERMISSION_PROFILE_REQUIREMENTS: &str = r#"
-default_permissions = "managed-cloud"
-
-[allowed_permission_profiles]
-managed-cloud = true
-
-[permissions.managed-cloud]
-extends = ":workspace"
-
-[permissions.managed-cloud.network]
-enabled = true
-"#;
-
-    async fn build_debug_sandbox_config(
-        cli_overrides: Vec<(String, TomlValue)>,
-        harness_overrides: ConfigOverrides,
-        codex_home: Option<PathBuf>,
-        managed_requirements_mode: ManagedRequirementsMode,
-        strict_config: bool,
-    ) -> std::io::Result<Config> {
-        build_debug_sandbox_config_with_loader_overrides(
-            cli_overrides,
-            harness_overrides,
-            codex_home,
-            managed_requirements_mode,
-            LoaderOverrides::default(),
-            CloudConfigBundleLoader::default(),
-            strict_config,
-        )
-        .await
-    }
-
-    fn escape_toml_path(path: &std::path::Path) -> String {
-        path.display().to_string().replace('\\', "\\\\")
-    }
-
-    fn write_permissions_profile_config(
-        codex_home: &TempDir,
-        docs: &std::path::Path,
-        private: &std::path::Path,
-    ) -> std::io::Result<()> {
-        write_permissions_profile_config_to_path(
-            &codex_home.path().join("config.toml"),
-            docs,
-            private,
-        )
-    }
-
-    fn write_permissions_profile_config_to_path(
-        config_path: &std::path::Path,
-        docs: &std::path::Path,
-        private: &std::path::Path,
-    ) -> std::io::Result<()> {
-        std::fs::create_dir_all(private)?;
-        let config = format!(
-            "default_permissions = \"limited-read-test\"\n\
-             [permissions.limited-read-test.filesystem]\n\
-             \":minimal\" = \"read\"\n\
-             \"{}\" = \"read\"\n\
-             \"{}\" = \"none\"\n\
-             \n\
-             [permissions.limited-read-test.network]\n\
-             enabled = true\n",
-            escape_toml_path(docs),
-            escape_toml_path(private),
-        );
-        std::fs::write(config_path, config)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_active_permission_profiles() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let sandbox_paths = TempDir::new()?;
-        let docs = sandbox_paths.path().join("docs");
-        let private = docs.join("private");
-        write_permissions_profile_config(&codex_home, &docs, &private)?;
-        let codex_home_path = codex_home.path().to_path_buf();
-
-        let profile_config = build_debug_sandbox_config(
-            Vec::new(),
-            ConfigOverrides::default(),
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-        let legacy_config = build_debug_sandbox_config(
-            Vec::new(),
-            ConfigOverrides {
-                sandbox_mode: Some(SandboxMode::ReadOnly),
-                ..Default::default()
-            },
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: None,
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Include,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home_path),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert!(config_uses_permission_profiles(&config));
-        assert!(
-            profile_config.permissions.file_system_sandbox_policy()
-                != legacy_config.permissions.file_system_sandbox_policy(),
-            "test fixture should distinguish profile syntax from legacy sandbox_mode"
-        );
-        assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            profile_config.permissions.file_system_sandbox_policy(),
-        );
-        assert_ne!(
-            config.permissions.file_system_sandbox_policy(),
-            legacy_config.permissions.file_system_sandbox_policy(),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_config_profile_loader_overrides() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let sandbox_paths = TempDir::new()?;
-        let docs = sandbox_paths.path().join("docs");
-        let private = docs.join("private");
-        let profile_path = codex_home.path().join("work.config.toml");
-        write_permissions_profile_config_to_path(&profile_path, &docs, &private)?;
-        let codex_home_path = codex_home.path().to_path_buf();
-        let loader_overrides = LoaderOverrides {
-            user_config_path: Some(AbsolutePathBuf::from_absolute_path(&profile_path)?),
-            user_config_profile: Some("work".parse().expect("profile name should parse")),
-            ..LoaderOverrides::default()
-        };
-
-        let profile_config = build_debug_sandbox_config_with_loader_overrides(
-            Vec::new(),
-            ConfigOverrides::default(),
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            loader_overrides.clone(),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-        let read_only_config = build_debug_sandbox_config(
-            Vec::new(),
-            ConfigOverrides {
-                sandbox_mode: Some(SandboxMode::ReadOnly),
-                ..Default::default()
-            },
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: None,
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Include,
-                loader_overrides,
-            },
-            Some(codex_home_path),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert!(config_uses_permission_profiles(&config));
-        assert_ne!(
-            profile_config.permissions.file_system_sandbox_policy(),
-            read_only_config.permissions.file_system_sandbox_policy(),
-            "test fixture should distinguish the profile config from read-only"
-        );
-        assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            profile_config.permissions.file_system_sandbox_policy(),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_explicit_legacy_sandbox_mode() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let codex_home_path = codex_home.path().to_path_buf();
-        let cli_overrides = vec![(
-            "sandbox_mode".to_string(),
-            TomlValue::String("workspace-write".to_string()),
-        )];
-
-        let workspace_write_config = build_debug_sandbox_config(
-            cli_overrides.clone(),
-            ConfigOverrides::default(),
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-        let read_only_config = build_debug_sandbox_config(
-            Vec::new(),
-            ConfigOverrides {
-                sandbox_mode: Some(SandboxMode::ReadOnly),
-                ..Default::default()
-            },
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            cli_overrides,
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: None,
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Include,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home_path),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        if cfg!(target_os = "windows") {
-            assert_eq!(
-                workspace_write_config
-                    .permissions
-                    .file_system_sandbox_policy(),
-                read_only_config.permissions.file_system_sandbox_policy(),
-                "workspace-write downgrades to read-only when the Windows sandbox is disabled"
-            );
-        } else {
-            assert_ne!(
-                workspace_write_config
-                    .permissions
-                    .file_system_sandbox_policy(),
-                read_only_config.permissions.file_system_sandbox_policy(),
-                "test fixture should distinguish explicit workspace-write from read-only"
-            );
-        }
-        assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            workspace_write_config
-                .permissions
-                .file_system_sandbox_policy(),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_defaults_legacy_configs_to_read_only() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let codex_home_path = codex_home.path().to_path_buf();
-
-        let read_only_config = build_debug_sandbox_config(
-            Vec::new(),
-            ConfigOverrides {
-                sandbox_mode: Some(SandboxMode::ReadOnly),
-                ..Default::default()
-            },
-            Some(codex_home_path.clone()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: None,
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Include,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home_path),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert!(!config_uses_permission_profiles(&config));
-        assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            read_only_config.permissions.file_system_sandbox_policy(),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_explicit_builtin_permission_profile() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: Some(":workspace".to_string()),
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Ignore,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home.path().to_path_buf()),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let actual = config
-            .permissions
-            .permission_profile()
-            .file_system_sandbox_policy();
-        let expected = codex_protocol::models::PermissionProfile::workspace_write()
-            .file_system_sandbox_policy();
-        assert!(
-            expected
-                .entries
-                .iter()
-                .all(|entry| actual.entries.contains(entry)),
-            "explicit workspace profile should preserve the built-in workspace rules"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_explicit_cloud_managed_permission_profile() -> anyhow::Result<()>
-    {
-        let codex_home = TempDir::new()?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: Some("managed-cloud".to_string()),
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Include,
-                loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
-            },
-            Some(codex_home.path().to_path_buf()),
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                CLOUD_MANAGED_PERMISSION_PROFILE_REQUIREMENTS,
-            ),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert_eq!(
-            config
-                .permissions
-                .active_permission_profile()
-                .map(|profile| profile.id),
-            Some("managed-cloud".to_string()),
-        );
-        assert_eq!(
-            config.permissions.network_sandbox_policy(),
-            NetworkSandboxPolicy::Enabled,
-        );
-        assert_eq!(
-            config.config_layer_stack.requirements_toml(),
-            &toml::from_str::<ConfigRequirementsToml>(
-                CLOUD_MANAGED_PERMISSION_PROFILE_REQUIREMENTS,
-            )?,
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_ignores_cloud_managed_permission_profiles_by_default()
-    -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: Some(":workspace".to_string()),
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Ignore,
-                loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
-            },
-            Some(codex_home.path().to_path_buf()),
-            CloudConfigBundleFixture::loader_with_enterprise_requirement(
-                CLOUD_MANAGED_PERMISSION_PROFILE_REQUIREMENTS,
-            ),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert_eq!(
-            config
-                .permissions
-                .active_permission_profile()
-                .map(|profile| profile.id),
-            Some(":workspace".to_string()),
-        );
-        assert_eq!(
-            config.permissions.network_sandbox_policy(),
-            NetworkSandboxPolicy::Restricted,
-        );
-        assert_eq!(
-            config.config_layer_stack.requirements_toml(),
-            &ConfigRequirementsToml::default(),
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_honors_explicit_named_permission_profile() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let sandbox_paths = TempDir::new()?;
-        let docs = sandbox_paths.path().join("docs");
-        let private = docs.join("private");
-        write_permissions_profile_config(&codex_home, &docs, &private)?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: Some("limited-read-test".to_string()),
-                cwd: None,
-                managed_requirements_mode: ManagedRequirementsMode::Ignore,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home.path().to_path_buf()),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        let expected = build_debug_sandbox_config(
-            vec![(
-                "default_permissions".to_string(),
-                TomlValue::String("limited-read-test".to_string()),
-            )],
-            ConfigOverrides::default(),
-            Some(codex_home.path().to_path_buf()),
-            ManagedRequirementsMode::Include,
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert_eq!(
-            config.permissions.file_system_sandbox_policy(),
-            expected.permissions.file_system_sandbox_policy()
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn debug_sandbox_uses_explicit_cwd() -> anyhow::Result<()> {
-        let codex_home = TempDir::new()?;
-        let cwd = TempDir::new()?;
-
-        let config = load_debug_sandbox_config_with_codex_home(
-            Vec::new(),
-            /*codex_linux_sandbox_exe*/ None,
-            DebugSandboxConfigOptions {
-                sandbox_state: Default::default(),
-                permissions_profile: Some(":workspace".to_string()),
-                cwd: Some(cwd.path().to_path_buf()),
-                managed_requirements_mode: ManagedRequirementsMode::Ignore,
-                loader_overrides: LoaderOverrides::default(),
-            },
-            Some(codex_home.path().to_path_buf()),
-            CloudConfigBundleLoader::default(),
-            /*strict_config*/ false,
-        )
-        .await?;
-
-        assert_eq!(config.cwd.as_path(), cwd.path());
-
-        Ok(())
-    }
 }

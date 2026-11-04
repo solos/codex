@@ -13,9 +13,7 @@ use crate::app_event::FeedbackCategory;
 use crate::app_event::HistoryLookupResponse;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::PluginLocation;
-use crate::app_event::PluginRemoteSectionError;
 use crate::app_event::RateLimitRefreshOrigin;
-use crate::app_event::RunningTaskExitAction;
 use crate::app_event::ThreadTitleDestination;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
@@ -139,7 +137,6 @@ use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WriteStatus;
-use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::MemoriesToml;
@@ -216,14 +213,12 @@ pub(crate) mod app_server_requests;
 mod app_server_thread_ownership;
 mod backend_banner_fallback;
 mod backend_events;
-pub(crate) mod backend_selection;
 pub(crate) mod backend_sessions;
 mod background_requests;
 mod composer_hints;
 mod config_panel;
 mod config_persistence;
 mod connector_mentions;
-mod daemon_menu;
 mod daybreak;
 mod empty_state_policy;
 mod event_dispatch;
@@ -266,12 +261,9 @@ mod right_click_paste;
 pub(crate) use right_click_paste::PasteEnvironment;
 mod safety_buffering;
 mod safety_recourse;
-mod server_version_notice;
 mod session_lifecycle;
 mod session_picker;
 mod side;
-mod side_focus;
-mod side_pane;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
@@ -302,7 +294,6 @@ use self::loaded_threads::find_loaded_subagent_threads_for_primary;
 use self::pending_interactive_replay::PendingInteractiveReplayState;
 pub(crate) use self::platform_actions::WindowsSandboxHost;
 use self::platform_actions::*;
-use self::side::SideCompanion;
 use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
@@ -500,7 +491,10 @@ pub(crate) enum AppRunControl {
 #[derive(Debug, Clone)]
 pub enum ExitReason {
     UserRequested,
+    Archived(ThreadId),
     TurnInterrupted,
+    /// The current thread was deleted, rather than disconnected.
+    ThreadRemoved,
     Fatal(String),
 }
 
@@ -550,19 +544,13 @@ pub(crate) struct App {
     /// Legacy bootstrap and server-setting inputs; local preferences live in `local_settings`.
     pub(crate) config: Config,
     pub(crate) local_settings: crate::local_settings::LocalSettings,
-    backend_preference_context: backend_selection::BackendPreferenceContext,
     launch_cwd: PathBuf,
     /// Resume anchor selected by `/cd`; ordinary resumes retain the immutable launch cwd.
     runtime_working_directory_override: Option<PathBuf>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "retain the state runtime for the app lifetime")
-    )]
     pub(crate) state_db: Option<StateDbHandle>,
     cli_kv_overrides: Vec<(String, TomlValue)>,
     harness_overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
     runtime_approval_policy_override: Option<RuntimeApprovalPolicyOverride>,
     runtime_approvals_reviewer_override: Option<ApprovalsReviewer>,
     runtime_permission_profile_override: Option<RuntimePermissionProfileOverride>,
@@ -575,7 +563,6 @@ pub(crate) struct App {
     native_history: native_history::NativeHistory,
     turn_tips: turn_tips::TurnTips,
     pub(crate) transcript_view: crate::transcript_view::TranscriptView,
-    conversation_frame: owned_transcript::ConversationFrame,
     last_rendered_history_tail: Option<history_ui::RenderedHistoryTail>,
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
     pub(crate) pending_thread_usage_history_refresh: bool,
@@ -618,10 +605,7 @@ pub(crate) struct App {
     pending_right_click_paste: Option<right_click_paste::PendingPaste>,
     right_click_paste_environment: right_click_paste::PasteEnvironment,
     /// Set when the user confirms an update; propagated on exit.
-    daemon_cli_executable: Option<AbsolutePathBuf>,
     pub(crate) pending_update_action: Option<UpdateAction>,
-    /// Retained through all loop exits so shutdown cannot interrupt stop followed by start.
-    daemon_restart: Option<JoinHandle<anyhow::Result<codex_app_server_daemon::LifecycleOutput>>>,
 
     /// Tracks the thread we intentionally shut down while exiting the app.
     ///
@@ -649,8 +633,6 @@ pub(crate) struct App {
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
-    /// A parked parent view survives child cleanup until its own replay finishes.
-    side_companions: HashMap<ThreadId, SideCompanion>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
@@ -663,7 +645,6 @@ pub(crate) struct App {
         tokio::sync::broadcast::Sender<codex_app_server_protocol::ThreadStatusChangedNotification>,
     dynamic_tool_tasks: HashMap<codex_app_server_protocol::RequestId, (String, JoinHandle<()>)>,
     pending_startup_thread_start: bool,
-    pending_server_version_notice: Option<crate::status::remote_connection::ServerVersionNotice>,
     /// Opens the session picker after event dispatch returns, with a fresh stack.
     pending_open_resume_picker: bool,
     /// Runs a requested /cd after event dispatch returns, with a fresh stack.
@@ -875,8 +856,6 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        self.transcript_view
-            .sync_patch_approval(self.chat_widget.current_patch_approval());
         tui.link_hover.observe(&event);
         self.refresh_link_hover(tui)?;
         self.invalidate_right_click_paste(&event);
@@ -967,7 +946,7 @@ impl App {
             &event,
             TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
         ) {
-            self.expire_pending_key_chord(tui);
+            self.expire_pending_key_chord();
             self.handle_draw_pre_render(tui, screen_size)?;
         }
 
@@ -993,7 +972,7 @@ impl App {
 
         let mut event = if let TuiEvent::Key(mut key_event) = event {
             let escape = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-            if self.should_recover_vim_insert_escape(tui, key_event)
+            if self.should_recover_vim_insert_escape(key_event)
                 && !(tui.is_owned_screen()
                     && crate::transcript_view::JumpTarget::from_key(key_event).is_some())
             {
@@ -1012,11 +991,6 @@ impl App {
             event
         };
 
-        if let TuiEvent::Key(key) = &event
-            && self.handle_side_focus_key(tui, app_server, *key).await
-        {
-            return Ok(AppRunControl::Continue);
-        }
         self.cancel_primed_browsing_for_event(&event);
         let voice_toggle = |app: &Self, key: KeyEvent| {
             key.kind == KeyEventKind::Press
@@ -1128,7 +1102,6 @@ impl App {
 
         match &event {
             TuiEvent::FocusLost => {
-                app_server.focused_conversation = None;
                 self.chat_widget
                     .set_sparkle_terminal_focus(/*focused*/ false);
                 let now = Instant::now();
@@ -1146,10 +1119,6 @@ impl App {
             _ => {}
         }
 
-        let draws_history = matches!(
-            event,
-            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
-        );
         if self.overlay.is_some() {
             let _ = self
                 .handle_backtrack_overlay_event(tui, app_server, event)
@@ -1222,7 +1191,12 @@ impl App {
                         self.discard_startup_modal_input(tui)?;
                     }
                     if self.chat_widget.ambient_pet_image_enabled() {
-                        let ambient_pet_area = self.conversation_area(screen_size.into());
+                        let ambient_pet_area = Rect::new(
+                            /*x*/ 0,
+                            /*y*/ 0,
+                            screen_size.width,
+                            screen_size.height,
+                        );
                         if let Err(err) = tui.draw_ambient_pet_image(
                             self.chat_widget
                                 .ambient_pet_draw(ambient_pet_area, rendered_area.bottom()),
@@ -1249,46 +1223,6 @@ impl App {
                 TuiEvent::FocusLost => {}
             }
         }
-        if draws_history {
-            let frozen = self.chat_widget.is_external_writer_view();
-            let visible = self.current_displayed_thread_id().filter(|&id| {
-                tui.is_terminal_focused()
-                    && matches!(self.overlay, None | Some(Overlay::Transcript(_)))
-                    && self.chat_widget.no_modal_or_popup_active()
-                    && self.initial_history_replay_buffer.is_none()
-                    && (!self.thread_unavailable(id) || frozen)
-            });
-            let previous = std::mem::replace(&mut app_server.focused_conversation, visible);
-            if previous != visible {
-                app_server.attempted_revision = None;
-            }
-            // Opening a full view counts immediately. Within the same view a new result's
-            // receipt can arrive just before the terminal event that finishes rendering it.
-            if let Some(id) = visible
-                && (previous != visible || !self.chat_widget.is_agent_turn_running())
-                && let Some(revision) = app_server.viewed_revision(id, frozen)
-            {
-                // A read-only snapshot does not subscribe to receipt notifications.
-                let refresh = frozen.then(|| {
-                    (
-                        self.app_event_tx.clone(),
-                        AppEvent::RefreshViewedThread {
-                            backend_id: app_server.backend_id(),
-                            thread_id: id,
-                            revision: revision.clone(),
-                        },
-                    )
-                });
-                let update = app_server.acknowledge_read(id, revision);
-                tokio::spawn(async move {
-                    if let Err(error) = update.await {
-                        tracing::warn!(%id, %error, "Could not acknowledge viewed conversation");
-                    } else if let Some((tx, event)) = refresh {
-                        tx.send(event);
-                    }
-                });
-            }
-        }
         // Both transcript owners must consume completions before automatic work advances.
         if idle_draw {
             tui.clipboard.advance(tui.frame_requester());
@@ -1306,22 +1240,12 @@ impl App {
         Ok(())
     }
 
-    fn prepare_frame_images(&mut self) -> Option<crate::pets::ImageProtocol> {
-        let protocol = self.chat_widget.pet_image_support().protocol().filter(|_| {
-            !self.app_server_target.uses_remote_workspace()
-                && crate::projectless::has_only_local_environments(&self.environment_manager)
-        });
-        self.chat_widget.prepare_composer_images(protocol);
-        protocol
-    }
-
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
         self.chat_widget
             .set_sparkle_terminal_focus(tui.is_terminal_focused());
         if tui.is_owned_screen() {
             return self.render_owned_transcript(tui, screen_size);
         }
-        self.prepare_frame_images();
         self.chat_widget
             .empty_state_animation
             .borrow_mut()
@@ -1356,9 +1280,6 @@ impl App {
                 let area = frame.area();
                 rendered_area = area;
                 chat_widget.render(area, frame.buffer);
-                if let Some(previews) = &self.chat_widget.composer_images {
-                    frame.image_placements = previews.placements.take();
-                }
                 self.chat_widget.note_rendered_width(area.width);
                 if let Some((x, y)) = chat_widget.cursor_pos(area) {
                     frame.set_cursor_style(chat_widget.cursor_style(area));

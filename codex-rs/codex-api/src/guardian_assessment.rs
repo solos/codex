@@ -4,8 +4,7 @@
 
 use serde_json::Value;
 
-/// One final serving assessment emitted immediately before the matching output item is done.
-/// It is carried outside model-visible response items and is not subsequently revised.
+/// A serving-side assessment carried outside model-visible response items.
 ///
 /// Consumers must validate the response, completed action, and current authorization
 /// before using a low-risk result. This assessment does not grant permission to execute.

@@ -419,27 +419,6 @@ async fn experimental_feature_enablement_set_only_updates_named_features() -> Re
 }
 
 #[tokio::test]
-async fn experimental_feature_enablement_set_allows_remote_control() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
-        .await?;
-    let remote_control_enabled = false;
-    let enablement = BTreeMap::from([("remote_control".to_string(), remote_control_enabled)]);
-
-    let actual = set_experimental_feature_enablement(&mut mcp, enablement.clone()).await?;
-
-    assert_eq!(
-        actual,
-        ExperimentalFeatureEnablementSetResponse { enablement }
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn experimental_feature_enablement_set_empty_map_is_no_op() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut mcp = TestAppServer::builder()

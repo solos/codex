@@ -18,7 +18,6 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolOutput;
 use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
 use codex_otel::SessionTelemetry;
 use codex_otel::SkillInvocationEvent;
@@ -73,9 +72,6 @@ pub(crate) fn skill_tools(
         .get::<SkillsSessionState>()
         .and_then(|state| state.mcp_resources.clone());
     let analytics = SkillAnalytics::from_stores(session_store, thread_store);
-    let metrics = step_store
-        .get::<Arc<dyn ExtensionMetrics>>()
-        .map(|metrics| Arc::clone(metrics.as_ref()));
     let context = SkillToolContext {
         thread_id: thread_store.level_id().to_string(),
         providers,
@@ -90,14 +86,10 @@ pub(crate) fn skill_tools(
         }),
         Arc::new(read::ReadTool {
             context: context.clone(),
-            metrics: metrics.clone(),
         }),
     ];
     if context.step_state.discovery_v2 {
-        tools.push(Arc::new(installations::InstallationsTool {
-            context,
-            metrics,
-        }));
+        tools.push(Arc::new(installations::InstallationsTool { context }));
     }
     tools
 }
@@ -257,7 +249,6 @@ impl SkillToolContext {
 #[derive(Deserialize, Hash, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum InstallationSource {
-    Cloud,
     Executor { environment_id: String },
 }
 
@@ -272,7 +263,6 @@ impl InstallationSource {
     fn matches(&self, source: &SkillSourceLocation) -> bool {
         source.enabled
             && match self {
-                Self::Cloud => source.authority.kind == SkillSourceKind::Cloud,
                 Self::Executor { environment_id } => {
                     source.authority.kind == SkillSourceKind::Executor
                         && source
@@ -288,10 +278,6 @@ impl InstallationSource {
 #[serde(untagged)]
 #[schemars(deny_unknown_fields)]
 enum InstallationLocation {
-    Cloud {
-        package: String,
-        resource: String,
-    },
     Executor {
         environment_id: String,
         skill_root: String,
@@ -304,10 +290,6 @@ impl InstallationLocation {
             return None;
         }
         match &source.authority.kind {
-            SkillSourceKind::Cloud => Some(Self::Cloud {
-                package: source.package.0.clone(),
-                resource: source.main_prompt.as_str().to_string(),
-            }),
             SkillSourceKind::Executor => {
                 let (environment_id, path) = source.main_prompt.environment_path()?;
                 Some(Self::Executor {
@@ -323,27 +305,22 @@ impl InstallationLocation {
 #[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum SkillToolAuthority {
-    Cloud,
     Executor { id: String },
 }
 
 impl SkillToolAuthority {
     fn selector(&self) -> SkillToolAuthoritySelector {
         match self {
-            Self::Cloud => SkillToolAuthoritySelector::Cloud,
             Self::Executor { .. } => SkillToolAuthoritySelector::Executor,
         }
     }
 
     pub(crate) fn from_authority(authority: &SkillAuthority) -> Option<Self> {
         match &authority.kind {
-            SkillSourceKind::Cloud if authority.id == CODEX_APPS_MCP_SERVER_NAME => {
-                Some(Self::Cloud)
-            }
             SkillSourceKind::Executor => Some(Self::Executor {
                 id: authority.id.clone(),
             }),
-            SkillSourceKind::Host | SkillSourceKind::Cloud | SkillSourceKind::Custom(_) => None,
+            SkillSourceKind::Host | SkillSourceKind::Custom(_) => None,
         }
     }
 }
@@ -437,8 +414,6 @@ fn skill_json_output<T: Serialize>(
         FunctionCallError::Fatal(format!("failed to serialize tool output: {err}"))
     })?;
     let output = JsonToolOutput::new(value);
-    Ok(match authority {
-        SkillToolAuthoritySelector::Cloud => Box::new(output.with_external_context()),
-        SkillToolAuthoritySelector::Executor => Box::new(output),
-    })
+    let _ = authority;
+    Ok(Box::new(output))
 }

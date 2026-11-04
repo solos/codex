@@ -31,19 +31,16 @@ fn main() -> anyhow::Result<()> {
             .config_overrides
             .raw_overrides
             .splice(0..0, top_cli.config_overrides.raw_overrides);
-        let exit_info = run_main(
-            inner,
-            arg0_paths,
-            LoaderOverrides::default(),
-            /*explicit_remote_endpoint*/ None,
-        )
-        .await?;
+        let exit_info = run_main(inner, arg0_paths, LoaderOverrides::default()).await?;
         let is_fatal = match &exit_info.exit_reason {
             ExitReason::Fatal(message) => {
                 eprintln!("ERROR: {message}");
                 true
             }
-            ExitReason::UserRequested | ExitReason::TurnInterrupted => false,
+            ExitReason::UserRequested
+            | ExitReason::Archived(_)
+            | ExitReason::TurnInterrupted
+            | ExitReason::ThreadRemoved => false,
         };
 
         let color_enabled = supports_color::on(Stream::Stdout).is_some();

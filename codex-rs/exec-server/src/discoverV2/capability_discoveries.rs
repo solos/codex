@@ -341,7 +341,6 @@ fn parse_root(
         DiscoveredSource::Plugin(Box::new(ExecutorPlugin {
             id: plugin.id,
             display_name,
-            remote_plugin_id: plugin.remote_plugin_id,
             version: plugin.version,
             root: location.root,
             files,

@@ -106,7 +106,7 @@ async fn elevated_launch_warning_appears_in_warning_center() -> Result<()> {
     app.insert_history_cell(
         &mut tui,
         Box::new(history_cell::StartupWarningsCell::new(vec![
-            crate::daemon_startup::ELEVATED_LAUNCH_WARNING.into(),
+            "Running with elevated permissions.".into(),
         ])),
     );
     app.chat_widget.open_warnings(&app.transcript_cells);
