@@ -113,11 +113,11 @@ common:ci --keep_going
 common:ci --verbose_failures
 # A failed snapshot assertion should print its diff without leaving a .snap.new after a passing retry.
 test:ci --test_env=INSTA_UPDATE=no
-common:ci --build_metadata=REPO_URL=https://github.com/openai/codex.git
 common:ci --build_metadata=ROLE=CI
 common:ci --build_metadata=VISIBILITY=PUBLIC
 
-# Disable disk cache in CI since we have a remote one and aren't using persistent workers.
+# CI restores a repository cache and may opt into a remote cache through the wrapper.
+# Disable the local disk cache because CI runners are not persistent workers.
 common:ci --disk_cache=
 
 # Shared config for the main Bazel CI workflow.

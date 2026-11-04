@@ -18,7 +18,6 @@ codex-execpolicy = { workspace = true }
 codex-features = { workspace = true }
 codex-file-system = { workspace = true }
 codex-git-utils = { workspace = true }
-codex-http-client = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
@@ -27,7 +26,6 @@ codex-utils-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-utils-redacted-string = { workspace = true }
 dunce = { workspace = true }
-futures = { workspace = true, features = ["alloc", "std"] }
 gethostname = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 multimap = { workspace = true }

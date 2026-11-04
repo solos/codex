@@ -69,11 +69,32 @@ run_bazel_with_startup_args() {
   run_bazel "$@"
 }
 
+ci_config=ci-linux
+case "${RUNNER_OS:-}" in
+  macOS)
+    ci_config=ci-macos
+    ;;
+  Windows)
+    if [[ $windows_cross_compile -eq 1 ]]; then
+      ci_config=ci-windows-cross
+    else
+      ci_config=ci-windows
+    fi
+    ;;
+esac
+
 print_bazel_test_log_tails() {
   local console_log="$1"
   local testlogs_dir
 
   local -a bazel_info_args=(info)
+  if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+    # `bazel info` needs the same CI config as the failed test invocation so
+    # platform-specific output roots match. On Windows, omitting `ci-windows`
+    # would point at `local_windows-fastbuild` even when the test ran with the
+    # MSVC host platform under `local_windows_msvc-fastbuild`.
+    bazel_info_args+=("--config=${ci_config}")
+  fi
 
   # Only pass flags that affect Bazel's output-root selection or repository
   # lookup. Test/build-only flags such as execution logs or remote download
@@ -234,8 +255,10 @@ if [[ ${#bazel_args[@]} -eq 0 || ${#bazel_targets[@]} -eq 0 ]]; then
   exit 1
 fi
 
-if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 ]]; then
-  # Run Windows actions with the native MSVC host platform.
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  # Windows cross-compilation depends on authenticated RBE. Preserve the local
+  # Windows build shape when credentials are unavailable.
+  ci_config=ci-windows
   windows_msvc_host_platform=1
 fi
 
@@ -264,9 +287,22 @@ if [[ $remote_download_toplevel -eq 1 ]]; then
   post_config_bazel_args+=(--remote_download_toplevel)
 fi
 
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  # `--enable_platform_specific_config` expands `common:windows` on Windows
+  # hosts after ordinary rc configs, which can override `ci-windows-cross`'s
+  # RBE host platform. Repeat the host platform on the command line so V8 and
+  # other genrules execute on Linux RBE workers instead of Git Bash locally.
+  #
+  # Bazel also derives the default genrule shell from the client host. Without
+  # an explicit shell executable, remote Linux actions can be asked to run
+  # `C:\Program Files\Git\usr\bin\bash.exe`.
+  post_config_bazel_args+=(--host_platform=//:rbe --shell_executable=/bin/bash)
+fi
 
-if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 ]]; then
-  # Bound concurrent native Windows actions to fit the runner.
+if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+  # The Windows cross-compile config depends on authenticated remote
+  # execution. When credentials are unavailable, keep the local build shape
+  # and its lower concurrency cap.
   post_config_bazel_args+=(--jobs=8)
 fi
 
@@ -288,49 +324,35 @@ if [[ -n "${CODEX_BAZEL_EXECUTION_LOG_COMPACT_DIR:-}" ]]; then
 fi
 
 if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+  pass_windows_build_env=1
+  if [[ $windows_cross_compile -eq 1 && -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+    # Remote build actions execute on Linux RBE workers. Passing the Windows
+    # runner's build environment there makes Bazel genrules try to execute
+    # C:\Program Files\Git\usr\bin\bash.exe on Linux.
+    pass_windows_build_env=0
+  fi
 
-  windows_action_env_vars=(
-    INCLUDE
-    LIB
-    LIBPATH
-    UCRTVersion
-    UniversalCRTSdkDir
-    VCINSTALLDIR
-    VCToolsInstallDir
-    WindowsLibPath
-    WindowsSdkBinPath
-    WindowsSdkDir
-    WindowsSDKLibVersion
-    WindowsSDKVersion
-  )
-
-  for env_var in "${windows_action_env_vars[@]}"; do
-    if [[ -n "${!env_var:-}" ]]; then
-      post_config_bazel_args+=("--action_env=${env_var}" "--host_action_env=${env_var}")
-    fi
-  done
-
-  if [[ -n "${VOICE_WINDOWS_BAZEL_REPOSITORY:-}" ]]; then
-    # Reuse the verified native audio inputs for local CI's voice targets.
-    # These fixed values must be visible during Starlark analysis as well
-    # as action execution; inherited --action_env values are insufficient.
-    : "${VOICE_WINDOWS_SYSTEM_ROOT:?Windows SystemRoot is required}"
-    : "${VOICE_WINDOWS_HOST_ARCH:?Windows host architecture is required}"
-    # GNU-host lint jobs still need the LLVM linker for their build tools.
-    if [[ $windows_msvc_host_platform -eq 1 ]]; then
-      post_config_bazel_args+=("--config=ci-windows-msvc")
-    fi
-    post_config_bazel_args+=(
-      "--workspace_status_command=./scripts/workspace-status.cmd"
-      "--extra_toolchains=//third_party/voice:windows_pkg_config_toolchain,//third_party/voice:windows_cmake_toolchain"
-      "--repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1"
-      "--inject_repository=voice_windows_tools=${VOICE_WINDOWS_BAZEL_REPOSITORY}"
-      "--//third_party/voice:windows_installed_tools=@voice_windows_tools//:tools"
-      "--action_env=SystemRoot=${VOICE_WINDOWS_SYSTEM_ROOT}"
-      "--host_action_env=SystemRoot=${VOICE_WINDOWS_SYSTEM_ROOT}"
-      "--action_env=PROCESSOR_ARCHITECTURE=${VOICE_WINDOWS_HOST_ARCH}"
-      "--host_action_env=PROCESSOR_ARCHITECTURE=${VOICE_WINDOWS_HOST_ARCH}"
+  if [[ $pass_windows_build_env -eq 1 ]]; then
+    windows_action_env_vars=(
+      INCLUDE
+      LIB
+      LIBPATH
+      UCRTVersion
+      UniversalCRTSdkDir
+      VCINSTALLDIR
+      VCToolsInstallDir
+      WindowsLibPath
+      WindowsSdkBinPath
+      WindowsSdkDir
+      WindowsSDKLibVersion
+      WindowsSDKVersion
     )
+
+    for env_var in "${windows_action_env_vars[@]}"; do
+      if [[ -n "${!env_var:-}" ]]; then
+        post_config_bazel_args+=("--action_env=${env_var}" "--host_action_env=${env_var}")
+      fi
+    done
   fi
 
   if [[ -z "${CODEX_BAZEL_WINDOWS_PATH:-}" ]]; then
@@ -338,10 +360,20 @@ if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
     exit 1
   fi
 
-  post_config_bazel_args+=(
-    "--action_env=PATH=${CODEX_BAZEL_WINDOWS_PATH}"
-    "--host_action_env=PATH=${CODEX_BAZEL_WINDOWS_PATH}"
-  )
+  if [[ $pass_windows_build_env -eq 1 ]]; then
+    post_config_bazel_args+=(
+      "--action_env=PATH=${CODEX_BAZEL_WINDOWS_PATH}"
+      "--host_action_env=PATH=${CODEX_BAZEL_WINDOWS_PATH}"
+    )
+  elif [[ $windows_cross_compile -eq 1 ]]; then
+    # Remote build actions run on Linux RBE workers. Give their shell snippets
+    # a Linux PATH while preserving CODEX_BAZEL_WINDOWS_PATH below for local
+    # Windows test execution.
+    post_config_bazel_args+=(
+      "--action_env=PATH=/usr/bin:/bin"
+      "--host_action_env=PATH=/usr/bin:/bin"
+    )
+  fi
   post_config_bazel_args+=("--test_env=PATH=${CODEX_BAZEL_WINDOWS_PATH}")
 fi
 
@@ -351,8 +383,11 @@ trap 'rm -f "$bazel_console_log"' EXIT
 bazel_run_args=(
   "${bazel_args[@]}"
 )
-if [[ "${bazel_args[0]}" == "test" ]]; then
-  bazel_run_args+=("--test_env=INSTA_UPDATE=no")
+if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  echo "BuildBuddy API key is available; using remote Bazel configuration."
+  bazel_run_args+=("--config=${ci_config}")
+else
+  echo "BuildBuddy API key is not available; using local Bazel configuration."
 fi
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")
@@ -361,7 +396,7 @@ set +e
 # Work around Bazel 9 remote repo contents cache / overlay materialization
 # failures seen in CI (for example "is not a symlink" or permission errors
 # while materializing external repos such as rules_perl). This only disables
-# the startup-level repo contents cache.
+# the startup-level repo contents cache; keyed runs still use BuildBuddy.
 run_bazel_with_startup_args \
   --noexperimental_remote_repo_contents_cache \
   "${bazel_run_args[@]}" \

@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: ${{ github.repository == 'openai/codex' || vars.ENABLE_RELEASES == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,7 +60,8 @@ jobs:
   build:
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
-    # Release Cargo artifacts only while Bazel releases are disabled.
+    # Parallel Bazel artifacts are advisory while Cargo remains the release path.
+    continue-on-error: ${{ matrix.build-system == 'bazel' }}
     runs-on: ${{ matrix.runner }}
     environment:
       name: bazel
@@ -83,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
+        build-system: [cargo, bazel]
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -91,50 +93,50 @@ jobs:
           - aarch64-unknown-linux-musl
         bundle: [primary, app-server]
         include:
-          - runner: macos-15-xlarge
+          - runner: macos-15
             target: aarch64-apple-darwin
             bundle: primary
             artifact_name: aarch64-apple-darwin
             binaries: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-15-xlarge
+          - runner: macos-15
             target: aarch64-apple-darwin
             bundle: app-server
             artifact_name: aarch64-apple-darwin-app-server
             binaries: "codex-app-server codex-code-mode-host codex-exec-server"
             build_dmg: "false"
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             bundle: primary
             artifact_name: x86_64-apple-darwin
             binaries: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-15-xlarge
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             bundle: app-server
             artifact_name: x86_64-apple-darwin-app-server
             binaries: "codex-app-server codex-code-mode-host codex-exec-server"
             build_dmg: "false"
           # Release artifacts intentionally ship MUSL-linked Linux binaries.
-          - runner: ${{ github.event.repository.name }}-linux-x64-xl
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             bundle: primary
             artifact_name: x86_64-unknown-linux-musl
             binaries: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy bwrap"
             build_dmg: "false"
-          - runner: ${{ github.event.repository.name }}-linux-x64-xl
+          - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             bundle: app-server
             artifact_name: x86_64-unknown-linux-musl-app-server
             binaries: "codex-app-server codex-code-mode-host codex-exec-server"
             build_dmg: "false"
-          - runner: ${{ github.event.repository.name }}-linux-arm64
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             bundle: primary
             artifact_name: aarch64-unknown-linux-musl
             binaries: "codex codex-code-mode-host codex-exec-server codex-responses-api-proxy bwrap"
             build_dmg: "false"
-          - runner: ${{ github.event.repository.name }}-linux-arm64
+          - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             bundle: app-server
             artifact_name: aarch64-unknown-linux-musl-app-server
@@ -277,6 +279,8 @@ jobs:
       - name: Build Bazel release binaries and symbols
         if: ${{ matrix.build-system == 'bazel' }}
         uses: ./.github/actions/build-bazel-release
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         with:
           target: ${{ matrix.target }}
           bundle: ${{ matrix.bundle }}
@@ -324,7 +328,7 @@ jobs:
         shell: bash
         env:
           APP_TARGET: ${{ matrix.target }}
-          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -603,7 +607,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           PREFIX: ${{ matrix.prefix }}
-          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         run: |
           set -euo pipefail
           # Release tags bump Cargo.toml without rewriting the workspace lockfile.
@@ -634,6 +638,7 @@ jobs:
     needs: [build, build-macos-voice]
     if: ${{ always() && needs.build.result == 'success' && needs.build-macos-voice.result == 'success' }}
     name: Sign macOS binaries - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
+    continue-on-error: ${{ matrix.build-system == 'bazel' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment:
@@ -649,7 +654,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
+        build-system: [cargo, bazel]
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -879,7 +884,8 @@ jobs:
   package-macos:
     needs: sign-macos-binaries
     name: Package macOS artifacts - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
-    runs-on: macos-15-xlarge
+    continue-on-error: ${{ matrix.build-system == 'bazel' }}
+    runs-on: macos-15
     timeout-minutes: 45
     permissions:
       contents: read
@@ -893,7 +899,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
+        build-system: [cargo, bazel]
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1166,6 +1172,7 @@ jobs:
   sign-macos-dmg:
     needs: package-macos
     name: Sign macOS DMG - ${{ matrix.target }} - ${{ matrix.build-system }}
+    continue-on-error: ${{ matrix.build-system == 'bazel' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment:
@@ -1181,7 +1188,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
+        build-system: [cargo, bazel]
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1270,7 +1277,8 @@ jobs:
       - package-macos
       - sign-macos-dmg
     name: Verify macOS artifacts - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
-    runs-on: macos-15-xlarge
+    continue-on-error: ${{ matrix.build-system == 'bazel' }}
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1284,7 +1292,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
+        build-system: [cargo, bazel]
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1674,7 +1682,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
-          pattern: "{{aarch64,x86_64}-{apple-darwin{,-app-server},unknown-linux-musl{,-app-server},pc-windows-msvc},*-symbols,argument-comment-lint-*,python-runtime-wheel-*,npm-packages}"
+          pattern: "{{aarch64,x86_64}-{apple-darwin{,-app-server},unknown-linux-musl{,-app-server},pc-windows-msvc}{,-bazel},*-symbols{,-bazel},argument-comment-lint-*,python-runtime-wheel-*,npm-packages}"
 
       - name: Download verified provisioned macOS packages
         if: vars.CODEX_PROVISIONED_MACOS_CANDIDATE == 'true'

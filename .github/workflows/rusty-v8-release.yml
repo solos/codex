@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   metadata:
+    if: ${{ github.repository == 'openai/codex' || vars.ENABLE_RELEASES == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       release_tag: ${{ steps.release_tag.outputs.release_tag }}
@@ -107,13 +108,13 @@ jobs:
             sandbox: true
             target: x86_64-apple-darwin
             variant: ptrcomp-sandbox
-          - runner: macos-15-xlarge
+          - runner: macos-15
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: false
             target: aarch64-apple-darwin
             variant: release
-          - runner: macos-15-xlarge
+          - runner: macos-15
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: true
@@ -168,6 +169,7 @@ jobs:
 
       - name: Build Bazel V8 release pair
         env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
           PLATFORM: ${{ matrix.platform }}
           SANDBOX: ${{ matrix.sandbox }}
           TARGET: ${{ matrix.target }}
@@ -199,6 +201,7 @@ jobs:
       - name: Stage release pair
         env:
           BAZEL_CONFIG: ${{ matrix.bazel_config }}
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
           PLATFORM: ${{ matrix.platform }}
           SANDBOX: ${{ matrix.sandbox }}
           TARGET: ${{ matrix.target }}

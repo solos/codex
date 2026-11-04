@@ -26,10 +26,19 @@ UTILITY_NAME_EXCEPTIONS = {
     "path-utils": "codex-utils-path",
 }
 MANIFEST_FEATURE_EXCEPTIONS = {
+    # The in-process app-server exposes request hooks only to TUI tests while
+    # the former remote/cloud test harness is removed.
+    "codex-rs/app-server-client/Cargo.toml": {"test-support": ()},
     "codex-rs/v8-poc/Cargo.toml": {"sandbox": ("v8/v8_enable_sandbox",)},
 }
 OPTIONAL_DEPENDENCY_EXCEPTIONS = set()
-INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS = {}
+INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS = {
+    (
+        "codex-rs/tui/Cargo.toml",
+        "dev-dependencies",
+        "codex-app-server-client",
+    ): ("test-support",),
+}
 
 
 def main() -> int:

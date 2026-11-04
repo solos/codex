@@ -153,7 +153,7 @@ jobs:
         run: python3 -m unittest discover -s tools/argument-comment-lint -p 'test_*.py'
       - name: Test argument comment lint package
         working-directory: tools/argument-comment-lint
-        run: bash ./test-with-clippy-compat.sh
+        run: cargo test
         env:
           RUST_MIN_STACK: "8388608" # 8 MiB
 
@@ -163,10 +163,7 @@ jobs:
 
   argument_comment_lint_prebuilt:
     name: Argument comment lint - ${{ matrix.name }}
-    # This job runs through Bazel and is advisory while the BuildBuddy key is
-    # revoked. Restore blocking behavior once it can run without BuildBuddy.
-    continue-on-error: true
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     needs: changed
     environment:
@@ -180,14 +177,11 @@ jobs:
             runner: ubuntu-24.04
             timeout_minutes: 30
           - name: macOS
-            runner: macos-15-xlarge
+            runner: macos-15
             timeout_minutes: 30
           - name: Windows
-            runner: windows-x64
+            runner: windows-2022
             timeout_minutes: 30
-            runs_on:
-              group: ${{ github.event.repository.name }}-runners
-              labels: ${{ github.event.repository.name }}-windows-x64
     steps:
       - name: Check whether argument comment lint should run
         id: argument_comment_lint_gate
@@ -212,6 +206,7 @@ jobs:
         uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
+          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'
@@ -250,7 +245,9 @@ jobs:
             [[ '${{ needs.argument_comment_lint_package.result }}' == 'success' ]] || { echo 'argument_comment_lint_package failed'; exit 1; }
           fi
 
-          # The Bazel-backed argument-comment lint job is temporarily advisory.
+          if [[ "${NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT}" == 'true' || "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" == 'true' ]]; then
+            [[ '${{ needs.argument_comment_lint_prebuilt.result }}' == 'success' ]] || { echo 'argument_comment_lint_prebuilt failed'; exit 1; }
+          fi
 
           if [[ "${NEEDS_CHANGED_OUTPUTS_CODEX}" == 'true' || "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" == 'true' ]]; then
             [[ '${{ needs.general.result }}' == 'success' ]] || { echo 'general failed'; exit 1; }

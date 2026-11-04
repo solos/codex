@@ -4,6 +4,10 @@ inputs:
   target:
     description: Rust target triple with Codex-built V8 release artifacts.
     required: true
+  release-repository:
+    description: GitHub repository that publishes the rusty-v8 release assets.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -12,12 +16,12 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        RELEASE_REPOSITORY: ${{ inputs.release-repository || vars.RUSTY_V8_RELEASE_REPOSITORY }}
       run: |
         set -euo pipefail
 
         version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
         release_tag="rusty-v8-v${version}"
-        base_url="https://github.com/openai/codex/releases/download/${release_tag}"
         binding_dir="${RUNNER_TEMP}/rusty_v8"
 
         profile="ptrcomp_sandbox_release"
@@ -42,7 +46,31 @@ runs:
         fi
 
         mkdir -p "${binding_dir}"
-        curl -fsSL "${base_url}/${checksums_name}" -o "${checksums_path}"
+        primary_repository="${RELEASE_REPOSITORY:-${GITHUB_REPOSITORY:-openai/codex}}"
+        candidate_repositories=("${primary_repository}")
+        if [[ "${primary_repository}" != "openai/codex" ]]; then
+          # Published forks often do not mirror the V8 release assets. Falling
+          # back to the upstream assets keeps Cargo builds usable without
+          # requiring fork-specific release infrastructure.
+          candidate_repositories+=("openai/codex")
+        fi
+
+        selected_repository=""
+        for repository in "${candidate_repositories[@]}"; do
+          base_url="https://github.com/${repository}/releases/download/${release_tag}"
+          if curl -fsSL --retry 2 --retry-connrefused "${base_url}/${checksums_name}" -o "${checksums_path}"; then
+            selected_repository="${repository}"
+            break
+          fi
+        done
+
+        if [[ -z "${selected_repository}" ]]; then
+          echo "Unable to download ${checksums_name} for ${release_tag} from: ${candidate_repositories[*]}" >&2
+          exit 1
+        fi
+        base_url="https://github.com/${selected_repository}/releases/download/${release_tag}"
+        echo "Using rusty-v8 release assets from ${selected_repository}."
+
         # Check the original manifest bytes even when either checksum file uses CRLF.
         expected_manifest_checksum="$(grep -F "  ${checksums_name}" "${trusted_checksums}" | cut -d ' ' -f 1)"
         actual_manifest_checksum="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "${checksums_path}")"
