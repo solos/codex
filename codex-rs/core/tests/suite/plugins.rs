@@ -140,17 +140,6 @@ fn write_plugin_skill_plugin(home: &TempDir) -> std::path::PathBuf {
     write_sample_plugin_skill(write_sample_plugin_manifest_and_config(home))
 }
 
-fn write_remote_plugin_skill_plugin(home: &TempDir) -> std::path::PathBuf {
-    let plugin_root = home
-        .path()
-        .join("plugins/cache/openai-curated-remote/sample/local");
-    write_sample_plugin_skill(write_sample_plugin_manifest_and_config_at_root(
-        home,
-        plugin_root,
-        SAMPLE_REMOTE_PLUGIN_CONFIG_NAME,
-    ))
-}
-
 fn write_sample_plugin_skill(plugin_root: std::path::PathBuf) -> std::path::PathBuf {
     let skill_dir = plugin_root.join("skills/sample-search");
     std::fs::create_dir_all(skill_dir.as_path()).expect("create plugin skill dir");
@@ -689,7 +678,7 @@ async fn bundled_plugin_compatibility_guard_in_agent_turn(
     plugin_name: &str,
     product_sku: Option<&str>,
     remote_enabled: bool,
-    cache_remote_plugin: bool,
+    cache_curated_plugin: bool,
     expected_skills: (bool, bool),
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -729,7 +718,6 @@ async fn bundled_plugin_compatibility_guard_in_agent_turn(
         format!(
             r#"[features]
 plugins = true
-remote_plugin = true
 
 [plugins."{plugin_name}@openai-bundled"]
 enabled = true
@@ -740,7 +728,7 @@ enabled = true
         ("openai-bundled", "bundled-skill"),
         ("openai-curated-remote", "remote-skill"),
     ] {
-        if marketplace == "openai-curated-remote" && !cache_remote_plugin {
+        if marketplace == "openai-curated-remote" && !cache_curated_plugin {
             continue;
         }
         let root = codex_home
@@ -1089,8 +1077,6 @@ async fn curated_plugin_skills_follow_auth_switch() -> Result<()> {
             codex_home.path().join("config.toml"),
             r#"[features]
 plugins = true
-remote_plugin = false
-
 [plugins."chatgpt-plugin@openai-curated"]
 enabled = true
 

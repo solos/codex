@@ -206,7 +206,6 @@ mod startup_draft;
 mod startup_error;
 mod startup_hooks_review;
 mod startup_orchestration;
-#[cfg(test)]
 mod startup_presentation;
 mod startup_recovery;
 mod status;
@@ -403,7 +402,7 @@ pub(crate) async fn start_app_server_for_picker(
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppServerSession> {
-    let target = target.clone();
+    let mut target = target.clone();
     let mut state_db = state_db;
     let embedded_network_policy =
         codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;

@@ -867,7 +867,7 @@ async fn endpoint_mode_injects_candidates_hides_list_and_rejects_invented_ids() 
 async fn endpoint_recommendation_hydrates_install_identity_after_selection() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    run_remote_plugin_install_metadata_case().await
+    run_endpoint_plugin_install_metadata_case().await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -953,14 +953,16 @@ enum RefreshedAppsTools {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_plugin_install_refreshes_plugin_and_apps_tool_caches() -> Result<()> {
+async fn endpoint_plugin_install_refreshes_plugin_and_apps_tool_caches() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    run_remote_plugin_install_refresh_case(RefreshedAppsTools::Available).await?;
-    run_remote_plugin_install_refresh_case(RefreshedAppsTools::Missing).await
+    run_endpoint_plugin_install_refresh_case(RefreshedAppsTools::Available).await?;
+    run_endpoint_plugin_install_refresh_case(RefreshedAppsTools::Missing).await
 }
 
-async fn run_remote_plugin_install_refresh_case(refreshed_tools: RefreshedAppsTools) -> Result<()> {
+async fn run_endpoint_plugin_install_refresh_case(
+    refreshed_tools: RefreshedAppsTools,
+) -> Result<()> {
     let server = start_mock_server().await;
     let tools_available = Arc::new(AtomicBool::new(false));
     let apps_server = match refreshed_tools {

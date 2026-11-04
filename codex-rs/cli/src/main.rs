@@ -133,9 +133,6 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
-    /// Internal: forward a local TCP socket through an HTTP/3 CONNECT proxy.
-    #[clap(hide = true)]
-    TcpTunnel(codex_tcp_tunnel::Args),
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
@@ -879,9 +876,6 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             );
             let exit_info = run_interactive_tui(interactive, arg0_paths.clone()).await?;
             handle_app_exit(exit_info)?;
-        }
-        Some(Subcommand::TcpTunnel(args)) => {
-            return codex_tcp_tunnel::run(args).await;
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             exec_cli
@@ -1717,7 +1711,6 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
         Some(Subcommand::Features(_)) => Some("features"),
-        Some(Subcommand::TcpTunnel(_)) => Some("tcp-tunnel"),
     }
 }
 
@@ -2620,36 +2613,6 @@ enabled = true
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
         err.to_string()
     }
-    #[test]
-    fn tcp_tunnel_is_hidden_and_accepts_its_control_input_contract() {
-        let root_help = help_from_args(&["codex", "--help"]);
-        assert!(!root_help.contains("tcp-tunnel"), "{root_help}");
-        let help = help_from_args(&["codex", "tcp-tunnel", "--help"]);
-        for option in [
-            "--target",
-            "--auth-token-stdin",
-            "--auth-token-updates-stdin",
-            "--connect-headers-stdin",
-        ] {
-            assert!(help.contains(option), "{help}");
-        }
-        let cli = MultitoolCli::try_parse_from([
-            "codex",
-            "tcp-tunnel",
-            "--proxy-url",
-            "https://proxy.example.org",
-            "--proxy-origins-file",
-            "/tmp/approved-origins",
-            "--target",
-            "[::1]:22",
-            "--auth-token-stdin",
-            "--auth-token-updates-stdin",
-            "--connect-headers-stdin",
-        ])
-        .expect("generic tunnel should parse");
-        assert!(matches!(cli.subcommand, Some(Subcommand::TcpTunnel(_))));
-    }
-
     #[test]
     fn plugin_marketplace_help_uses_plugin_namespace() {
         let help = help_from_args(&["codex", "plugin", "marketplace", "--help"]);

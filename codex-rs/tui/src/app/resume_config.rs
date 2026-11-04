@@ -170,9 +170,6 @@ impl App {
                 return Err(AppRunControl::Continue);
             }
         };
-        if self.reject_remote_resume_permission_override(&resume_config.0, &target) {
-            return Err(AppRunControl::Continue);
-        }
         let resumed_thread = None;
         let trust_cwd = resume_config.0.cwd.to_path_buf();
         if let Some(local_settings) = self

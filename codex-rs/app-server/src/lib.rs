@@ -530,42 +530,26 @@ pub async fn run_main_with_transport_options(
         cli_kv_overrides.clone(),
         loader_overrides,
         strict_config,
-        Default::default(),
         arg0_paths.clone(),
         Arc::new(NoopThreadConfigLoader),
     );
     let startup = config_manager
-        .load_managed_startup_config(startup_cwd.clone())
+        .load_startup_config(startup_cwd.clone())
         .await?;
     let mut config_warnings = Vec::new();
-    let mut plugin_startup_config = PluginStartupConfig::Current;
-    let config = match startup.config {
-        Ok(config) => config,
-        Err(err) if is_unsupported_untrusted_approval_policy_error(&err) => {
-            return Err(err);
-        }
-        Err(err) => {
-            if strict_config {
-                return Err(err);
-            }
-
-            let message = config_warning_from_error("Invalid configuration; using defaults.", &err);
-            config_warnings.push(message);
-            plugin_startup_config = PluginStartupConfig::Defaults;
-            config_manager.load_default_config().await.map_err(|e| {
-                std::io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("error loading default config after config error: {e}"),
-                )
-            })?
-        }
+    let plugin_startup_config = if startup.used_defaults {
+        PluginStartupConfig::Defaults
+    } else {
+        PluginStartupConfig::Current
     };
+    let config = startup.config;
     config.validate_windows_mxc_requirement()?;
     config.auth_config().validate()?;
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
             .await
             .map_err(std::io::Error::other)?;
+    let installation_id = codex_core::resolve_installation_id(&config.codex_home).await?;
     config_manager.update_managed_config_loader(auth_manager.clone(), &config);
     config_manager
         .sync_default_client_residency_requirement()
@@ -885,6 +869,7 @@ pub async fn run_main_with_transport_options(
                 &auth_manager,
             ))),
             auth_manager,
+            installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
             plugin_startup_tasks: matches!(

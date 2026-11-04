@@ -20,9 +20,6 @@ pub fn install_plugin_providers(
     providers: PluginProviders,
 ) {
     let contributor = Arc::new(PluginContributor { providers });
-    builder.thread_lifecycle_contributor(contributor.clone());
-    builder.config_contributor(contributor.clone());
-    builder.turn_lifecycle_contributor(contributor.clone());
     builder.mcp_server_contributor(contributor);
 }
 

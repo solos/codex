@@ -235,16 +235,13 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ReadTool {
                 None => {
                     let result = self
                         .context
-                        .thread_state
-                        .read_skill(
-                            &self.context.providers,
-                            SkillReadRequest {
-                                authority: authority.clone(),
-                                package: package.clone(),
-                                resource: requested_resource.clone(),
-                                context,
-                            },
-                        )
+                        .providers
+                        .read(SkillReadRequest {
+                            authority: authority.clone(),
+                            package: package.clone(),
+                            resource: requested_resource.clone(),
+                            context,
+                        })
                         .await
                         .map_err(|err| {
                             tracing::warn!(

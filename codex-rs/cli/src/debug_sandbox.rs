@@ -750,3 +750,7 @@ fn config_uses_permission_profiles(config: &Config) -> bool {
         .get("default_permissions")
         .is_some()
 }
+
+fn cli_overrides_use_legacy_sandbox_mode(cli_overrides: &[(String, TomlValue)]) -> bool {
+    cli_overrides.iter().any(|(key, _)| key == "sandbox_mode")
+}

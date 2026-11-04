@@ -111,8 +111,7 @@ impl App {
             .codex_home(base.codex_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
-            .loader_overrides(self.loader_overrides.clone())
-            .build();
+            .loader_overrides(self.loader_overrides.clone());
         build_config_on_runtime_worker(
             builder,
             base.application_network_policy.clone(),
@@ -135,8 +134,7 @@ impl App {
             .codex_home(self.config.codex_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
-            .loader_overrides(self.loader_overrides.clone())
-            .build();
+            .loader_overrides(self.loader_overrides.clone());
         build_config_on_runtime_worker(
             builder,
             self.config.application_network_policy.clone(),

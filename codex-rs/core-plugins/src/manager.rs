@@ -727,6 +727,38 @@ impl PluginsManager {
         ConnectorSnapshot::from_plugin_sources(sources, disabled_plugin_ids, HashSet::new())
     }
 
+    fn telemetry_metadata_for_plugin_id(&self, plugin_id: &PluginId) -> PluginTelemetryMetadata {
+        PluginTelemetryMetadata {
+            plugin_id: Some(plugin_id.clone()),
+            capability_summary: None,
+        }
+    }
+
+    pub fn telemetry_metadata_for_capability_summary(
+        &self,
+        summary: &PluginCapabilitySummary,
+    ) -> Option<PluginTelemetryMetadata> {
+        let plugin_id = PluginId::parse(&summary.config_name).ok()?;
+        Some(PluginTelemetryMetadata {
+            plugin_id: Some(plugin_id),
+            capability_summary: Some(summary.clone()),
+        })
+    }
+
+    pub async fn recommended_plugins_mode_for_config(
+        &self,
+        _config: &PluginsConfigInput,
+        _auth: Option<&CodexAuth>,
+    ) {
+    }
+
+    pub async fn recommended_plugin_candidates_for_config(
+        &self,
+        _input: RecommendedPluginCandidatesInput<'_>,
+    ) -> Option<Vec<DiscoverableTool>> {
+        None
+    }
+
     pub async fn telemetry_metadata_for_installed_plugin(
         &self,
         plugin_id: &PluginId,
@@ -1530,6 +1562,14 @@ impl PluginsManager {
         ) {
             self.schedule_non_curated_plugin_cache_refresh(request);
         }
+    }
+
+    pub fn maybe_start_plugin_list_background_tasks(
+        self: &Arc<Self>,
+        context: &PluginMarketplaceContext,
+        options: PluginListBackgroundTaskOptions,
+    ) {
+        self.maybe_start_non_curated_plugin_cache_refresh(context, &options.local_marketplaces);
     }
 
     /// Runs an explicitly requested refresh using the caller's normal Git configuration.

@@ -667,6 +667,7 @@ impl ChatWidget {
                 .map(|marketplace| marketplace_display_name(marketplace))
                 .collect(),
         );
+        let mut additional_tabs = Vec::new();
         for (marketplace, label) in additional_marketplaces.into_iter().zip(labels) {
             let entries = plugin_entries_for_marketplaces([marketplace]);
             let marketplace_total = entries.len();
@@ -710,7 +711,6 @@ impl ChatWidget {
                     header,
                     items: self.plugin_selection_items(
                         entries,
-                        &preferred_local_sources,
                         /*include_marketplace_names*/ false,
                         "No plugins available in this marketplace",
                         "No plugins available in this marketplace",

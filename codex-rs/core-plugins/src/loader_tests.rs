@@ -336,11 +336,9 @@ async fn installed_agent_plugin_uses_isolated_data_root_for_stdio_mcp() {
             .try_into::<codex_config::config_toml::ConfigToml>()
             .unwrap()
             .plugins,
-        RemoteInstalledPluginsSnapshot::default(),
         &store,
         /*plugin_skill_snapshots*/ None,
         Some(Product::Codex),
-        /*remote_global_catalog_active*/ false,
         test_skill_root_loader().as_ref(),
     )
     .await;

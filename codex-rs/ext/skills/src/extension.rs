@@ -599,7 +599,6 @@ pub fn install_with_providers_and_metrics<C>(
     });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.turn_lifecycle_contributor(Arc::new(SkillTelemetry));
-    registry.turn_lifecycle_contributor(extension.clone());
     registry.config_contributor(extension.clone());
     registry.prompt_contributor(extension.clone());
     registry.turn_input_contributor(extension.clone());

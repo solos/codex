@@ -359,7 +359,7 @@ async fn experimental_feature_enablement_set_only_updates_named_features() -> Re
         BTreeMap::from([
             ("auth_elicitation".to_string(), true),
             ("memories".to_string(), true),
-            ("remote_plugin".to_string(), true),
+            ("mcp_connection_sharing".to_string(), true),
             ("tool_suggest".to_string(), false),
         ]),
     )
@@ -371,7 +371,7 @@ async fn experimental_feature_enablement_set_only_updates_named_features() -> Re
             enablement: BTreeMap::from([
                 ("auth_elicitation".to_string(), true),
                 ("memories".to_string(), true),
-                ("remote_plugin".to_string(), true),
+                ("mcp_connection_sharing".to_string(), true),
                 ("tool_suggest".to_string(), false),
             ]),
         }
@@ -404,7 +404,7 @@ async fn experimental_feature_enablement_set_only_updates_named_features() -> Re
         config
             .additional
             .get("features")
-            .and_then(|features| features.get("remote_plugin")),
+            .and_then(|features| features.get("mcp_connection_sharing")),
         Some(&json!(true))
     );
     assert_eq!(

@@ -1178,7 +1178,6 @@ async fn astra_plugin_policy_limits_visible_skills(omit_descriptions: bool) -> R
         home.path().join("config.toml"),
         r#"[features]
 plugins = true
-remote_plugin = true
 [skills.bundled]
 enabled = false
 [plugins._default]

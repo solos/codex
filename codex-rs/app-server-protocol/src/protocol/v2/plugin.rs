@@ -202,6 +202,10 @@ pub struct PluginReadResponse {
     pub plugin: PluginDetail,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+#[ts(export_to = "v2/")]
 pub enum SkillScope {
     User,
     Repo,
@@ -456,6 +460,9 @@ pub struct PluginSummary {
     pub keywords: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct PluginDetail {
     pub marketplace_name: String,
     pub marketplace_path: Option<AbsolutePathBuf>,

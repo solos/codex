@@ -74,6 +74,79 @@ pub fn resolve_skill_interface(
     has_fields.then_some(interface)
 }
 
+fn resolve_asset_path(
+    skill_dir: &AbsolutePathBuf,
+    asset_policy: SkillInterfaceAssetPolicy<'_>,
+    field: &'static str,
+    path: Option<PathBuf>,
+) -> Option<AbsolutePathBuf> {
+    let path = path?;
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+
+    let assets_dir = skill_dir.join("assets");
+    if path.is_absolute() {
+        tracing::warn!(
+            "ignoring {field}: icon must be a relative assets path (not {})",
+            assets_dir.display()
+        );
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(component) => normalized.push(component),
+            Component::ParentDir => {
+                return resolve_plugin_shared_asset_path(skill_dir, asset_policy, field, &path);
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                tracing::warn!("ignoring {field}: icon path must be under assets/");
+                return None;
+            }
+        }
+    }
+
+    let mut components = normalized.components();
+    match components.next() {
+        Some(Component::Normal(component)) if component == "assets" => {}
+        _ => {
+            tracing::warn!("ignoring {field}: icon path must be under assets/");
+            return None;
+        }
+    }
+
+    Some(skill_dir.join(normalized))
+}
+
+fn resolve_plugin_shared_asset_path(
+    skill_dir: &AbsolutePathBuf,
+    asset_policy: SkillInterfaceAssetPolicy<'_>,
+    field: &'static str,
+    path: &Path,
+) -> Option<AbsolutePathBuf> {
+    let SkillInterfaceAssetPolicy::PluginShared { plugin_root } = asset_policy else {
+        tracing::warn!("ignoring {field}: icon path must not contain '..'");
+        return None;
+    };
+
+    let plugin_assets_dir = lexically_normalize(plugin_root.join("assets").as_path());
+    let resolved = lexically_normalize(skill_dir.join(path).as_path());
+    if !resolved.starts_with(&plugin_assets_dir) {
+        tracing::warn!("ignoring {field}: icon path with '..' must resolve under plugin assets/");
+        return None;
+    }
+
+    AbsolutePathBuf::try_from(resolved)
+        .map_err(|error| {
+            tracing::warn!("ignoring {field}: icon path must resolve to an absolute path: {error}");
+            error
+        })
+        .ok()
+}
+
 fn lexically_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

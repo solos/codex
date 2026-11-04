@@ -359,7 +359,7 @@ pub(super) async fn run_main_inner(
             &crate::local_settings::LocalSettings::from(&config),
             config.cwd.as_path(),
         );
-        Some(worktree)
+        worktree
     } else {
         None
     };

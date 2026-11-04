@@ -59,7 +59,7 @@ async fn canonical_plugin_disable_overrides_shared_connector_and_can_be_cleared(
     let home = Arc::new(TempDir::new()?);
     std::fs::write(
         home.path().join("config.toml"),
-        "[features]\nplugins = true\nremote_plugin = true\n[plugins.\"shared@test\"]\nenabled = true\n",
+        "[features]\nplugins = true\n[plugins.\"shared@test\"]\nenabled = true\n",
     )?;
     for (marketplace, name) in [("test", "shared"), ("openai-curated-remote", "calendar")] {
         let root = home

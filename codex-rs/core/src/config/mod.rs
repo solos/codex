@@ -310,6 +310,7 @@ fn resolve_mcp_oauth_credentials_store_mode(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn test_config() -> Config {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     Config::load_from_base_config_with_overrides(

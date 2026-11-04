@@ -114,24 +114,18 @@ async fn read_startup_config(
         overrides,
         loader_overrides,
         strict_config,
-        Default::default(),
         arg0_paths,
         Arc::new(NoopThreadConfigLoader),
     );
     let cwd = std::env::current_dir().ok();
-    let loaded = manager
-        .load_managed_startup_config(cwd.clone())
+    let config = manager
+        .load_startup_config(cwd.clone())
         .await
-        .map_err(startup_error)?;
-    let config = match loaded.config {
-        Ok(config) => config,
-        // Recovery retains local credential settings when managed policy is unavailable.
-        Err(_) if startup.startup_sign_out => loaded.bootstrap.clone(),
-        Err(error) => return Err(startup_error(error)),
-    };
+        .map_err(startup_error)?
+        .config;
     let config = if startup.startup_sign_out {
         // Preserve local credential authority while using the effective HTTP route.
-        let mut auth_config = loaded.bootstrap.auth_config();
+        let mut auth_config = config.auth_config();
         auth_config.auth_route_config = config.auth_route_config();
         auth_config.chatgpt_base_url = Some(config.chatgpt_base_url.clone());
         let auth = AuthManager::shared_from_auth_config(

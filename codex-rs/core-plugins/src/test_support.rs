@@ -230,6 +230,90 @@ impl SkillRootLoader<PluginSkillRoot> for TestSkillRootLoader {
     }
 }
 
+fn load_test_skill_root(root: &PluginSkillRoot) -> LoadedSkillRoot {
+    let canonical_root = fs::canonicalize(root.path.as_path())
+        .ok()
+        .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+        .unwrap_or_else(|| root.path.clone());
+    let mut skills = Vec::new();
+    let mut errors = Vec::new();
+    let mut discovery_paths = HashMap::new();
+    let mut directories = vec![root.path.clone()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(directory.as_path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if (root.discovery_mode == SkillDiscoveryMode::Recursive || directory == root.path)
+                    && let Ok(path) = AbsolutePathBuf::from_absolute_path_checked(path)
+                {
+                    directories.push(path);
+                }
+                continue;
+            }
+            if path.file_name().is_none_or(|name| name != "SKILL.md")
+                || (root.discovery_mode == SkillDiscoveryMode::DirectChildren
+                    && directory == root.path)
+            {
+                continue;
+            }
+            let Ok(path) = AbsolutePathBuf::from_absolute_path_checked(path) else {
+                continue;
+            };
+            let canonical_path = fs::canonicalize(path.as_path())
+                .ok()
+                .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+                .unwrap_or_else(|| path.clone());
+            let parsed = fs::read_to_string(path.as_path())
+                .map_err(|error| error.to_string())
+                .and_then(|contents| {
+                    parse_skill_frontmatter_metadata(&contents, || {
+                        directory
+                            .as_path()
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .map_err(|error| error.to_string())
+                });
+            match parsed {
+                Ok(parsed) => {
+                    discovery_paths.insert(
+                        PathUri::from_abs_path(&canonical_path),
+                        PathUri::from_abs_path(&path),
+                    );
+                    skills.push(SkillMetadata {
+                        name: format!("{}:{}", root.plugin_namespace, parsed.name),
+                        description: parsed.description,
+                        short_description: parsed.short_description,
+                        interface: None,
+                        dependencies: None,
+                        policy: None,
+                        path_to_skills_md: PathUri::from_abs_path(&canonical_path),
+                        scope: SkillScope::User,
+                        plugin_id: Some(root.plugin_identity.plugin_id.clone()),
+                    });
+                }
+                Err(message) => errors.push(SkillError {
+                    path: canonical_path,
+                    message,
+                }),
+            }
+        }
+    }
+
+    LoadedSkillRoot {
+        root: canonical_root,
+        skills,
+        skill_discovery_path_by_path: Arc::new(discovery_paths),
+        errors,
+        is_agent_plugin: root.discovery_mode == SkillDiscoveryMode::DirectChildren,
+    }
+}
+
 pub(crate) fn test_http_client_factory() -> HttpClientFactory {
     HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
 }

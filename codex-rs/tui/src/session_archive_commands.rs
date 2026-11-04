@@ -239,7 +239,7 @@ pub(super) async fn start_app_server_for_session_command(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
 
-    let app_server_target = super::app_server_target_for_launch();
+    let mut app_server_target = super::app_server_target_for_launch();
     let remote_cwd_override = cli
         .cwd
         .clone()

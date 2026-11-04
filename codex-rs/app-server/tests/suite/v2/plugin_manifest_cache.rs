@@ -22,7 +22,7 @@ async fn plugin_list_observes_manifest_and_overlay_revisions_in_one_server() -> 
     }
     std::fs::write(
         codex_home.path().join("config.toml"),
-        "[features]\nplugins = true\nremote_plugin = false\n",
+        "[features]\nplugins = true\n",
     )?;
     std::fs::write(
         root.join(".agents/plugins/marketplace.json"),

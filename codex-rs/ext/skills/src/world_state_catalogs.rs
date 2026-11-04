@@ -7,6 +7,7 @@ use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
+use serde::Deserialize;
 
 use crate::catalog::SkillCatalog;
 use crate::catalog_delta::CatalogDelta;
@@ -204,6 +205,7 @@ impl<'a> CatalogRenderingContext<'a> {
         let catalog_deltas_enabled = self.step_state.config.catalog_deltas_enabled;
         let metrics = self.input.extension_metrics.clone();
         let warning_emitter = Arc::clone(&self.warning_emitter);
+        let metadata_budget = self.metadata_budget;
         let on_render = move |render_report: &crate::render::SkillRenderReport| {
             if !include_instructions || status != CatalogStatus::Enabled {
                 return;
@@ -211,7 +213,7 @@ impl<'a> CatalogRenderingContext<'a> {
             record_catalog_render(
                 metrics.as_deref(),
                 kind.metrics_surface(),
-                self.metadata_budget,
+                metadata_budget,
                 render_report,
             );
             if let Some(message) = render_report.warning_message(catalog_deltas_enabled) {
