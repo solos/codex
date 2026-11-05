@@ -87,3 +87,9 @@ if ((Test-Path "D:\") -and (Test-DevDrive "D:")) {
 }
 
 "CI_BUILD_ROOT=$Drive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+# Every failure path above already falls back to a usable drive. Test-DevDrive
+# probes fsutil, which leaves a non-zero $LASTEXITCODE on runners without Dev
+# Drive support; pwsh -Command promotes that to the process exit code, so exit
+# explicitly to keep a successful fallback from failing the job.
+exit 0
