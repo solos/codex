@@ -39,7 +39,7 @@ Use this as the maintainer flow for a version bump:
    layout, the importer fails instead of silently using an old inventory;
    update that boundary and review its fixed feature and CPU selections.
    Then refresh the matching checksum manifest and generated checksums below.
-3. Publish a release-candidate PR and validate that `v8-canary` passes.
+3. Publish a release-candidate PR and validate that the Bazel V8 build targets pass.
 4. If the canary is green, publish the release tag and release build.
 5. Independently verify the published Codex-built checksum manifests and record
    their SHA-256 digests in
@@ -79,8 +79,7 @@ their raw names:
 - `rusty_v8_ptrcomp_sandbox_release_<target>.lib.gz` on Windows MSVC
 - `src_binding_ptrcomp_sandbox_release_<target>.rs`
 
-The dedicated publishing workflow is `.github/workflows/rusty-v8-release.yml`.
-Tagged runs build release artifacts from the Bazel graph itself:
+Release artifacts are built from the Bazel graph itself:
 
 - `//third_party/v8:rusty_v8_release_pair_x86_64_apple_darwin`
 - `//third_party/v8:rusty_v8_release_pair_aarch64_apple_darwin`

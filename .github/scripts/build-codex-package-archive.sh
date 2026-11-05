@@ -172,6 +172,11 @@ if [[ -z "$repo_root" ]]; then
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 
+# The Python package builder requires this to locate workspace files. Not every
+# caller sets it at the workflow level (Windows release does not), so derive it
+# here instead of failing partway through packaging.
+export CODEX_REPO_ROOT="${CODEX_REPO_ROOT:-$repo_root}"
+
 if command -v python3 >/dev/null 2>&1; then
   python_bin="python3"
 else

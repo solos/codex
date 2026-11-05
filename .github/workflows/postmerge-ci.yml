@@ -14,16 +14,10 @@ jobs:
     uses: ./.github/workflows/rust-ci-full.yml
     secrets: inherit
 
-  v8-canary:
-    name: v8-canary
-    uses: ./.github/workflows/v8-canary.yml
-    secrets: inherit
-
   results:
     name: Postmerge CI results
     needs:
       - rust-ci-full
-      - v8-canary
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:
