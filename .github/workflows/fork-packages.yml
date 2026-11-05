@@ -1,0 +1,245 @@
+name: fork-packages
+
+# Fork-local packaging for codex-rs.
+#
+# Builds unsigned Codex package archives on tag pushes (or on demand) and
+# attaches them to the matching GitHub release. Unlike rust-release.yml this
+# workflow has no dependency on OpenAI's release infrastructure:
+#
+# - no macOS/Windows Azure Key Vault codesigning
+# - no npm, R2, winget, dotslash, website, or provisioning steps
+#
+# Binaries are built from source with Cargo (and bwrap on Linux musl). Users of
+# the resulting archives need to clear the macOS quarantine bit themselves:
+#   xattr -dr com.apple.quarantine <unpacked-codex-dir>
+
+on:
+  push:
+    tags:
+      - "rust-v*.*.*"
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag/release to attach the archives to (optional)."
+        required: false
+        type: string
+      ref:
+        description: "Git ref to build (optional; defaults to release_tag or the dispatched ref)."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CODEX_REPO_ROOT: ${{ github.workspace }}
+
+jobs:
+  build:
+    name: Build - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            platform: linux
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            platform: macos
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || inputs.release_tag || github.ref }}
+          persist-credentials: false
+
+      - name: Prepare CI environment
+        uses: ./.github/actions/setup-ci
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils pkg-config libcap-dev
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Use hermetic Cargo home (musl)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        if: matrix.platform == 'linux'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+
+      - name: Configure rusty_v8 artifact overrides
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure MSVC environment
+        if: matrix.platform == 'windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build bwrap
+        if: matrix.platform == 'linux'
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo build --target "$TARGET" --release --timings --bin bwrap
+
+          bwrap_path="$CARGO_TARGET_DIR/${TARGET}/release/bwrap"
+          if [[ ! -f "$bwrap_path" ]]; then
+            echo "bwrap binary ${bwrap_path} not found"
+            exit 1
+          fi
+
+          # Codex embeds this digest at build time and verifies the bundled
+          # bwrap resource before use.
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
+
+      - name: Cargo build
+        shell: bash
+        working-directory: codex-rs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          bins=(codex codex-code-mode-host codex-exec-server)
+          if [[ "$TARGET" == *windows* ]]; then
+            bins+=(codex-windows-sandbox-setup codex-command-runner)
+            if [[ "$TARGET" == "x86_64-pc-windows-msvc" ]]; then
+              export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+            fi
+          fi
+
+          build_args=()
+          for binary in "${bins[@]}"; do
+            build_args+=(--bin "$binary")
+          done
+
+          STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
+          export STABLE_GIT_COMMIT
+          cargo build --target "$TARGET" --release --timings "${build_args[@]}"
+
+      - name: Build package archives
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "$TARGET" \
+            --bundle primary \
+            --entrypoint-dir "$CARGO_TARGET_DIR/${TARGET}/release" \
+            --archive-dir "${GITHUB_WORKSPACE}/dist/${TARGET}"
+
+      - name: Generate checksums
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}/dist/${TARGET}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ./*.tar.gz ./*.tar.zst > "SHA256SUMS-${TARGET}"
+          else
+            shasum -a 256 ./*.tar.gz ./*.tar.zst > "SHA256SUMS-${TARGET}"
+          fi
+
+      - name: Upload package archives
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*
+          if-no-files-found: error
+
+  release:
+    name: Attach packages to release
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - name: Download package archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+
+      - name: Create release if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+          # --verify-tag keeps the workflow from inventing a tag.
+          gh release create "$TAG" --verify-tag \
+            --title "$TAG" \
+            --notes "Unsigned Codex packages built by the fork-packages workflow."
+
+      - name: Upload package archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f -print0 | xargs -0 -r gh release upload "$TAG" --clobber

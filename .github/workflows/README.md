@@ -28,6 +28,20 @@ The workflows in this directory are split so that pull requests get fast, review
   - release-profile Cargo builds
   - cross-platform `argument-comment-lint`
 
+## Fork Releases
+
+- `fork-packages.yml` is the fork-local packaging path. It builds unsigned
+  archives for Linux (musl, x86_64 and arm64), macOS (arm64 and x64), and
+  Windows x64, then attaches them to the GitHub release for the pushed tag.
+- It triggers on `rust-v*.*.*` and `v*.*.*` tags, or manually through
+  `workflow_dispatch` (optionally with a `release_tag` and `ref`).
+- It intentionally skips `rust-release.yml`'s upstream-only codesigning, npm,
+  R2, winget, and website publication steps, so it runs without OpenAI's
+  secrets. The archives are unsigned: macOS users must clear the quarantine
+  attribute before the first run.
+- `rust-release.yml` is still the upstream release pipeline and is gated by
+  the `ENABLE_RELEASES` repository variable on non-`openai/codex` repos.
+
 ## Rule Of Thumb
 
 - If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
