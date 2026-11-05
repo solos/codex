@@ -67,6 +67,35 @@ jobs:
           ref: ${{ inputs.ref || inputs.release_tag || github.ref }}
           persist-credentials: false
 
+      # Historical tags can predate CI fixes in .github/actions and
+      # .github/scripts (for example, a tag whose setup-dev-drive.ps1 still
+      # requires a Dev Drive that windows-2022 cannot provide). Build the
+      # requested source ref with the CI scaffolding from the commit this
+      # workflow was dispatched from, so old tags still build on current
+      # runners. Tag pushes check out their own commit, where this is a no-op.
+      - name: Checkout current CI scaffolding
+        if: inputs.ref != '' || inputs.release_tag != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          path: .ci-scaffolding
+          sparse-checkout: |
+            .github/actions
+            .github/scripts
+          persist-credentials: false
+
+      - name: Overlay current CI scaffolding
+        if: inputs.ref != '' || inputs.release_tag != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in actions scripts; do
+            rm -rf "${GITHUB_WORKSPACE}/.github/${dir}"
+            cp -R "${GITHUB_WORKSPACE}/.ci-scaffolding/.github/${dir}" \
+              "${GITHUB_WORKSPACE}/.github/${dir}"
+          done
+          rm -rf "${GITHUB_WORKSPACE}/.ci-scaffolding"
+
       - name: Prepare CI environment
         uses: ./.github/actions/setup-ci
 
