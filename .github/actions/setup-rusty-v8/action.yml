@@ -16,7 +16,9 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-        RELEASE_REPOSITORY: ${{ inputs.release-repository || vars.RUSTY_V8_RELEASE_REPOSITORY }}
+        # Composite actions cannot reference the vars context; callers pass the
+        # repository variable through the release-repository input instead.
+        RELEASE_REPOSITORY: ${{ inputs.release-repository }}
       run: |
         set -euo pipefail
 

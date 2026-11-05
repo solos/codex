@@ -1,15 +1,21 @@
 # Configure a fast drive for Windows CI jobs.
 #
-# GitHub-hosted Windows runners do not always expose a secondary D: volume. When
-# they do not, create a Dev Drive VHD. CI depends on this path for its
-# build directories where CI spends significant time doing I/O, so fail the
-# job if no real Dev Drive is available.
+# GitHub-hosted Windows runners do not always expose a secondary D: volume, and
+# older runner images (for example, windows-2022) do not support Dev Drives at
+# all. Use a Dev Drive when the image supports one, otherwise route build I/O
+# through the existing secondary volume, falling back to C: only as a last
+# resort. CI_BUILD_ROOT must always be defined.
 
 function Test-DevDrive {
     param([string]$Drive)
 
     & fsutil devdrv query $Drive *> $null
     return $LASTEXITCODE -eq 0
+}
+
+function Test-DevDriveSupport {
+    $formatVolume = Get-Command Format-Volume -ErrorAction SilentlyContinue
+    return $null -ne $formatVolume -and $formatVolume.Parameters.ContainsKey("DevDrive")
 }
 
 function Invoke-BestEffort {
@@ -22,9 +28,22 @@ function Invoke-BestEffort {
     }
 }
 
+$DevDriveSupported = Test-DevDriveSupport
+
 if ((Test-Path "D:\") -and (Test-DevDrive "D:")) {
     Write-Output "Using existing Dev Drive at D:"
     $Drive = "D:"
+} elseif (-not $DevDriveSupported) {
+    # Format-Volume on this image has no -DevDrive parameter, so provisioning a
+    # VHD cannot produce a Dev Drive. The existing D: volume still keeps build
+    # I/O off the OS disk, which is the main goal.
+    if (Test-Path "D:\") {
+        Write-Output "Dev Drives are not supported on this runner; using existing D: volume."
+        $Drive = "D:"
+    } else {
+        Write-Warning "Dev Drives are not supported on this runner and no D: volume is available; falling back to C:."
+        $Drive = "C:"
+    }
 } else {
     if (Test-Path "D:\") {
         Write-Output "Existing D: volume is not a Dev Drive; provisioning a new Dev Drive VHD."
@@ -56,7 +75,14 @@ if ((Test-Path "D:\") -and (Test-DevDrive "D:")) {
 
         Write-Output "Using Dev Drive at $Drive"
     } catch {
-        throw "Failed to create Dev Drive: $($_.Exception.Message)"
+        $Message = "Failed to create a Dev Drive: $($_.Exception.Message)"
+        if (Test-Path "D:\") {
+            Write-Warning "$Message Using existing D: volume."
+            $Drive = "D:"
+        } else {
+            Write-Warning "$Message Falling back to C:."
+            $Drive = "C:"
+        }
     }
 }
 

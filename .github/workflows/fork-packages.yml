@@ -123,6 +123,7 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
+          release-repository: ${{ vars.RUSTY_V8_RELEASE_REPOSITORY }}
 
       - name: Configure MSVC environment
         if: matrix.platform == 'windows'
