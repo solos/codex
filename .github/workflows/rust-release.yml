@@ -318,7 +318,7 @@ jobs:
           done
 
       - name: Upload symbols archive
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-symbols${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/symbols-dist/${{ matrix.artifact_name }}/*
@@ -378,7 +378,7 @@ jobs:
 
       - if: ${{ runner.os == 'macOS' }}
         name: Upload unsigned macOS artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-unsigned${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/unsigned-dist/${{ matrix.target }}/*
@@ -508,7 +508,7 @@ jobs:
 
       - name: Upload Python runtime wheel
         if: ${{ matrix.build-system == 'cargo' && matrix.bundle == 'primary' && runner.os != 'macOS' }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-runtime-wheel-${{ matrix.target }}
           path: python-runtime-dist/${{ matrix.target }}/*.whl
@@ -562,7 +562,7 @@ jobs:
             mv "$artifact" "${artifact%/*}/${stem}-bazel${name#"$stem"}"
           done
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ runner.os != 'macOS' }}
         with:
           name: ${{ matrix.artifact_name }}${{ env.ARTIFACT_SUFFIX }}
@@ -629,7 +629,7 @@ jobs:
           chmod -R u+w "voice-unsigned/${TARGET}/runtime"
           cp bazel-bin/codex-rs/voice-host/codex-voice-host "voice-unsigned/${TARGET}/codex-voice-host"
           tar -C "voice-unsigned/${TARGET}" -czf "voice-unsigned-${TARGET}.tar.gz" runtime codex-voice-host
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: voice-${{ matrix.target }}-unsigned
           path: voice-unsigned-${{ matrix.target }}.tar.gz
@@ -853,14 +853,14 @@ jobs:
 
       - name: Upload signed voice runtime
         if: ${{ matrix.bundle == 'primary' }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: voice-${{ matrix.target }}-signed${{ env.ARTIFACT_SUFFIX }}
           path: signed-voice-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
       - name: Upload signed macOS binaries
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-signed-binaries${{ env.ARTIFACT_SUFFIX }}
           path: signed-macos/${{ matrix.target }}/*
@@ -868,7 +868,7 @@ jobs:
 
       - name: Upload signed macOS helpers
         if: ${{ matrix.bundle == 'primary' }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}-signed-resources${{ env.ARTIFACT_SUFFIX }}
           path: signed-resources/${{ matrix.target }}/*
@@ -876,7 +876,7 @@ jobs:
 
       - name: Upload binary signing verification
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-binary-signing-verification${{ env.ARTIFACT_SUFFIX }}
           path: macos-binary-signing-verification/${{ matrix.target }}/
@@ -1079,7 +1079,7 @@ jobs:
 
       - name: Upload unsigned macOS DMG
         if: ${{ matrix.build_dmg == 'true' }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-unsigned-dmg${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/target/${{ matrix.target }}/release/codex-${{ matrix.target }}.dmg
@@ -1142,7 +1142,7 @@ jobs:
 
       - name: Upload Python runtime wheel
         if: ${{ matrix.build-system == 'cargo' && matrix.bundle == 'primary' }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-runtime-wheel-${{ matrix.target }}
           path: python-runtime-dist/${{ matrix.target }}/*.whl
@@ -1164,7 +1164,7 @@ jobs:
           done
 
       - name: Upload packaged macOS artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-packaged${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/dist/${{ matrix.target }}/*
@@ -1259,7 +1259,7 @@ jobs:
             >"${report_dir}/signature-info.yaml"
 
       - name: Upload signed macOS DMG
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-signed-dmg${{ env.ARTIFACT_SUFFIX }}
           path: ${{ runner.temp }}/unsigned-dmg/codex-${{ matrix.target }}.dmg
@@ -1267,7 +1267,7 @@ jobs:
 
       - name: Upload DMG signing verification
         if: ${{ always() }}
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-dmg-signing-verification${{ env.ARTIFACT_SUFFIX }}
           path: macos-dmg-signing-verification/${{ matrix.target }}/
@@ -1532,7 +1532,7 @@ jobs:
           done
 
       - name: Upload verified macOS artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}${{ env.ARTIFACT_SUFFIX }}
           path: codex-rs/dist/${{ matrix.target }}/*
@@ -1607,7 +1607,7 @@ jobs:
             --package codex-sdk
 
       - name: Upload staged npm packages
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-packages
           path: dist/npm/*.tgz
@@ -2063,7 +2063,7 @@ jobs:
 
       - name: Retain npm debug logs
         if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-publish-logs-${{ github.run_attempt }}
           path: ${{ runner.temp }}/npm-publish-logs/
