@@ -4,7 +4,6 @@ mod events;
 mod facts;
 mod guardian_v2;
 mod product_attribution;
-mod reducer;
 mod thread_hint;
 mod turn_critical_path;
 
