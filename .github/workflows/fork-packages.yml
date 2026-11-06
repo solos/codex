@@ -39,7 +39,7 @@ jobs:
   build:
     name: Build - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -98,6 +98,35 @@ jobs:
 
       - name: Prepare CI environment
         uses: ./.github/actions/setup-ci
+
+      # Fork packages are neither signed nor symbolicated, so the release
+      # profile's thin LTO and line-table debug info are pure build cost.
+      # codegen-units is also tuned for binary size (4) rather than build
+      # speed. Only macOS overrides it: the Linux and Windows jobs already
+      # finish well inside the timeout.
+      - name: Use fast release profile (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "CARGO_PROFILE_RELEASE_LTO=false"
+            echo "CARGO_PROFILE_RELEASE_DEBUG=false"
+            echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16"
+          } >> "$GITHUB_ENV"
+
+      # setup-ci puts CARGO_TARGET_DIR under CI_BUILD_ROOT ($HOME/.cache/codex-ci)
+      # instead of codex-rs/target, so give rust-cache the relative path from the
+      # Cargo workspace root. It only retains dependency artifacts, which is
+      # what makes retries of the same ref cheap.
+      - name: Cache Cargo dependencies (macOS)
+        if: matrix.platform == 'macos'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: codex-rs -> ../../../../.cache/codex-ci/cargo-target
+          key: ${{ matrix.target }}
+          env-vars: CARGO_PROFILE_RELEASE
+          cache-on-failure: true
 
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
