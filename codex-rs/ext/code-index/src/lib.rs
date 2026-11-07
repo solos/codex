@@ -1,4 +1,4 @@
-//! Opt-in code-index retrieval for turn input context.
+//! Code-index retrieval for turn input context.
 
 mod extension;
 

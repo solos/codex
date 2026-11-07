@@ -2,7 +2,7 @@
 
 ## Summary
 
-This report measures the opt-in local code index against two no-index
+This report measures the local code index against two no-index
 baselines on the same synthetic repository:
 
 - **Indexed search:** the SQLite FTS5/trigram/symbol hybrid search engine.

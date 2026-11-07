@@ -1,7 +1,7 @@
 # Local Code Index
 
-This crate implements the opt-in local code index used by the Codex code-index
-extension. The feature is disabled by default and does not make network calls.
+This crate implements the local code index used by the Codex code-index
+extension. The feature is enabled by default and does not make network calls.
 
 See [`IMPROVEMENTS.zh-CN.md`](IMPROVEMENTS.zh-CN.md) for the Chinese capability
 and performance report, or [`PERFORMANCE.md`](PERFORMANCE.md) for the English
@@ -135,12 +135,12 @@ codex index status [PATH] [--db PATH]
 codex index search "QUERY" [--path PATH] [--budget N] [--limit N]
 ```
 
-The extension is installed through the existing extension registry. It is a
-no-op unless `features.code_index` is enabled. Before a turn it searches using
-the user task text, injects a bounded internal context fragment, and falls back
-to ignore-aware file search if the index is missing or unreadable. Fallback
-results are filtered through the same discovery policy as the index, so ignored,
-hidden, generated, and sensitive files are not exposed.
+The extension is installed through the existing extension registry and is
+enabled by default. Set `features.code_index.enabled = false` to opt out. Before
+a turn it searches using the user task text, injects a bounded internal context
+fragment, and falls back to ignore-aware file search if the index is missing or
+unreadable. Fallback results are filtered through the same discovery policy as
+the index, so ignored, hidden, generated, and sensitive files are not exposed.
 
 A host that enables vector retrieval supplies an `EmbeddingProvider` and calls
 `backfill_embeddings` after indexing. Rerunning the backfill only processes
@@ -150,6 +150,7 @@ Example configuration:
 
 ```toml
 [features.code_index]
+# Enabled by default; set to false to opt out.
 enabled = true
 token_budget = 1200
 max_results = 8
@@ -225,4 +226,4 @@ memory_after_index_rss_mib=29.145 peak_rss_mib=32.547
 - `examples/incremental_benchmark.rs`: latency, update, size, and RSS report.
 - `../ext/code-index/examples/index_vs_no_index_benchmark.rs`: indexed versus
   no-index fallback and full-content scan comparison.
-- `../ext/code-index`: opt-in turn-input context injection and fallback search.
+- `../ext/code-index`: turn-input context injection and fallback search.

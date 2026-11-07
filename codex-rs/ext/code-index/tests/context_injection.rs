@@ -51,9 +51,13 @@ async fn disabled_extension_is_a_noop() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.path().join("repo");
     fs::create_dir_all(&root)?;
-    let registry = registry_with_config(CodeIndexExtensionConfig::default()).await;
+    let config = CodeIndexExtensionConfig {
+        enabled: false,
+        ..CodeIndexExtensionConfig::default()
+    };
+    let registry = registry_with_config(config.clone()).await;
     let thread_store = ExtensionData::new("thread");
-    thread_store.insert(CodeIndexExtensionConfig::default());
+    thread_store.insert(config);
 
     let fragments = contribute(&registry, &root, "find anything", &thread_store).await?;
 

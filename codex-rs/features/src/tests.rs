@@ -200,7 +200,7 @@ fn code_mode_host_feature_config_preserves_boolean_toggle() {
 }
 
 #[test]
-fn code_index_feature_is_opt_in_and_deserializes_retrieval_settings() {
+fn code_index_feature_is_enabled_by_default_and_deserializes_retrieval_settings() {
     let features: FeaturesToml = toml::from_str(
         r#"
 [code_index]
@@ -231,6 +231,10 @@ debug = true
     );
 
     let mut resolved = Features::with_defaults();
+    assert!(resolved.enabled(Feature::CodeIndex));
+    resolved.apply_toml(
+        &toml::from_str("code_index = false").expect("code-index disable toggle should parse"),
+    );
     assert!(!resolved.enabled(Feature::CodeIndex));
     resolved.apply_toml(&features);
     assert!(resolved.enabled(Feature::CodeIndex));

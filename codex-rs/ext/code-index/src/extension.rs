@@ -64,7 +64,7 @@ pub struct CodeIndexExtensionConfig {
 impl Default for CodeIndexExtensionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             token_budget: DEFAULT_CODE_INDEX_TOKEN_BUDGET,
             max_results: DEFAULT_CODE_INDEX_MAX_RESULTS,
             index_path: None,
@@ -306,7 +306,7 @@ impl TurnInputContributor for CodeIndexExtension {
     }
 }
 
-/// Installs the opt-in code-index context extension.
+/// Installs the code-index context extension, which is enabled by default.
 pub fn install(
     registry: &mut ExtensionRegistryBuilder<Config>,
     config_from_host: impl Fn(&Config) -> CodeIndexExtensionConfig + Send + Sync + 'static,

@@ -229,7 +229,7 @@ FTS5 vocabulary 快路径将同一基准中的自然语言 P95 从 **22.350 ms**
 
 ## Agent 上下文注入效果
 
-启用 `features.code_index` 后，扩展会在每轮用户输入前使用任务文本执行检索。
+`features.code_index` 默认启用；每轮用户输入前，扩展会使用任务文本执行检索。
 输出不是整文件内容，而是包含以下信息的内部上下文片段：
 
 - 文件路径；
@@ -316,6 +316,7 @@ codex index search "where is retry backoff implemented" --budget 1200 --limit 8
 
 ```toml
 [features.code_index]
+# 默认启用；设为 false 可关闭。
 enabled = true
 token_budget = 1200
 max_results = 8
@@ -324,7 +325,7 @@ embedding = false
 debug = false
 ```
 
-默认关闭该功能。只有显式启用后，Agent turn 才会注入代码索引上下文。
+该功能默认启用。设置 `enabled = false` 后，Agent turn 不再注入代码索引上下文。
 
 ## 实现要点
 
@@ -336,7 +337,7 @@ debug = false
 - **缓存**：查询 embedding 和完整搜索响应用有界 LRU；embedding 使用内容哈希持久缓存。
 - **增量更新**：基于内容哈希识别变化文件，以批次事务写入 SQLite。
 - **后台与监听**：支持 background indexing 和 debounce watcher。
-- **扩展集成**：通过现有 extension registry 接入 turn context，不改变默认关闭行为。
+- **扩展集成**：通过现有 extension registry 接入 turn context，默认启用且可显式关闭。
 
 主要实现文件：
 
@@ -380,4 +381,4 @@ target/release/examples/index_vs_no_index_benchmark 20000 60
 
 该实现把代码检索从“依赖模型逐文件浏览”提升为“本地、可增量、带隐私边界的混合检索”。
 在当前 20,000 文件基准中，查询 P95 控制在 12 ms 左右，增量更新控制在 167 ms 左右，
-峰值内存约 33 MiB，同时保持默认关闭、默认不联网和无常驻服务的设计。
+峰值内存约 33 MiB，同时保持默认启用、默认不联网和无常驻服务的设计。
