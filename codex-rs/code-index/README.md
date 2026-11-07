@@ -4,7 +4,8 @@ This crate implements the opt-in local code index used by the Codex code-index
 extension. The feature is disabled by default and does not make network calls.
 
 See [`IMPROVEMENTS.zh-CN.md`](IMPROVEMENTS.zh-CN.md) for the Chinese capability
-and performance report.
+and performance report, or [`PERFORMANCE.md`](PERFORMANCE.md) for the English
+benchmark report.
 
 ## ADR-0001: SQLite-backed Hybrid Code Retrieval
 
@@ -103,10 +104,19 @@ and retains failed batches for retry.
 
 ### Retrieval
 
-Query analysis distinguishes symbol, path, and natural-language intent. The
-search engine runs FTS, trigram, exact-symbol, and optional vector backends on
-independent read connections, fuses rankings with weighted RRF, merges adjacent
-chunks, adds nearby context, and clips output to the requested token budget.
+Query analysis distinguishes symbol, path, and natural-language intent. For
+natural-language queries, the planner samples up to eight terms, estimates
+FTS document frequency with a data-version-scoped cache, and routes only the
+most selective terms into FTS. Single-token terms use the FTS5 vocabulary
+table as a fast frequency lookup; multi-token terms retain exact MATCH counts.
+Trigram retrieval is enabled only when at least one selective term was found;
+broad natural-language terms would otherwise rank nearly every chunk before
+RRF. Symbol and path queries retain the full prefix-FTS plus trigram path.
+
+The search engine runs FTS, trigram, exact-symbol, and optional vector
+backends on independent read connections, fuses rankings with weighted RRF,
+merges adjacent chunks, adds nearby context, and clips output to the requested
+token budget.
 Query embeddings and complete search responses use bounded LRU caches.
 Query and symbol term extraction is capped at 64 and 48 terms respectively so
 long task descriptions cannot produce unbounded SQL and FTS expressions.
@@ -188,12 +198,17 @@ incremental-update P95 is at least 2 seconds.
 The 20k-file reference run on the development machine produced:
 
 ```text
-full_index_ms=10094
-search_p50_ms=4.987 search_p95_ms=148.433 search_max_ms=148.586
-search_symbol_p95_ms=12.047 search_path_p95_ms=4.616
-search_natural_p95_ms=148.586
-incremental_p50_ms=164.344 incremental_p95_ms=166.879
-index_size_mib=186.668 peak_rss_mib=40.828
+files=20000
+full_index_ms=10089
+full_index_reported_ms=10088 chunks=160000
+search_samples=60 search_results_total=384 search_p50_ms=4.208 search_p95_ms=12.159 search_max_ms=18.641
+search_symbol_p50_ms=4.266 search_symbol_p95_ms=12.159
+search_path_p50_ms=4.214 search_path_p95_ms=4.476
+search_natural_p50_ms=0.452 search_natural_p95_ms=18.641
+incremental_samples=3 incremental_p50_ms=164.804 incremental_p95_ms=167.041
+single_file_update_ms=167 files_indexed=1 chunks=8
+speedup=60.40x index_size_mib=186.766
+memory_after_index_rss_mib=29.145 peak_rss_mib=32.547
 ```
 
 ## File Map

@@ -73,6 +73,7 @@ pub(crate) struct MissingEmbedding {
 pub(crate) struct Store {
     pool: SqlitePool,
     path: PathBuf,
+    fts_vocab_enabled: bool,
 }
 
 impl Store {
@@ -90,6 +91,7 @@ impl Store {
         let store = Self {
             pool,
             path: path.to_path_buf(),
+            fts_vocab_enabled: false,
         };
         store.initialize_schema().await?;
         Ok(store)
@@ -104,6 +106,7 @@ impl Store {
         Ok(Self {
             pool,
             path: path.to_path_buf(),
+            fts_vocab_enabled: false,
         })
     }
 
@@ -455,6 +458,50 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(chunk_from_row).collect()
+    }
+
+    pub(crate) async fn count_fts_matches(&self, match_query: &str) -> Result<u64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+        )
+        .bind(match_query)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    pub(crate) async fn enable_fts_vocab(&mut self) -> Result<()> {
+        // This is a temp table on the single read connection. Creating it does
+        // not write the index database, so read-only searches can still use it.
+        sqlx::raw_sql(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_fts_vocab
+             USING fts5vocab('main', 'chunks_fts', 'row')",
+        )
+        .execute(&self.pool)
+        .await?;
+        self.fts_vocab_enabled = true;
+        Ok(())
+    }
+
+    pub(crate) async fn count_fts_vocab_token(&self, term: &str) -> Result<Option<u64>> {
+        if !self.fts_vocab_enabled {
+            return Ok(None);
+        }
+        let count =
+            sqlx::query_scalar::<_, i64>("SELECT doc FROM temp.chunks_fts_vocab WHERE term = ?")
+                .bind(term)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(Some(
+            u64::try_from(count.unwrap_or_default()).unwrap_or_default(),
+        ))
+    }
+
+    pub(crate) async fn chunk_count(&self) -> Result<u64> {
+        let count = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM chunks")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(u64::try_from(count).unwrap_or_default())
     }
 
     pub(crate) async fn trigram_search(

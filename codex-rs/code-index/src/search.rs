@@ -40,6 +40,10 @@ const MAX_QUERY_TERMS: usize = 64;
 const MAX_SYMBOL_TERMS: usize = 48;
 const MAX_PATH_TERMS: usize = 32;
 const MAX_TERM_BYTES: usize = 256;
+const MAX_NATURAL_LANGUAGE_STAT_TERMS: usize = 8;
+const MAX_NATURAL_LANGUAGE_FTS_TERMS: usize = 3;
+const MIN_SELECTIVE_TERM_CHUNKS: u64 = 64;
+const SELECTIVITY_DIVISOR: u64 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,6 +179,25 @@ impl QueryResultCache {
     }
 }
 
+#[derive(Default)]
+struct TermStatsCache {
+    data_version: Option<i64>,
+    total_chunks: u64,
+    counts: HashMap<String, u64>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BackendQueries {
+    fts: Option<String>,
+    trigram: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SelectedTerms {
+    terms: Vec<String>,
+    has_selective_term: bool,
+}
+
 pub struct SearchEngine {
     // The shared read-only helper opens a single-connection pool. Each
     // lexical and vector backend gets its own connection so `try_join!`
@@ -185,6 +208,7 @@ pub struct SearchEngine {
     vector_store: Store,
     query_embeddings: QueryEmbeddingCache,
     query_results: QueryResultCache,
+    term_stats: Mutex<TermStatsCache>,
 }
 
 impl SearchEngine {
@@ -195,7 +219,10 @@ impl SearchEngine {
             "code index does not exist at {}; run `codex index init` first",
             paths.db_path.display()
         );
-        let fts_store = open_read_store(&paths.db_path, "FTS").await?;
+        let mut fts_store = open_read_store(&paths.db_path, "FTS").await?;
+        // Vocabulary lookup is an optional fast path. The exact MATCH count
+        // below remains available when the SQLite build lacks fts5vocab.
+        let _ = fts_store.enable_fts_vocab().await;
         let trigram_store = open_read_store(&paths.db_path, "trigram").await?;
         let symbol_store = open_read_store(&paths.db_path, "symbol").await?;
         let vector_store = open_read_store(&paths.db_path, "vector").await?;
@@ -206,6 +233,7 @@ impl SearchEngine {
             vector_store,
             query_embeddings: QueryEmbeddingCache::new(options.query_cache_capacity),
             query_results: QueryResultCache::new(options.result_cache_capacity),
+            term_stats: Mutex::new(TermStatsCache::default()),
         })
     }
 
@@ -252,8 +280,9 @@ impl SearchEngine {
                 provider.model_name().to_string(),
             )
         });
+        let data_version = self.fts_store.data_version().await?;
         let cache_key = QueryResultCacheKey {
-            data_version: self.fts_store.data_version().await?,
+            data_version,
             query: analysis.normalized.clone(),
             token_budget: request.token_budget,
             max_results: request.max_results,
@@ -264,18 +293,17 @@ impl SearchEngine {
             return Ok(response);
         }
 
-        let fts_query = build_fts_query(&analysis);
-        let trigram_query = build_trigram_query(&analysis);
+        let backend_queries = self.backend_queries(&analysis, data_version).await?;
         let symbol_terms = analysis.symbol_terms.clone();
         let vector_query = analysis.normalized.clone();
         let fts = async {
-            match fts_query {
+            match backend_queries.fts {
                 Some(query) => self.fts_store.fts_search(&query, candidate_limit).await,
                 None => Ok(Vec::new()),
             }
         };
         let trigram = async {
-            match trigram_query {
+            match backend_queries.trigram {
                 Some(query) => {
                     self.trigram_store
                         .trigram_search(&query, candidate_limit)
@@ -328,6 +356,114 @@ impl SearchEngine {
         };
         self.query_results.put(cache_key, &response).await;
         Ok(response)
+    }
+
+    async fn backend_queries(
+        &self,
+        analysis: &QueryAnalysis,
+        data_version: i64,
+    ) -> Result<BackendQueries> {
+        if analysis.intent == QueryIntent::NaturalLanguage {
+            return self
+                .natural_language_queries(&analysis.terms, data_version)
+                .await;
+        }
+
+        Ok(BackendQueries {
+            fts: build_fts_query(analysis),
+            trigram: build_trigram_query(analysis),
+        })
+    }
+
+    async fn natural_language_queries(
+        &self,
+        terms: &[String],
+        data_version: i64,
+    ) -> Result<BackendQueries> {
+        let terms = terms
+            .iter()
+            .take(MAX_NATURAL_LANGUAGE_STAT_TERMS)
+            .cloned()
+            .collect::<Vec<_>>();
+        if terms.is_empty() {
+            return Ok(BackendQueries::default());
+        }
+        let (total_chunks, counts) = self.term_stats(data_version, &terms).await?;
+        let selected = select_selective_terms(&terms, &counts, total_chunks);
+        Ok(BackendQueries {
+            fts: build_exact_fts_query(&selected.terms),
+            // Keep trigram for selective terms only. This preserves substring
+            // matching for cases such as "handle click" -> `handleClick`
+            // without scanning every posting for common natural-language terms.
+            trigram: selected
+                .has_selective_term
+                .then(|| build_trigram_query_from_terms(&selected.terms))
+                .flatten(),
+        })
+    }
+
+    async fn term_stats(
+        &self,
+        data_version: i64,
+        terms: &[String],
+    ) -> Result<(u64, HashMap<String, u64>)> {
+        let (mut counts, cached_total, missing) = {
+            let cache = self.term_stats.lock().await;
+            if cache.data_version == Some(data_version) {
+                let counts = terms
+                    .iter()
+                    .filter_map(|term| {
+                        cache
+                            .counts
+                            .get(term)
+                            .copied()
+                            .map(|count| (term.clone(), count))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let missing = terms
+                    .iter()
+                    .filter(|term| !cache.counts.contains_key(*term))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (counts, Some(cache.total_chunks), missing)
+            } else {
+                (HashMap::new(), None, terms.to_vec())
+            }
+        };
+
+        let total_chunks = match cached_total {
+            Some(total) => total,
+            None => self.fts_store.chunk_count().await?,
+        };
+        for term in missing {
+            let vocab_count = match fts_vocab_lookup_term(&term) {
+                Some(token) => self.fts_store.count_fts_vocab_token(&token).await?,
+                None => None,
+            };
+            let count = match vocab_count {
+                Some(count) => count,
+                None => {
+                    let Some(match_query) = build_exact_fts_query(std::slice::from_ref(&term))
+                    else {
+                        continue;
+                    };
+                    self.fts_store.count_fts_matches(&match_query).await?
+                }
+            };
+            counts.insert(term, count);
+        }
+
+        let mut cache = self.term_stats.lock().await;
+        if cache.data_version != Some(data_version) {
+            *cache = TermStatsCache {
+                data_version: Some(data_version),
+                total_chunks,
+                counts: HashMap::new(),
+            };
+        }
+        cache.total_chunks = total_chunks;
+        cache.counts.extend(counts.clone());
+        Ok((total_chunks, counts))
     }
 
     async fn add_nearby_context(
@@ -631,6 +767,80 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, value: String) {
     }
 }
 
+fn select_selective_terms(
+    terms: &[String],
+    counts: &HashMap<String, u64>,
+    total_chunks: u64,
+) -> SelectedTerms {
+    let selective_limit = (total_chunks / SELECTIVITY_DIVISOR).max(MIN_SELECTIVE_TERM_CHUNKS);
+    let mut observed = terms
+        .iter()
+        .filter_map(|term| {
+            counts
+                .get(term)
+                .copied()
+                .filter(|count| *count > 0)
+                .map(|count| (term, count))
+        })
+        .collect::<Vec<_>>();
+    observed.sort_by(|(left_term, left_count), (right_term, right_count)| {
+        left_count
+            .cmp(right_count)
+            .then_with(|| left_term.cmp(right_term))
+    });
+
+    let mut selected = Vec::new();
+    let mut estimated_matches = 0_u64;
+    let mut has_selective_term = false;
+    for (term, count) in &observed {
+        if *count > selective_limit || selected.len() >= MAX_NATURAL_LANGUAGE_FTS_TERMS {
+            continue;
+        }
+        let within_budget = selected.is_empty()
+            || estimated_matches.saturating_add(*count) <= selective_limit.saturating_mul(2);
+        if within_budget {
+            selected.push((*term).clone());
+            estimated_matches = estimated_matches.saturating_add(*count);
+            has_selective_term = true;
+        }
+    }
+
+    // Even when every term is common, querying only the least common one is
+    // cheaper than OR-ing the full natural-language term set.
+    if selected.is_empty()
+        && let Some((term, _)) = observed.first()
+    {
+        selected.push((*term).clone());
+    }
+    SelectedTerms {
+        terms: selected,
+        has_selective_term,
+    }
+}
+
+fn build_exact_fts_query(terms: &[String]) -> Option<String> {
+    if terms.is_empty() {
+        return None;
+    }
+    Some(
+        terms
+            .iter()
+            .map(|term| {
+                let escaped = term.replace('"', "\"\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
+}
+
+fn fts_vocab_lookup_term(term: &str) -> Option<String> {
+    if term.is_empty() || !term.chars().all(char::is_alphanumeric) {
+        return None;
+    }
+    Some(term.to_lowercase())
+}
+
 fn build_fts_query(analysis: &QueryAnalysis) -> Option<String> {
     let mut terms = analysis.terms.clone();
     for path in &analysis.path_terms {
@@ -657,6 +867,11 @@ fn build_trigram_query(analysis: &QueryAnalysis) -> Option<String> {
     for path in &analysis.path_terms {
         push_unique_case_insensitive(&mut terms, path.clone());
     }
+    build_trigram_query_from_terms(&terms)
+}
+
+fn build_trigram_query_from_terms(terms: &[String]) -> Option<String> {
+    let mut terms = terms.to_vec();
     terms.retain(|term| term.chars().count() >= 3);
     if terms.is_empty() {
         return None;
@@ -889,6 +1104,46 @@ mod tests {
         assert!(query.contains("\"foo\"*"));
         assert!(query.contains("\"bar\"*"));
         assert!(!query.contains("OR\"*"));
+    }
+
+    #[test]
+    fn natural_language_plan_prefers_selective_terms() {
+        let terms = ["function", "value", "index", "retry"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let counts = HashMap::from([
+            ("function".to_string(), 160_000),
+            ("value".to_string(), 120_000),
+            ("index".to_string(), 0),
+            ("retry".to_string(), 12),
+        ]);
+        let selected = select_selective_terms(&terms, &counts, 160_000);
+        assert_eq!(selected.terms, vec!["retry"]);
+        assert!(selected.has_selective_term);
+        assert_eq!(
+            build_exact_fts_query(&selected.terms).as_deref(),
+            Some("\"retry\"")
+        );
+        assert_eq!(
+            build_trigram_query_from_terms(&selected.terms).as_deref(),
+            Some("\"retry\"")
+        );
+    }
+
+    #[test]
+    fn natural_language_plan_falls_back_to_least_common_term() {
+        let terms = ["function", "value"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let counts = HashMap::from([
+            ("function".to_string(), 160_000),
+            ("value".to_string(), 120_000),
+        ]);
+        let selected = select_selective_terms(&terms, &counts, 160_000);
+        assert_eq!(selected.terms, vec!["value"]);
+        assert!(!selected.has_selective_term);
     }
 
     #[test]
