@@ -1,4 +1,4 @@
-//! Exercises settlement ordering and callback behavior through V8 cell execution.
+//! Exercises settlement ordering and callback behavior through QuickJS cell execution.
 
 use std::sync::Arc;
 use std::time::Duration;

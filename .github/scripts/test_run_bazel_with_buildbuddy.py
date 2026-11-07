@@ -128,7 +128,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             self.assertEqual(
                 run_bazel_with_buildbuddy.remote_config(
-                    ["build", "--config=ci-v8"], self.github_env(temp_dir)
+                    ["build", "--config=ci-linux"], self.github_env(temp_dir)
                 ),
                 "buildbuddy-openai-rbe",
             )
@@ -139,7 +139,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
             self.assertEqual(
                 run_bazel_with_buildbuddy.remote_config(
-                    ["build", "--config=ci-v8"], env
+                    ["build", "--config=ci-linux"], env
                 ),
                 "buildbuddy-generic-rbe",
             )
@@ -150,7 +150,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
             self.assertEqual(
                 run_bazel_with_buildbuddy.remote_config(
-                    ["build", "--config=ci-v8"], env
+                    ["build", "--config=ci-linux"], env
                 ),
                 "buildbuddy-generic-rbe",
             )

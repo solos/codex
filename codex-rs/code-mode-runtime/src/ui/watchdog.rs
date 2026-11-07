@@ -9,9 +9,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::runtime::RuntimeTermination;
+
 struct Active {
     instance: u64,
-    handle: v8::IsolateHandle,
+    handle: RuntimeTermination,
     deadline: Instant,
     terminated: bool,
 }
@@ -49,7 +51,7 @@ impl IsolateExecutionWatchdog {
                     {
                         let remaining = active.deadline.saturating_duration_since(Instant::now());
                         if remaining.is_zero() {
-                            active.handle.terminate_execution();
+                            active.handle.terminate();
                             active.terminated = true;
                         } else {
                             (state, _) = changed
@@ -69,7 +71,7 @@ impl IsolateExecutionWatchdog {
         })
     }
 
-    pub(super) fn arm(&self, instance: u64, handle: v8::IsolateHandle) {
+    pub(super) fn arm(&self, instance: u64, handle: RuntimeTermination) {
         let (lock, changed) = &*self.observer.0;
         let mut state = lock
             .lock()
@@ -122,7 +124,7 @@ impl Observer {
         if let Some(active) = &mut state.active
             && active.instance == instance
         {
-            active.handle.terminate_execution();
+            active.handle.terminate();
             active.terminated = true;
         }
         changed.notify_one();

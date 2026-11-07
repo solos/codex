@@ -17,7 +17,7 @@ class MacosSigningEntitlementsTest(unittest.TestCase):
         with path.open("rb") as file:
             return plistlib.load(file)
 
-    def test_v8_binaries_allow_unsigned_executable_memory(self) -> None:
+    def test_runtime_binaries_allow_unsigned_executable_memory(self) -> None:
         expected = {
             ALLOW_JIT: True,
             ALLOW_UNSIGNED_EXECUTABLE_MEMORY: True,

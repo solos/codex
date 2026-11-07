@@ -1,66 +1,83 @@
-//! Bounded per-isolate rejection tracking and script error capture.
+//! Bounded per-runtime rejection tracking and script error capture.
+
+use std::cell::RefCell;
+use std::mem;
+use std::rc::Rc;
 
 use codex_plugin_host::protocol::ErrorCode;
 use codex_plugin_host::protocol::MAX_SCRIPT_ERROR_BYTES;
 use codex_plugin_host::protocol::PluginScriptError;
+use rquickjs::Coerced;
+use rquickjs::Ctx;
+use rquickjs::FromJs;
+use rquickjs::Persistent;
+use rquickjs::Promise;
+use rquickjs::Runtime;
+use rquickjs::Value;
 
 const MAX_REJECTIONS: usize = 32;
+const UNKNOWN_SCRIPT_ERROR: &str = "unknown plugin script error";
+const MODULE_LOAD_ERROR: &str = "could not load module";
+const DYNAMIC_IMPORT_ERROR: &str = "Not supported";
+
+pub(super) type FailuresRef = Rc<RefCell<Failures>>;
+
+struct Rejected {
+    promise: Persistent<Promise<'static>>,
+    reason: Persistent<Value<'static>>,
+}
 
 #[derive(Default)]
-struct Failures {
-    rejected: Vec<v8::Global<v8::Promise>>,
+pub(super) struct Failures {
+    rejected: Vec<Rejected>,
     overflowed: bool,
     script_error: Option<PluginScriptError>,
 }
 
-pub(super) fn install(isolate: &mut v8::OwnedIsolate) {
-    isolate.set_slot(Failures::default());
-    isolate.set_promise_reject_callback(rejected);
-}
-
-extern "C" fn rejected(message: v8::PromiseRejectMessage) {
-    // SAFETY: V8 supplies the callback's active isolate and scope.
-    v8::callback_scope!(unsafe scope, &message);
-    match message.get_event() {
-        v8::PromiseRejectEvent::PromiseRejectWithNoHandler => {
-            let promise = v8::Global::new(scope, message.get_promise());
-            let Some(state) = scope.get_slot_mut::<Failures>() else {
+pub(super) fn install(runtime: &Runtime) -> FailuresRef {
+    let failures = Rc::new(RefCell::new(Failures::default()));
+    let tracker_failures = Rc::clone(&failures);
+    runtime.set_host_promise_rejection_tracker(Some(Box::new(
+        move |ctx, promise, reason, is_handled| {
+            let Some(promise) = promise.as_promise().cloned() else {
                 return;
             };
-            if state.rejected.len() == MAX_REJECTIONS {
-                state.overflowed = true;
-            } else {
-                state.rejected.push(promise);
+            let mut failures = tracker_failures.borrow_mut();
+            if is_handled {
+                failures.rejected.retain(|entry| {
+                    entry
+                        .promise
+                        .clone()
+                        .restore(&ctx)
+                        .map(|saved| saved != promise)
+                        .unwrap_or(true)
+                });
+                return;
             }
-        }
-        v8::PromiseRejectEvent::PromiseHandlerAddedAfterReject => {
-            let promise = message.get_promise();
-            if let Some(state) = scope.get_slot_mut::<Failures>() {
-                state.rejected.retain(|candidate| candidate != &promise);
+            if failures.rejected.len() == MAX_REJECTIONS {
+                failures.overflowed = true;
+                return;
             }
-        }
-        v8::PromiseRejectEvent::PromiseRejectAfterResolved
-        | v8::PromiseRejectEvent::PromiseResolveAfterResolved => {}
-    }
+            failures.rejected.push(Rejected {
+                promise: Persistent::save(&ctx, promise),
+                reason: Persistent::save(&ctx, reason),
+            });
+        },
+    )));
+    failures
 }
 
-pub(super) fn checkpoint(scope: &mut v8::PinScope<'_, '_>) -> Result<(), ErrorCode> {
-    scope.perform_microtask_checkpoint();
-    if scope.is_execution_terminating() {
-        return Err(ErrorCode::ExecutionFailed);
-    }
-    let (rejected, overflowed) = {
-        let state = scope
-            .get_slot_mut::<Failures>()
-            .ok_or(ErrorCode::ExecutionFailed)?;
-        (
-            std::mem::take(&mut state.rejected),
-            std::mem::take(&mut state.overflowed),
-        )
+pub(super) fn checkpoint(ctx: &Ctx<'_>, failures: &FailuresRef) -> Result<(), ErrorCode> {
+    while ctx.execute_pending_job() {}
+
+    let (first, overflowed) = {
+        let mut failures = failures.borrow_mut();
+        (failures.rejected.pop(), mem::take(&mut failures.overflowed))
     };
-    if let Some(promise) = rejected.first() {
-        let promise = v8::Local::new(scope, promise);
-        record_rejection(scope, promise);
+    if let Some(rejected) = first {
+        if let Ok(reason) = rejected.reason.restore(ctx) {
+            record_value(ctx, reason, failures);
+        }
         return Err(ErrorCode::ExecutionFailed);
     }
     if overflowed {
@@ -69,31 +86,128 @@ pub(super) fn checkpoint(scope: &mut v8::PinScope<'_, '_>) -> Result<(), ErrorCo
     Ok(())
 }
 
-pub(super) fn record_rejection(scope: &mut v8::PinScope<'_, '_>, promise: v8::Local<v8::Promise>) {
-    let reason = promise.result(scope);
-    let message = v8::Exception::create_message(scope, reason);
-    record(scope, Some(message));
+pub(super) fn record_text(failures: &FailuresRef, message: String) {
+    record_script_error(failures, script_error(message, None, None));
 }
 
-pub(super) fn record(scope: &mut v8::PinScope<'_, '_>, message: Option<v8::Local<v8::Message>>) {
-    let Some(message) = message else { return };
-    let text = message.get(scope);
-    let full_len = text.utf8_length(scope);
-    let mut bytes = vec![0; full_len.min(MAX_SCRIPT_ERROR_BYTES)];
-    let len = text.write_utf8_v2(scope, &mut bytes, v8::WriteFlags::kReplaceInvalidUtf8, None);
-    let script_error = PluginScriptError {
-        message: String::from_utf8_lossy(&bytes[..len]).into_owned(),
-        line: message.get_line_number(scope),
-        column: message.get_start_column().checked_add(1),
-        truncated: len < full_len,
-    };
-    if let Some(state) = scope.get_slot_mut::<Failures>() {
-        state.script_error = Some(script_error);
+pub(super) fn record_value<'js>(ctx: &Ctx<'js>, reason: Value<'js>, failures: &FailuresRef) {
+    let mut script_error = script_error_from_value(ctx, reason);
+    if is_module_load_error(&script_error.message) {
+        script_error.message = DYNAMIC_IMPORT_ERROR.to_string();
+    }
+    record_script_error(failures, script_error);
+}
+
+pub(super) fn record_caught(ctx: &Ctx<'_>, failures: &FailuresRef) {
+    if ctx.has_exception() {
+        record_value(ctx, ctx.catch(), failures);
     }
 }
 
-pub(super) fn take(isolate: &mut v8::Isolate) -> Option<PluginScriptError> {
-    isolate
-        .get_slot_mut::<Failures>()
-        .and_then(|state| state.script_error.take())
+pub(super) fn record_caught_module_import(ctx: &Ctx<'_>, failures: &FailuresRef) {
+    if ctx.has_exception() {
+        let reason = ctx.catch();
+        let mut script_error = script_error_from_value(ctx, reason);
+        if is_module_load_error(&script_error.message) {
+            script_error.message = "module imports are unavailable".to_string();
+        }
+        record_script_error(failures, script_error);
+    }
+}
+
+fn record_script_error(failures: &FailuresRef, script_error: PluginScriptError) {
+    failures.borrow_mut().script_error = Some(script_error);
+}
+
+fn script_error(message: String, line: Option<usize>, column: Option<usize>) -> PluginScriptError {
+    let mut bytes = message.into_bytes();
+    let truncated = bytes.len() > MAX_SCRIPT_ERROR_BYTES;
+    if truncated {
+        let mut boundary = MAX_SCRIPT_ERROR_BYTES;
+        while !message_boundary(&bytes, boundary) {
+            boundary -= 1;
+        }
+        bytes.truncate(boundary);
+    }
+    PluginScriptError {
+        message: String::from_utf8_lossy(&bytes).into_owned(),
+        line,
+        column,
+        truncated,
+    }
+}
+
+fn script_error_from_value<'js>(ctx: &Ctx<'js>, reason: Value<'js>) -> PluginScriptError {
+    let object = reason.as_object();
+    let name = object.and_then(|object| object_string(ctx, object, "name"));
+    let message = object.and_then(|object| object_string(ctx, object, "message"));
+    let stack = object.and_then(|object| object_string(ctx, object, "stack"));
+
+    let mut text = match (name.filter(|name| !name.is_empty()), message) {
+        (Some(name), Some(message)) if !message.is_empty() => format!("{name}: {message}"),
+        (Some(name), _) => name,
+        (None, Some(message)) if !message.is_empty() => message,
+        _ => Coerced::<String>::from_js(ctx, reason)
+            .ok()
+            .map(|text| text.0)
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| UNKNOWN_SCRIPT_ERROR.to_string()),
+    };
+    if let Some(stack) = stack.filter(|stack| !stack.is_empty()) {
+        text.push('\n');
+        text.push_str(&stack);
+    }
+    let (line, column) = script_location(&text);
+    script_error(text, line, column)
+}
+
+fn object_string<'js>(ctx: &Ctx<'js>, object: &rquickjs::Object<'js>, key: &str) -> Option<String> {
+    let value = match object.get::<_, Value<'_>>(key) {
+        Ok(value) => value,
+        Err(_) => {
+            if ctx.has_exception() {
+                ctx.catch();
+            }
+            return None;
+        }
+    };
+    Coerced::<String>::from_js(ctx, value)
+        .ok()
+        .map(|text| text.0)
+}
+
+fn is_module_load_error(message: &str) -> bool {
+    message.contains(MODULE_LOAD_ERROR)
+}
+
+fn script_location(text: &str) -> (Option<usize>, Option<usize>) {
+    let marker = "plugin.mjs:";
+    let Some(marker_start) = text.find(marker) else {
+        return (None, None);
+    };
+    let location = &text[marker_start + marker.len()..];
+    let line_end = location
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(location.len());
+    let Ok(line) = location[..line_end].parse::<usize>() else {
+        return (None, None);
+    };
+    if location.as_bytes().get(line_end) != Some(&b':') {
+        return (Some(line), None);
+    }
+    let column_start = line_end + 1;
+    let column_end = location[column_start..]
+        .find(|character: char| !character.is_ascii_digit())
+        .map(|offset| column_start + offset)
+        .unwrap_or(location.len());
+    let column = location[column_start..column_end].parse::<usize>().ok();
+    (Some(line), column)
+}
+
+fn message_boundary(bytes: &[u8], boundary: usize) -> bool {
+    boundary == bytes.len() || std::str::from_utf8(&bytes[..boundary]).is_ok()
+}
+
+pub(super) fn take(failures: &FailuresRef) -> Option<PluginScriptError> {
+    failures.borrow_mut().script_error.take()
 }

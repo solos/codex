@@ -5,10 +5,14 @@ mod module_loader;
 mod timers;
 mod value;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 
@@ -18,11 +22,32 @@ use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::FunctionCallOutputContentItem;
 use codex_code_mode_protocol::normalize_code_mode_identifier;
 use codex_protocol::ToolName;
+use rquickjs::Context;
+use rquickjs::Ctx;
+use rquickjs::Function;
+use rquickjs::Runtime;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
+use self::timers::ScheduledTimeout;
 use crate::TaskFailureHandler;
-use crate::v8_init::ensure_v8_initialized;
+
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeTermination(Arc<AtomicBool>);
+
+impl RuntimeTermination {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn terminate(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn is_terminated(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum RuntimeCommand {
@@ -80,16 +105,15 @@ pub(crate) fn spawn_runtime(
     (
         std_mpsc::Sender<RuntimeCommand>,
         std_mpsc::Sender<RuntimeControlCommand>,
-        v8::IsolateHandle,
+        RuntimeTermination,
     ),
     String,
 > {
-    ensure_v8_initialized()?;
-
     let (command_tx, command_rx) = std_mpsc::channel();
     let (control_tx, control_rx) = std_mpsc::channel();
     let runtime_command_tx = command_tx.clone();
-    let (isolate_handle_tx, isolate_handle_rx) = std_mpsc::sync_channel(1);
+    let termination = RuntimeTermination::new();
+    let runtime_termination = termination.clone();
     let enabled_tools = request
         .enabled_tools
         .into_iter()
@@ -106,25 +130,29 @@ pub(crate) fn spawn_runtime(
         source: request.source,
         stored_values,
     };
+    let (startup_tx, startup_rx) = std_mpsc::sync_channel(1);
 
     let runtime_handle = tokio::runtime::Handle::current();
     spawn_supervised_runtime_thread(event_tx.clone(), task_failure_handler, move || {
         let _runtime_guard = runtime_handle.enter();
         run_runtime(
             config,
-            event_tx,
-            command_rx,
-            control_rx,
+            RuntimeChannels {
+                event_tx,
+                command_rx,
+                control_rx,
+                runtime_command_tx,
+                startup_tx,
+            },
             pending_mode,
-            isolate_handle_tx,
-            runtime_command_tx,
+            runtime_termination,
         );
     });
 
-    let isolate_handle = isolate_handle_rx
+    startup_rx
         .recv()
-        .map_err(|_| "failed to initialize code mode runtime".to_string())?;
-    Ok((command_tx, control_tx, isolate_handle))
+        .map_err(|_| "failed to initialize code mode runtime".to_string())??;
+    Ok((command_tx, control_tx, termination))
 }
 
 fn spawn_supervised_runtime_thread(
@@ -135,7 +163,7 @@ fn spawn_supervised_runtime_thread(
     thread::spawn(move || {
         if catch_unwind(AssertUnwindSafe(runtime)).is_err() {
             if let Some(task_failure_handler) = task_failure_handler {
-                task_failure_handler("code-mode V8 runtime thread panicked".to_string());
+                task_failure_handler("code-mode QuickJS runtime thread panicked".to_string());
             }
             let _ = event_tx.send(RuntimeEvent::ThreadPanicked);
         }
@@ -150,16 +178,29 @@ struct RuntimeConfig {
     stored_values: HashMap<String, Arc<JsonValue>>,
 }
 
+struct RuntimeChannels {
+    event_tx: mpsc::UnboundedSender<RuntimeEvent>,
+    command_rx: std_mpsc::Receiver<RuntimeCommand>,
+    control_rx: std_mpsc::Receiver<RuntimeControlCommand>,
+    runtime_command_tx: std_mpsc::Sender<RuntimeCommand>,
+    startup_tx: std_mpsc::SyncSender<Result<(), String>>,
+}
+
 // Callback indices refer to this cell's original catalog for its entire lifetime.
 struct ToolCallbackMetadata {
     tool_name: ToolName,
     kind: CodeModeToolKind,
 }
 
-pub(super) struct RuntimeState {
+pub(super) struct PendingToolCall<'js> {
+    resolve: Function<'js>,
+    reject: Function<'js>,
+}
+
+pub(super) struct RuntimeState<'js> {
     event_tx: mpsc::UnboundedSender<RuntimeEvent>,
-    pending_tool_calls: HashMap<String, v8::Global<v8::PromiseResolver>>,
-    pending_timeouts: HashMap<u64, timers::ScheduledTimeout>,
+    pending_tool_calls: HashMap<String, PendingToolCall<'js>>,
+    pending_timeouts: HashMap<u64, ScheduledTimeout<'js>>,
     stored_values: HashMap<String, Arc<JsonValue>>,
     stored_value_writes: HashMap<String, Arc<JsonValue>>,
     enabled_tools: Vec<ToolCallbackMetadata>,
@@ -167,7 +208,19 @@ pub(super) struct RuntimeState {
     next_timeout_id: u64,
     tool_call_id: String,
     runtime_command_tx: std_mpsc::Sender<RuntimeCommand>,
+    termination: RuntimeTermination,
     exit_requested: bool,
+}
+
+struct RuntimeStateCleanup<'js>(Rc<RefCell<RuntimeState<'js>>>);
+
+impl Drop for RuntimeStateCleanup<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.try_borrow_mut() {
+            state.pending_tool_calls.clear();
+            state.pending_timeouts.clear();
+        }
+    }
 }
 
 pub(super) enum CompletionState {
@@ -177,30 +230,53 @@ pub(super) enum CompletionState {
 
 fn run_runtime(
     config: RuntimeConfig,
-    event_tx: mpsc::UnboundedSender<RuntimeEvent>,
-    command_rx: std_mpsc::Receiver<RuntimeCommand>,
-    control_rx: std_mpsc::Receiver<RuntimeControlCommand>,
+    channels: RuntimeChannels,
     pending_mode: PendingRuntimeMode,
-    isolate_handle_tx: std_mpsc::SyncSender<v8::IsolateHandle>,
-    runtime_command_tx: std_mpsc::Sender<RuntimeCommand>,
+    termination: RuntimeTermination,
 ) {
-    let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-    let isolate_handle = isolate.thread_safe_handle();
-    if isolate_handle_tx.send(isolate_handle).is_err() {
-        return;
-    }
-    isolate.set_host_import_module_dynamically_callback(module_loader::dynamic_import_callback);
+    let runtime = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = channels.startup_tx.send(Err(format!(
+                "failed to initialize QuickJS runtime: {error}"
+            )));
+            return;
+        }
+    };
+    let interrupt_termination = termination.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        interrupt_termination.is_terminated()
+    })));
+    let context = match Context::full(&runtime) {
+        Ok(context) => context,
+        Err(error) => {
+            let _ = channels.startup_tx.send(Err(format!(
+                "failed to initialize QuickJS context: {error}"
+            )));
+            return;
+        }
+    };
 
-    v8::scope!(let scope, isolate);
-    let context = v8::Context::new(scope, Default::default());
-    let scope = &mut v8::ContextScope::new(scope, context);
+    context.with(|ctx| {
+        run_context(ctx, config, channels, pending_mode, termination);
+    });
+}
 
-    if let Err(error_text) = globals::install_globals(scope, &config.enabled_tools) {
-        send_result(&event_tx, HashMap::new(), Some(error_text));
-        return;
-    }
-
-    scope.set_slot(RuntimeState {
+fn run_context<'js>(
+    ctx: Ctx<'js>,
+    config: RuntimeConfig,
+    channels: RuntimeChannels,
+    pending_mode: PendingRuntimeMode,
+    termination: RuntimeTermination,
+) {
+    let RuntimeChannels {
+        event_tx,
+        command_rx,
+        control_rx,
+        runtime_command_tx,
+        startup_tx,
+    } = channels;
+    let state = Rc::new(RefCell::new(RuntimeState {
         event_tx: event_tx.clone(),
         pending_tool_calls: HashMap::new(),
         pending_timeouts: HashMap::new(),
@@ -208,9 +284,9 @@ fn run_runtime(
         stored_value_writes: HashMap::new(),
         enabled_tools: config
             .enabled_tools
-            .into_iter()
+            .iter()
             .map(|tool| ToolCallbackMetadata {
-                tool_name: tool.tool_name,
+                tool_name: tool.tool_name.clone(),
                 kind: tool.kind,
             })
             .collect(),
@@ -218,74 +294,84 @@ fn run_runtime(
         next_timeout_id: 1,
         tool_call_id: config.tool_call_id,
         runtime_command_tx,
+        termination: termination.clone(),
         exit_requested: false,
-    });
+    }));
+    let _state_cleanup = RuntimeStateCleanup(Rc::clone(&state));
 
+    if let Err(error_text) =
+        globals::install_globals(&ctx, &config.enabled_tools, Rc::clone(&state))
+    {
+        let _ = startup_tx.send(Ok(()));
+        send_scope_result(&state, Some(error_text));
+        return;
+    }
+    let _ = startup_tx.send(Ok(()));
     let _ = event_tx.send(RuntimeEvent::Started);
 
-    let pending_promise = match module_loader::evaluate_main_module(scope, &config.source) {
+    let pending_promise = match module_loader::evaluate_main_module(&ctx, &config.source) {
         Ok(pending_promise) => pending_promise,
         Err(error_text) => {
-            send_scope_result(scope, &event_tx, Some(error_text));
+            send_scope_result(&state, Some(error_text));
             return;
         }
     };
 
-    match module_loader::completion_state(scope, pending_promise.as_ref()) {
-        CompletionState::Completed { error_text } => {
-            send_scope_result(scope, &event_tx, error_text);
+    loop {
+        drain_jobs(&ctx);
+        if termination.is_terminated() {
+            let error_text = (!state.borrow().exit_requested)
+                .then(|| "JavaScript execution terminated".to_string());
+            send_scope_result(&state, error_text);
             return;
         }
-        CompletionState::Pending => {}
-    }
-
-    let mut pending_promise = pending_promise;
-    while let Some(command) =
-        next_runtime_command(&event_tx, &command_rx, &control_rx, pending_mode)
-    {
-        match command {
-            RuntimeCommand::Terminate => break,
-            RuntimeCommand::ToolResponse { id, result } => {
-                if let Err(error_text) =
-                    module_loader::resolve_tool_response(scope, &id, Ok(result))
-                {
-                    send_scope_result(scope, &event_tx, Some(error_text));
-                    return;
-                }
-            }
-            RuntimeCommand::ToolError { id, error_text } => {
-                if let Err(runtime_error) =
-                    module_loader::resolve_tool_response(scope, &id, Err(error_text))
-                {
-                    send_scope_result(scope, &event_tx, Some(runtime_error));
-                    return;
-                }
-            }
-            RuntimeCommand::TimeoutFired { id } => {
-                if let Err(runtime_error) = timers::invoke_timeout_callback(scope, id) {
-                    send_scope_result(scope, &event_tx, Some(runtime_error));
-                    return;
-                }
-            }
-            RuntimeCommand::ObservePendingFrontier => {}
-        }
-
-        scope.perform_microtask_checkpoint();
-        match module_loader::completion_state(scope, pending_promise.as_ref()) {
+        match module_loader::completion_state(&ctx, &pending_promise, &termination) {
             CompletionState::Completed { error_text } => {
-                send_scope_result(scope, &event_tx, error_text);
+                send_scope_result(&state, error_text);
                 return;
             }
             CompletionState::Pending => {}
         }
 
-        if let Some(promise) = pending_promise.as_ref() {
-            let promise = v8::Local::new(scope, promise);
-            if promise.state() != v8::PromiseState::Pending {
-                pending_promise = None;
+        let Some(command) = next_runtime_command(&event_tx, &command_rx, &control_rx, pending_mode)
+        else {
+            return;
+        };
+        match command {
+            RuntimeCommand::Terminate => {
+                termination.terminate();
+                send_scope_result(&state, Some("JavaScript execution terminated".to_string()));
+                return;
             }
+            RuntimeCommand::ToolResponse { id, result } => {
+                if let Err(error_text) =
+                    module_loader::resolve_tool_response(&ctx, &id, Ok(result), &state)
+                {
+                    send_scope_result(&state, Some(error_text));
+                    return;
+                }
+            }
+            RuntimeCommand::ToolError { id, error_text } => {
+                if let Err(runtime_error) =
+                    module_loader::resolve_tool_response(&ctx, &id, Err(error_text), &state)
+                {
+                    send_scope_result(&state, Some(runtime_error));
+                    return;
+                }
+            }
+            RuntimeCommand::TimeoutFired { id } => {
+                if let Err(runtime_error) = timers::invoke_timeout_callback(&ctx, id, &state) {
+                    send_scope_result(&state, Some(runtime_error));
+                    return;
+                }
+            }
+            RuntimeCommand::ObservePendingFrontier => {}
         }
     }
+}
+
+fn drain_jobs(ctx: &Ctx<'_>) {
+    while ctx.execute_pending_job() {}
 }
 
 fn next_runtime_command(
@@ -314,19 +400,11 @@ fn next_runtime_command(
     }
 }
 
-fn send_scope_result(
-    scope: &mut v8::PinScope<'_, '_>,
-    event_tx: &mpsc::UnboundedSender<RuntimeEvent>,
-    error_text: Option<String>,
-) {
-    // Error rendering can itself run JS getters, including exit(). Capture
-    // the result only after every call into the exiting isolate has returned.
-    let state = scope.get_slot::<RuntimeState>();
-    let stored_value_writes = state
-        .map(|state| state.stored_value_writes.clone())
-        .unwrap_or_default();
-    let error_text = error_text.filter(|_| !state.is_some_and(|state| state.exit_requested));
-    send_result(event_tx, stored_value_writes, error_text);
+fn send_scope_result(state: &Rc<RefCell<RuntimeState<'_>>>, error_text: Option<String>) {
+    let state = state.borrow();
+    let stored_value_writes = state.stored_value_writes.clone();
+    let error_text = error_text.filter(|_| !state.exit_requested);
+    send_result(&state.event_tx, stored_value_writes, error_text);
 }
 
 fn send_result(
@@ -367,19 +445,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn linked_v8_has_sandbox_enabled() {
-        unsafe extern "C" {
-            fn v8__V8__IsSandboxEnabled() -> bool;
-        }
-
-        // `rusty_v8` exposes this symbol for verifying linked sandbox support.
-        assert!(
-            unsafe { v8__V8__IsSandboxEnabled() },
-            "code mode must link against sandbox-enabled V8"
-        );
-    }
-
     #[tokio::test]
     async fn runtime_thread_panic_before_initialization_is_reported_directly() {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -398,7 +463,7 @@ mod tests {
                 .await
                 .expect("runtime failure timeout")
                 .expect("runtime failure"),
-            "code-mode V8 runtime thread panicked"
+            "code-mode QuickJS runtime thread panicked"
         );
     }
 
@@ -421,9 +486,8 @@ mod tests {
 
     #[tokio::test]
     async fn terminate_execution_stops_javascript() {
-        for source in [
+        for (source_index, source) in [
             r#"notify("started"); while (true) {}"#,
-            // The failed first read enters JSON fallback, whose TryCatch must preserve termination.
             r#"
 let reads = 0;
 const value = {
@@ -436,7 +500,10 @@ const value = {
 try { image(value); } catch {}
 text("continued after cancellation");
 "#,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let (event_tx, mut event_rx) = mpsc::unbounded_channel();
             let (_runtime_tx, _runtime_control_tx, runtime_terminate_handle) = spawn_runtime(
                 HashMap::new(),
@@ -452,15 +519,16 @@ text("continued after cancellation");
                 .unwrap()
                 .unwrap();
             assert!(matches!(started_event, RuntimeEvent::Started));
-
-            // Started precedes evaluation; the notification proves the workload is running.
-            assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-                    .await
-                    .unwrap(),
-                Some(RuntimeEvent::Notify { .. })
-            ));
-            assert!(runtime_terminate_handle.terminate_execution());
+            assert!(
+                matches!(
+                    tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+                        .await
+                        .unwrap(),
+                    Some(RuntimeEvent::Notify { .. })
+                ),
+                "source {source_index} did not emit its notification"
+            );
+            assert!(runtime_terminate_handle.terminate());
 
             let result_event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
                 .await

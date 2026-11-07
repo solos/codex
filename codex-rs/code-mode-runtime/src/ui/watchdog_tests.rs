@@ -5,13 +5,11 @@ use std::sync::mpsc;
 
 #[test]
 fn disarm_waits_for_an_interrupt_in_progress() {
-    crate::v8_init::ensure_v8_initialized().unwrap();
-    let isolate = v8::Isolate::new(Default::default());
     let watchdog = IsolateExecutionWatchdog {
         observer: Observer(Arc::new((Mutex::new(Execution::default()), Condvar::new()))),
         thread: None,
     };
-    watchdog.arm(/*instance*/ 1, isolate.thread_safe_handle());
+    watchdog.arm(/*instance*/ 1, RuntimeTermination::new());
     let (lock, _) = &*watchdog.observer.0;
     let mut interrupt = lock.lock().unwrap();
     std::thread::scope(|scope| {

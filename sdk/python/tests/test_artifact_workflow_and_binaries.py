@@ -170,7 +170,7 @@ def test_root_format_driver_covers_all_formatter_groups(
                 b"codex-rs/new file.rs\0codex-rs/deleted.rs\0"
             )
         assert args == git_ls_files_args
-        return b"MODULE.bazel\0README.md\0third_party/v8/libcxx.BUILD.bazel\0"
+        return b"MODULE.bazel\0README.md\0third_party/voice/BUILD.bazel\0"
 
     monkeypatch.setattr(script, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(script.subprocess, "check_output", fake_check_output)
@@ -267,7 +267,7 @@ def test_root_format_driver_covers_all_formatter_groups(
     assert format_buildifier_args[4:] == check_buildifier_args[4:]
     assert format_buildifier_args[4:] == (
         "MODULE.bazel",
-        "third_party/v8/libcxx.BUILD.bazel",
+        "third_party/voice/BUILD.bazel",
     )
     assert [group.commands[-1].args[-3:] for group in formatters[3:]] == [
         ("ruff", "format", "sdk/python"),

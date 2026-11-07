@@ -1,40 +1,47 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
+use rquickjs::Coerced;
+use rquickjs::Ctx;
+use rquickjs::FromJs;
+use rquickjs::Function;
+use rquickjs::Result as JsResult;
+use rquickjs::Value;
 use tokio_util::task::AbortOnDropHandle;
 
 use super::RuntimeCommand;
 use super::RuntimeState;
-use super::value::value_to_error_text;
+use super::value::exception_text;
+use super::value::throw_type_error;
 
-pub(super) struct ScheduledTimeout {
-    callback: v8::Global<v8::Function>,
-    // Clearing the timeout or dropping the isolate also cancels its sleep.
+pub(super) struct ScheduledTimeout<'js> {
+    callback: Function<'js>,
+    // Clearing the timeout or dropping the runtime also cancels its sleep.
     _task: AbortOnDropHandle<()>,
 }
 
-pub(super) fn schedule_timeout(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-) -> Result<Option<u64>, String> {
-    let callback = args.get(0);
-    if !callback.is_function() {
-        return Err("setTimeout expects a function callback".to_string());
-    }
-    let callback = v8::Local::<v8::Function>::try_from(callback)
-        .map_err(|_| "setTimeout expects a function callback".to_string())?;
+pub(super) fn schedule_timeout<'js>(
+    ctx: &Ctx<'js>,
+    args: Vec<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Option<u64>> {
+    let Some(callback) = args.first().and_then(Value::as_function).cloned() else {
+        return Err(throw_type_error(
+            ctx,
+            "setTimeout expects a function callback",
+        ));
+    };
 
-    let delay_ms = args
-        .get(1)
-        .number_value(scope)
-        .map(normalize_delay_ms)
-        .unwrap_or(0);
+    let delay_ms = match args.get(1) {
+        Some(value) => {
+            Coerced::<f64>::from_js(ctx, value.clone()).map(|value| normalize_delay_ms(value.0))?
+        }
+        None => 0,
+    };
 
-    let callback = v8::Global::new(scope, callback);
-    let state = scope
-        .get_slot_mut::<RuntimeState>()
-        .ok_or_else(|| "runtime state unavailable".to_string())?;
-    // Converting the delay can execute JavaScript that calls exit().
-    if state.exit_requested {
+    let mut state = state.borrow_mut();
+    if state.termination.is_terminated() {
         return Ok(None);
     }
     let timeout_id = state.next_timeout_id;
@@ -52,71 +59,48 @@ pub(super) fn schedule_timeout(
             _task: AbortOnDropHandle::new(task),
         },
     );
-
     Ok(Some(timeout_id))
 }
 
-pub(super) fn clear_timeout(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-) -> Result<(), String> {
-    let Some(timeout_id) = timeout_id_from_args(scope, args)? else {
+pub(super) fn clear_timeout<'js>(
+    ctx: &Ctx<'js>,
+    args: Vec<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<()> {
+    let Some(value) = args.first() else {
         return Ok(());
     };
-
-    let Some(state) = scope.get_slot_mut::<RuntimeState>() else {
-        return Err("runtime state unavailable".to_string());
-    };
-    if !state.exit_requested {
+    if value.is_null() || value.is_undefined() {
+        return Ok(());
+    }
+    let timeout_id = Coerced::<f64>::from_js(ctx, value.clone())?.0;
+    if !timeout_id.is_finite() || timeout_id <= 0.0 {
+        return Ok(());
+    }
+    let timeout_id = timeout_id.trunc().min(u64::MAX as f64) as u64;
+    let mut state = state.borrow_mut();
+    if !state.termination.is_terminated() {
         state.pending_timeouts.remove(&timeout_id);
     }
     Ok(())
 }
 
-pub(super) fn invoke_timeout_callback(
-    scope: &mut v8::PinScope<'_, '_>,
+pub(super) fn invoke_timeout_callback<'js>(
+    ctx: &Ctx<'js>,
     timeout_id: u64,
+    state: &Rc<RefCell<RuntimeState<'js>>>,
 ) -> Result<(), String> {
     let callback = {
-        let state = scope
-            .get_slot_mut::<RuntimeState>()
-            .ok_or_else(|| "runtime state unavailable".to_string())?;
+        let mut state = state.borrow_mut();
         state.pending_timeouts.remove(&timeout_id)
     };
     let Some(callback) = callback else {
         return Ok(());
     };
-
-    let tc = std::pin::pin!(v8::TryCatch::new(scope));
-    let mut tc = tc.init();
-    let callback = v8::Local::new(&tc, &callback.callback);
-    let receiver = v8::undefined(&tc).into();
-    let _ = callback.call(&tc, receiver, &[]);
-    if tc.has_caught() {
-        return Err(tc
-            .exception()
-            .map(|exception| value_to_error_text(&mut tc, exception))
-            .unwrap_or_else(|| "unknown code mode exception".to_string()));
-    }
-
-    Ok(())
-}
-fn timeout_id_from_args(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-) -> Result<Option<u64>, String> {
-    if args.length() == 0 || args.get(0).is_null_or_undefined() {
-        return Ok(None);
-    }
-
-    let Some(timeout_id) = args.get(0).number_value(scope) else {
-        return Err("clearTimeout expects a numeric timeout id".to_string());
-    };
-    if !timeout_id.is_finite() || timeout_id <= 0.0 {
-        return Ok(None);
-    }
-
-    Ok(Some(timeout_id.trunc().min(u64::MAX as f64) as u64))
+    callback
+        .callback
+        .call::<_, ()>(())
+        .map_err(|error| exception_text(ctx, error))
 }
 
 fn normalize_delay_ms(delay_ms: f64) -> u64 {

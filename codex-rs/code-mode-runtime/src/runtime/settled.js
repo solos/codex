@@ -1,4 +1,4 @@
-// Runtime-owned promise combinators; all state stays in the cell's V8 heap.
+// Runtime-owned promise combinators; all state stays in the cell's QuickJS heap.
 // Observe each input once and queue settlements while the consumer is busy.
 // Repeated races can lose that order and attach extra reactions to pending inputs.
 (() => {

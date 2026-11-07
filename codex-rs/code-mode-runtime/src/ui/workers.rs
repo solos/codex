@@ -1,5 +1,5 @@
 //! Dedicated stdin, stdout, JS execution and watchdog threads. Queue admission is
-//! per instance, and cancellation bypasses queued JS turns; V8 manages its own workers.
+//! per instance, and cancellation bypasses queued JS turns.
 
 use std::collections::HashMap;
 use std::io;

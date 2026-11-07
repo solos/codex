@@ -274,9 +274,9 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_msvc_host_platform -eq 1 ]]; the
 
   if [[ $has_host_platform_override -eq 0 ]]; then
     # Use the MSVC Windows platform for jobs that need helper binaries like
-    # Rust test wrappers and V8 generators to resolve a compatible toolchain.
-    # Callers that need a different Windows target platform should pass an
-    # explicit `--platforms=...` flag.
+    # Rust test wrappers to resolve a compatible toolchain. Callers that need a
+    # different Windows target platform should pass an explicit
+    # `--platforms=...` flag.
     post_config_bazel_args+=("--host_platform=//:local_windows_msvc")
   fi
 fi
@@ -290,8 +290,8 @@ fi
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -n "${BUILDBUDDY_API_KEY:-}" ]]; then
   # `--enable_platform_specific_config` expands `common:windows` on Windows
   # hosts after ordinary rc configs, which can override `ci-windows-cross`'s
-  # RBE host platform. Repeat the host platform on the command line so V8 and
-  # other genrules execute on Linux RBE workers instead of Git Bash locally.
+  # RBE host platform. Repeat the host platform on the command line so genrules
+  # execute on Linux RBE workers instead of Git Bash locally.
   #
   # Bazel also derives the default genrule shell from the client host. Without
   # an explicit shell executable, remote Linux actions can be asked to run

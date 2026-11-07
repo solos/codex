@@ -8,7 +8,6 @@ use serde_json::json;
 
 #[test]
 fn missing_engine_fails_only_its_instance() {
-    crate::v8_init::ensure_v8_initialized().unwrap();
     let peer = Arc::new(Instance::new(/*id*/ 1));
     let missing = Arc::new(Instance::new(/*id*/ 2));
     let dispatch = || HostMessage::Dispatch {

@@ -292,12 +292,6 @@ jobs:
         shell: bash
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
-      - name: Configure rusty_v8 artifact overrides and verify checksums
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-          release-repository: ${{ vars.RUSTY_V8_RELEASE_REPOSITORY }}
-
       - name: Install cargo-chef
         if: ${{ matrix.profile == 'release' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49

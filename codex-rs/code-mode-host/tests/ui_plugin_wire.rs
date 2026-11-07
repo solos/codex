@@ -300,6 +300,16 @@ async fn loading_restrictions_close_the_isolate() -> anyhow::Result<()> {
                 "EvalError",
             ),
             (
+                "(function () {}).constructor('return 1')();",
+                "execution_failed",
+                "EvalError",
+            ),
+            (
+                "(async function () {}).constructor('return 1');",
+                "execution_failed",
+                "EvalError",
+            ),
+            (
                 "WebAssembly;",
                 "execution_failed",
                 "WebAssembly is not defined",

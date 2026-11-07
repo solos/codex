@@ -1,367 +1,316 @@
-use codex_code_mode_protocol::FunctionCallOutputContentItem;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
+use codex_code_mode_protocol::FunctionCallOutputContentItem;
+use rquickjs::Ctx;
+use rquickjs::Result as JsResult;
+use rquickjs::Value;
+use rquickjs::function::Rest;
+
+use super::PendingToolCall;
 use super::RuntimeEvent;
 use super::RuntimeState;
 use super::timers;
-use super::value::json_to_v8;
+use super::value::js_value_to_json;
+use super::value::json_to_js;
 use super::value::normalize_output_audio;
 use super::value::normalize_output_image;
 use super::value::serialize_output_text;
 use super::value::throw_type_error;
-use super::value::v8_value_to_json;
+use super::value::throw_uncatchable;
 
-pub(super) fn tool_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let tool_index = match args.data().to_rust_string_lossy(scope).parse::<usize>() {
-        Ok(tool_index) => tool_index,
-        Err(_) => {
-            throw_type_error(scope, "invalid tool callback data");
-            return;
+pub(super) fn tool_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+    tool_index: usize,
+) -> JsResult<Value<'js>> {
+    let input = match args.0.first() {
+        Some(value) => {
+            let termination = state.borrow().termination.clone();
+            js_value_to_json(&ctx, value.clone(), &termination)
+                .map_err(|message| throw_type_error(&ctx, &message))?
         }
-    };
-    let input = if args.length() == 0 {
-        Ok(None)
-    } else {
-        v8_value_to_json(scope, args.get(0))
-    };
-    let input = match input {
-        Ok(input) => input,
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
+        None => None,
     };
 
     let (tool_name, tool_kind) = {
-        let Some(state) = scope.get_slot::<RuntimeState>() else {
-            throw_type_error(scope, "runtime state unavailable");
-            return;
-        };
-        // Input serialization can call exit() from a getter or toJSON.
-        if state.exit_requested {
-            return;
-        }
-        let Some(tool) = state.enabled_tools.get(tool_index) else {
-            throw_type_error(scope, "tool callback data is out of range");
-            return;
-        };
+        let state = state.borrow();
+        let tool = state
+            .enabled_tools
+            .get(tool_index)
+            .ok_or_else(|| throw_type_error(&ctx, "tool callback data is out of range"))?;
         (tool.tool_name.clone(), tool.kind)
     };
 
-    let Some(resolver) = v8::PromiseResolver::new(scope) else {
-        throw_type_error(scope, "failed to create tool promise");
-        return;
+    let (promise, resolve, reject) = ctx.promise()?;
+    let id = {
+        let mut state = state.borrow_mut();
+        let id = format!("tool-{}", state.next_tool_call_id);
+        state.next_tool_call_id = state.next_tool_call_id.saturating_add(1);
+        state
+            .pending_tool_calls
+            .insert(id.clone(), PendingToolCall { resolve, reject });
+        let _ = state.event_tx.send(RuntimeEvent::ToolCall {
+            id: id.clone(),
+            name: tool_name,
+            kind: tool_kind,
+            input,
+        });
+        id
     };
-    let promise = resolver.get_promise(scope);
-    let resolver = v8::Global::new(scope, resolver);
-
-    let Some(state) = scope.get_slot_mut::<RuntimeState>() else {
-        throw_type_error(scope, "runtime state unavailable");
-        return;
-    };
-    let id = format!("tool-{}", state.next_tool_call_id);
-    state.next_tool_call_id = state.next_tool_call_id.saturating_add(1);
-    let event_tx = state.event_tx.clone();
-    state.pending_tool_calls.insert(id.clone(), resolver);
-    let _ = event_tx.send(RuntimeEvent::ToolCall {
-        id,
-        name: tool_name,
-        kind: tool_kind,
-        input,
-    });
-    retval.set(promise.into());
+    let _ = id;
+    Ok(promise.into_value())
 }
 
-pub(super) fn text_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let value = if args.length() == 0 {
-        v8::undefined(scope).into()
-    } else {
-        args.get(0)
-    };
-    let text = match serialize_output_text(scope, value) {
-        Ok(text) => text,
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
-    };
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
+pub(super) fn text_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let value = args
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let text = serialize_output_text(&ctx, value)?;
+    let state = state.borrow();
+    if !state.termination.is_terminated() {
         let _ = state.event_tx.send(RuntimeEvent::ContentItem(
             FunctionCallOutputContentItem::InputText { text },
         ));
     }
-    retval.set(v8::undefined(scope).into());
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-pub(super) fn audio_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let value = if args.length() == 0 {
-        v8::undefined(scope).into()
-    } else {
-        args.get(0)
-    };
-    let audio_item = match normalize_output_audio(scope, value) {
-        Ok(audio_item) => audio_item,
-        Err(()) => return,
-    };
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
-        let _ = state.event_tx.send(RuntimeEvent::ContentItem(audio_item));
-    }
-    retval.set(v8::undefined(scope).into());
-}
-
-pub(super) fn image_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let value = if args.length() == 0 {
-        v8::undefined(scope).into()
-    } else {
-        args.get(0)
-    };
-    let detail_override = if args.length() < 2 {
-        None
-    } else {
-        let detail = args.get(1);
-        if detail.is_string() {
-            Some(detail.to_rust_string_lossy(scope))
-        } else if detail.is_null() || detail.is_undefined() {
-            None
-        } else {
-            throw_type_error(scope, "image detail must be a string when provided");
-            return;
-        }
-    };
-    let image_item = match normalize_output_image(scope, value, detail_override) {
-        Ok(image_item) => image_item,
-        Err(()) => return,
-    };
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
-        let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
-    }
-    retval.set(v8::undefined(scope).into());
-}
-
-pub(super) fn generated_image_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let value = if args.length() == 0 {
-        v8::undefined(scope).into()
-    } else {
-        args.get(0)
-    };
-    let output_hint = match generated_image_output_hint(scope, value) {
-        Ok(output_hint) => output_hint,
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
-    };
-    let image_item = match normalize_output_image(scope, value, /*detail_override*/ None) {
-        Ok(image_item) => image_item,
-        Err(()) => return,
-    };
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
-        let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
-        if let Some(text) = output_hint {
-            let _ = state.event_tx.send(RuntimeEvent::ContentItem(
-                FunctionCallOutputContentItem::InputText { text },
-            ));
+pub(super) fn audio_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let value = args
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let termination = state.borrow().termination.clone();
+    if let Some(audio_item) = normalize_output_audio(&ctx, value, &termination)? {
+        let state = state.borrow();
+        if !state.termination.is_terminated() {
+            let _ = state.event_tx.send(RuntimeEvent::ContentItem(audio_item));
         }
     }
-    retval.set(v8::undefined(scope).into());
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-fn generated_image_output_hint(
-    scope: &mut v8::PinScope<'_, '_>,
-    value: v8::Local<'_, v8::Value>,
-) -> Result<Option<String>, String> {
-    let object = v8::Local::<v8::Object>::try_from(value)
-        .map_err(|_| "generatedImage expects an image generation result object".to_string())?;
-    let key = v8::String::new(scope, "output_hint")
-        .ok_or_else(|| "failed to allocate generatedImage helper keys".to_string())?;
-    let output_hint = object
-        .get(scope, key.into())
-        .ok_or_else(|| "failed to read generatedImage output_hint".to_string())?;
+pub(super) fn image_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let mut args = args.0.into_iter();
+    let value = args
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let detail_override =
+        match args.next() {
+            Some(detail) if detail.is_string() => Some(detail.get::<String>().map_err(|_| {
+                throw_type_error(&ctx, "image detail must be a string when provided")
+            })?),
+            Some(detail) if detail.is_null() || detail.is_undefined() => None,
+            Some(_) => {
+                return Err(throw_type_error(
+                    &ctx,
+                    "image detail must be a string when provided",
+                ));
+            }
+            None => None,
+        };
+    let termination = state.borrow().termination.clone();
+    if let Some(image_item) = normalize_output_image(&ctx, value, detail_override, &termination)? {
+        let state = state.borrow();
+        if !state.termination.is_terminated() {
+            let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
+        }
+    }
+    Ok(Value::new_undefined(ctx.clone()))
+}
+
+pub(super) fn generated_image_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let value = args
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let output_hint = generated_image_output_hint(&ctx, value.clone())?;
+    let termination = state.borrow().termination.clone();
+    if let Some(image_item) =
+        normalize_output_image(&ctx, value, /*detail_override*/ None, &termination)?
+    {
+        let state = state.borrow();
+        if !state.termination.is_terminated() {
+            let _ = state.event_tx.send(RuntimeEvent::ContentItem(image_item));
+            if let Some(text) = output_hint {
+                let _ = state.event_tx.send(RuntimeEvent::ContentItem(
+                    FunctionCallOutputContentItem::InputText { text },
+                ));
+            }
+        }
+    }
+    Ok(Value::new_undefined(ctx.clone()))
+}
+
+fn generated_image_output_hint(ctx: &Ctx<'_>, value: Value<'_>) -> JsResult<Option<String>> {
+    let Some(object) = value.as_object().cloned() else {
+        return Err(throw_type_error(
+            ctx,
+            "generatedImage expects an image generation result object",
+        ));
+    };
+    let output_hint: Value<'_> = object.get("output_hint")?;
     if output_hint.is_undefined() {
         return Ok(None);
     }
     if !output_hint.is_string() {
-        return Err("generatedImage output_hint must be a string when provided".to_string());
+        return Err(throw_type_error(
+            ctx,
+            "generatedImage output_hint must be a string when provided",
+        ));
     }
-    Ok(Some(output_hint.to_rust_string_lossy(scope)))
+    output_hint
+        .get::<String>()
+        .map(Some)
+        .map_err(|_| throw_type_error(ctx, "generatedImage output_hint must be a string"))
 }
 
-pub(super) fn store_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    _retval: v8::ReturnValue<v8::Value>,
-) {
-    let key = match args.get(0).to_string(scope) {
-        Some(key) => key.to_rust_string_lossy(scope),
-        None => {
-            throw_type_error(scope, "store key must be a string");
-            return;
-        }
+pub(super) fn store_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let mut args = args.0.into_iter();
+    let Some(key) = args.next() else {
+        return Err(throw_type_error(&ctx, "store key must be a string"));
     };
-    let value = args.get(1);
-    let serialized = match v8_value_to_json(scope, value) {
+    let key = key
+        .get::<rquickjs::Coerced<String>>()
+        .map_err(|_| throw_type_error(&ctx, "store key must be a string"))?
+        .0;
+    let value = args
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let termination = state.borrow().termination.clone();
+    let serialized = match js_value_to_json(&ctx, value, &termination) {
         Ok(Some(value)) => value,
         Ok(None) => {
-            throw_type_error(
-                scope,
+            return Err(throw_type_error(
+                &ctx,
                 &format!("Unable to store {key:?}. Only plain serializable objects can be stored."),
-            );
-            return;
+            ));
         }
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
+        Err(message) => return Err(throw_type_error(&ctx, &message)),
     };
-    if let Some(state) = scope.get_slot_mut::<RuntimeState>()
-        && !state.exit_requested
-    {
+    let mut state = state.borrow_mut();
+    if !state.termination.is_terminated() {
         let serialized = Arc::new(serialized);
         state
             .stored_values
             .insert(key.clone(), Arc::clone(&serialized));
         state.stored_value_writes.insert(key, serialized);
     }
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-pub(super) fn load_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let key = match args.get(0).to_string(scope) {
-        Some(key) => key.to_rust_string_lossy(scope),
-        None => {
-            throw_type_error(scope, "load key must be a string");
-            return;
-        }
+pub(super) fn load_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let Some(key) = args.0.first() else {
+        return Err(throw_type_error(&ctx, "load key must be a string"));
     };
-    let value = scope
-        .get_slot::<RuntimeState>()
-        .and_then(|state| state.stored_values.get(&key))
-        .cloned();
+    let key = key
+        .get::<rquickjs::Coerced<String>>()
+        .map_err(|_| throw_type_error(&ctx, "load key must be a string"))?
+        .0;
+    let value = state.borrow().stored_values.get(&key).cloned();
     let Some(value) = value else {
-        retval.set(v8::undefined(scope).into());
-        return;
+        return Ok(Value::new_undefined(ctx.clone()));
     };
-    let Some(value) = json_to_v8(scope, &value) else {
-        throw_type_error(scope, "failed to load stored value");
-        return;
-    };
-    retval.set(value);
+    json_to_js(&ctx, &value)
 }
 
-pub(super) fn notify_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let value = if args.length() == 0 {
-        v8::undefined(scope).into()
-    } else {
-        args.get(0)
-    };
-    let text = match serialize_output_text(scope, value) {
-        Ok(text) => text,
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
-    };
+pub(super) fn notify_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let value = args
+        .0
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    let text = serialize_output_text(&ctx, value)?;
     if text.trim().is_empty() {
-        throw_type_error(scope, "notify expects non-empty text");
-        return;
+        return Err(throw_type_error(&ctx, "notify expects non-empty text"));
     }
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
+    let state = state.borrow();
+    if !state.termination.is_terminated() {
         let _ = state.event_tx.send(RuntimeEvent::Notify {
             call_id: state.tool_call_id.clone(),
             text,
         });
     }
-    retval.set(v8::undefined(scope).into());
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-pub(super) fn set_timeout_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    let timeout_id = match timers::schedule_timeout(scope, args) {
-        Ok(Some(timeout_id)) => timeout_id,
-        Ok(None) => return,
-        Err(error_text) => {
-            throw_type_error(scope, &error_text);
-            return;
-        }
-    };
-
-    retval.set(v8::Number::new(scope, timeout_id as f64).into());
+pub(super) fn set_timeout_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let timeout_id = timers::schedule_timeout(&ctx, args.0, state)?;
+    Ok(Value::new_number(
+        ctx.clone(),
+        timeout_id.unwrap_or_default() as f64,
+    ))
 }
 
-pub(super) fn clear_timeout_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut retval: v8::ReturnValue<v8::Value>,
-) {
-    if let Err(error_text) = timers::clear_timeout(scope, args) {
-        throw_type_error(scope, &error_text);
-        return;
-    }
-
-    retval.set(v8::undefined(scope).into());
+pub(super) fn clear_timeout_callback<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    timers::clear_timeout(&ctx, args.0, state)?;
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-pub(super) fn yield_control_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    _args: v8::FunctionCallbackArguments,
-    _retval: v8::ReturnValue<v8::Value>,
-) {
-    if let Some(state) = scope.get_slot::<RuntimeState>()
-        && !state.exit_requested
-    {
+pub(super) fn yield_control_callback<'js>(
+    ctx: Ctx<'js>,
+    _args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let state = state.borrow();
+    if !state.termination.is_terminated() {
         let _ = state.event_tx.send(RuntimeEvent::YieldRequested);
     }
+    Ok(Value::new_undefined(ctx.clone()))
 }
 
-pub(super) fn exit_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    _args: v8::FunctionCallbackArguments,
-    _retval: v8::ReturnValue<v8::Value>,
-) {
-    if let Some(state) = scope.get_slot_mut::<RuntimeState>() {
-        state.exit_requested = true;
-    }
-    scope.terminate_execution();
+pub(super) fn exit_callback<'js>(
+    ctx: Ctx<'js>,
+    _args: Rest<Value<'js>>,
+    state: Rc<RefCell<RuntimeState<'js>>>,
+) -> JsResult<Value<'js>> {
+    let mut state = state.borrow_mut();
+    state.exit_requested = true;
+    state.termination.terminate();
+    Err(throw_uncatchable(&ctx, "JavaScript execution terminated"))
 }
 
 #[cfg(test)]

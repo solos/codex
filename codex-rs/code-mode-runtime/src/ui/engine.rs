@@ -4,275 +4,295 @@ use std::collections::HashMap;
 use std::io;
 
 use codex_plugin_host::protocol::*;
+use rquickjs::Context;
+use rquickjs::Ctx;
+use rquickjs::Error as JsError;
+use rquickjs::Module;
+use rquickjs::Object;
+use rquickjs::Persistent;
+use rquickjs::Promise;
+use rquickjs::Runtime;
+use rquickjs::Value;
+use rquickjs::promise::PromiseState;
 
 use super::failures;
 use super::transport::Transport;
+use crate::runtime::RuntimeTermination;
 
 pub(super) struct Engine {
-    context: v8::Global<v8::Context>,
-    namespace: Option<v8::Global<v8::Object>>,
-    pending_promises: HashMap<u64, v8::Global<v8::Promise>>,
+    context: Context,
+    namespace: Option<Persistent<Object<'static>>>,
+    pending_promises: HashMap<u64, Persistent<Promise<'static>>>,
     pub(super) transport: Transport,
-    entered: bool,
-    isolate: v8::OwnedIsolate,
+    failures: failures::FailuresRef,
+    termination: RuntimeTermination,
+    _runtime: Runtime,
 }
 
 impl Engine {
-    /// Construct an isolate; user code runs only in watchdog-protected turns.
+    /// Construct a QuickJS runtime; user code runs only in watchdog-protected turns.
     pub(super) fn new(transport: Transport) -> io::Result<Self> {
-        // V8 heap exhaustion is fatal to the shared helper; the parent survives and can restart it.
-        let mut isolate =
-            v8::Isolate::new(v8::CreateParams::default().heap_limits(0, 64 * 1024 * 1024));
-        isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
-        failures::install(&mut isolate);
-        // V8 rejects dynamic imports when no host loader is installed.
-        isolate.set_allow_wasm_code_generation_callback(reject_wasm);
-        let context = {
-            v8::scope!(let scope, &mut isolate);
-            let context = v8::Context::new(scope, Default::default());
-            context.set_allow_generation_from_strings(false);
-            let scope = &mut v8::ContextScope::new(scope, context);
-            let global = context.global(scope);
-            // Binary buffers are omitted until the sandbox-enabled allocator supports quotas.
-            for name in [
-                "console",
-                "ArrayBuffer",
-                "SharedArrayBuffer",
-                "Atomics",
-                "WebAssembly",
-                "DataView",
-                "Int8Array",
-                "Uint8Array",
-                "Uint8ClampedArray",
-                "Int16Array",
-                "Uint16Array",
-                "Int32Array",
-                "Uint32Array",
-                "Float16Array",
-                "Float32Array",
-                "Float64Array",
-                "BigInt64Array",
-                "BigUint64Array",
-            ] {
-                let key = v8::String::new(scope, name)
-                    .ok_or_else(|| io::Error::other("V8 allocation failed"))?;
-                if global.delete(scope, key.into()) != Some(true) {
-                    return Err(io::Error::other("failed to restrict UI globals"));
-                }
-            }
-            v8::Global::new(scope, context)
-        };
-        let mut runtime = Self {
-            entered: true,
-            transport,
-            isolate,
+        let runtime = Runtime::new().map_err(io::Error::other)?;
+        runtime.set_memory_limit(64 * 1024 * 1024);
+        let termination = RuntimeTermination::new();
+        let interrupt_termination = termination.clone();
+        runtime.set_interrupt_handler(Some(Box::new(move || {
+            interrupt_termination.is_terminated()
+        })));
+        let failures = failures::install(&runtime);
+        let context = Context::full(&runtime).map_err(io::Error::other)?;
+        context.with(|ctx| restrict_globals(&ctx))?;
+        Ok(Self {
             context,
             namespace: None,
             pending_promises: HashMap::new(),
-        };
-        // SAFETY: no handle scopes remain; the executor enters only the isolate being polled.
-        unsafe {
-            runtime.isolate.exit();
-        }
-        runtime.entered = false;
-        Ok(runtime)
+            transport,
+            failures,
+            termination,
+            _runtime: runtime,
+        })
     }
 
-    pub(super) fn handle(&self) -> v8::IsolateHandle {
-        self.isolate.thread_safe_handle()
+    pub(super) fn handle(&self) -> RuntimeTermination {
+        self.termination.clone()
     }
 
     pub(super) fn turn(
         &mut self,
         message: HostMessage,
     ) -> Result<Vec<RuntimeMessage>, RuntimeMessage> {
-        // SAFETY: all isolates stay on this executor; no scopes survive a turn.
-        unsafe {
-            self.isolate.enter();
-        }
-        self.entered = true;
-        let result = match message {
+        let context = self.context.clone();
+        let result = context.with(|ctx| match message {
             HostMessage::Initialize { source } => self
-                .load(&source)
+                .load(&ctx, &source)
                 .map(|()| vec![RuntimeMessage::Initialized]),
             HostMessage::Dispatch {
                 id,
                 export,
                 return_mode,
-            } => self.dispatch(id, &export, return_mode),
+            } => self.dispatch(&ctx, id, &export, return_mode),
             HostMessage::Close => Err(ErrorCode::InvalidProgram),
-        };
-        let script_error = failures::take(&mut self.isolate);
-        // SAFETY: load/dispatch have released all scopes before yielding the executor.
-        unsafe {
-            self.isolate.exit();
-        }
-        self.entered = false;
+        });
+        let script_error = failures::take(&self.failures);
         result.map_err(|code| RuntimeMessage::Error { code, script_error })
     }
 
-    pub(super) fn load(&mut self, source: &str) -> Result<(), ErrorCode> {
+    fn load(&mut self, ctx: &Ctx<'_>, source: &str) -> Result<(), ErrorCode> {
         if self.namespace.is_some() || source.len() > MAX_SOURCE {
             return Err(ErrorCode::InvalidProgram);
         }
-        v8::scope!(let scope, &mut self.isolate);
-        let context = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, context);
-        let tc = std::pin::pin!(v8::TryCatch::new(scope));
-        let mut tc = tc.init();
-        let result = (|| {
-            let source = v8::String::new(&tc, source).ok_or(ErrorCode::QuotaExceeded)?;
-            let name = v8::String::new(&tc, "plugin.mjs").ok_or(ErrorCode::QuotaExceeded)?;
-            let origin = v8::ScriptOrigin::new(
-                &tc,
-                name.into(),
-                /*resource_line_offset*/ 0,
-                /*resource_column_offset*/ 0,
-                /*resource_is_shared_cross_origin*/ false,
-                /*script_id*/ 0,
-                /*source_map_url*/ None,
-                /*resource_is_opaque*/ false,
-                /*is_wasm*/ false,
-                /*is_module*/ true,
-                /*host_defined_options*/ None,
-            );
-            let mut source = v8::script_compiler::Source::new(source, Some(&origin));
-            let module = v8::script_compiler::compile_module(&tc, &mut source)
-                .ok_or(ErrorCode::InvalidProgram)?;
-            // Reject imports before V8 invokes its platform-specific resolver callback.
-            if module.get_module_requests().length() != 0 {
-                let text = v8::String::new(&tc, "module imports are unavailable")
-                    .ok_or(ErrorCode::QuotaExceeded)?;
-                let error = v8::Exception::type_error(&tc, text);
-                let message = v8::Exception::create_message(&tc, error);
-                failures::record(&mut tc, Some(message));
-                return Err(ErrorCode::InvalidProgram);
+        let module = match Module::declare(ctx.clone(), "plugin.mjs", source.to_string()) {
+            Ok(module) => module,
+            Err(error) => return Err(record_static_module_error(ctx, &self.failures, error)),
+        };
+        let (module, evaluation) = match module.eval() {
+            Ok(evaluation) => evaluation,
+            Err(error) => {
+                return Err(record_js_error(
+                    ctx,
+                    &self.failures,
+                    error,
+                    ErrorCode::ExecutionFailed,
+                ));
             }
-            module
-                .instantiate_module(&tc, |_, _, _, _| None)
-                .ok_or(ErrorCode::InvalidProgram)?;
-            let evaluation = module.evaluate(&tc).ok_or(ErrorCode::ExecutionFailed)?;
-            let evaluation = v8::Local::<v8::Promise>::try_from(evaluation)
-                .map_err(|_| ErrorCode::InvalidProgram)?;
-            failures::checkpoint(&mut tc)?;
-            if evaluation.state() != v8::PromiseState::Fulfilled {
-                return Err(ErrorCode::ExecutionFailed);
-            }
-            let namespace = v8::Local::<v8::Object>::try_from(module.get_module_namespace())
-                .map_err(|_| ErrorCode::InvalidProgram)?;
-            self.namespace = Some(v8::Global::new(&tc, namespace));
-            Ok(())
-        })();
-        if result.is_err() {
-            let message = tc.message();
-            failures::record(&mut tc, message);
+        };
+        failures::checkpoint(ctx, &self.failures)?;
+        if evaluation.state() != PromiseState::Resolved {
+            record_promise_rejection(ctx, &self.failures, evaluation);
+            return Err(ErrorCode::ExecutionFailed);
         }
-        result
+        let namespace = module.namespace().map_err(|error| {
+            record_js_error(ctx, &self.failures, error, ErrorCode::InvalidProgram)
+        })?;
+        self.namespace = Some(Persistent::save(ctx, namespace));
+        Ok(())
     }
 
     /// One JS turn; unresolved invocations yield back to the IPC dispatcher.
-    pub(super) fn dispatch(
+    fn dispatch(
         &mut self,
+        ctx: &Ctx<'_>,
         id: u64,
         export: &str,
         return_mode: ReturnMode,
     ) -> Result<Vec<RuntimeMessage>, ErrorCode> {
-        let namespace = self.namespace.as_ref().ok_or(ErrorCode::InvalidProgram)?;
-        v8::scope!(let scope, &mut self.isolate);
-        let context = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, context);
-        let tc = std::pin::pin!(v8::TryCatch::new(scope));
-        let mut tc = tc.init();
-        let result = (|| {
-            let mut replies = Vec::new();
-            if export.is_empty()
-                || export.len() > MAX_METHOD
-                || self.pending_promises.contains_key(&id)
-            {
+        if export.is_empty() || export.len() > MAX_METHOD || self.pending_promises.contains_key(&id)
+        {
+            return Err(ErrorCode::QuotaExceeded);
+        }
+        let namespace = self
+            .namespace
+            .as_ref()
+            .ok_or(ErrorCode::InvalidProgram)?
+            .clone()
+            .restore(ctx)
+            .map_err(|_| ErrorCode::InvalidProgram)?;
+        let function: Value<'_> = namespace.get(export).map_err(|error| {
+            record_js_error(ctx, &self.failures, error, ErrorCode::ExecutionFailed)
+        })?;
+        let function = function
+            .as_function()
+            .cloned()
+            .ok_or(ErrorCode::InvalidProgram)?;
+        let result: Value<'_> = function.call(()).map_err(|error| {
+            record_js_error(ctx, &self.failures, error, ErrorCode::ExecutionFailed)
+        })?;
+
+        let mut replies = Vec::new();
+        if return_mode == ReturnMode::MaybeAsync && result.is_promise() {
+            if self.pending_promises.len() >= MAX_PENDING_PROMISES {
                 return Err(ErrorCode::QuotaExceeded);
             }
-            let namespace = v8::Local::new(&tc, namespace);
-            let key = v8::String::new(&tc, export).ok_or(ErrorCode::QuotaExceeded)?;
-            let function = namespace
-                .get(&tc, key.into())
-                .ok_or(ErrorCode::InvalidProgram)?;
-            let function = v8::Local::<v8::Function>::try_from(function)
-                .map_err(|_| ErrorCode::InvalidProgram)?;
-            let receiver = v8::undefined(&tc).into();
-            let result = function
-                .call(&tc, receiver, &[])
-                .ok_or(ErrorCode::ExecutionFailed)?;
-            if return_mode == ReturnMode::MaybeAsync && result.is_promise() {
-                if self.pending_promises.len() >= MAX_PENDING_PROMISES {
-                    return Err(ErrorCode::QuotaExceeded);
-                }
-                let promise = v8::Local::<v8::Promise>::try_from(result)
-                    .map_err(|_| ErrorCode::InvalidResult)?;
-                self.pending_promises
-                    .insert(id, v8::Global::new(&tc, promise));
-            } else {
-                replies.push(RuntimeMessage::Reply {
-                    id,
-                    value: result_string(&mut tc, result)?,
-                });
-            }
-            failures::checkpoint(&mut tc)?;
-            let completed: Vec<_> = self
+            let promise = result
+                .as_promise()
+                .cloned()
+                .ok_or(ErrorCode::InvalidResult)?;
+            self.pending_promises
+                .insert(id, Persistent::save(ctx, promise));
+        } else {
+            replies.push(RuntimeMessage::Reply {
+                id,
+                value: result_string(result)?,
+            });
+        }
+
+        failures::checkpoint(ctx, &self.failures)?;
+        let completed: Vec<u64> = self
+            .pending_promises
+            .iter()
+            .filter_map(|(id, promise)| {
+                let promise = promise.clone().restore(ctx).ok()?;
+                (promise.state() != PromiseState::Pending).then_some(*id)
+            })
+            .collect();
+        for completed_id in completed {
+            let promise = self
                 .pending_promises
-                .extract_if(|_, promise| {
-                    v8::Local::new(&tc, &*promise).state() != v8::PromiseState::Pending
-                })
-                .collect();
-            for (id, promise) in completed {
-                let promise = v8::Local::new(&tc, promise);
-                if promise.state() != v8::PromiseState::Fulfilled {
-                    failures::record_rejection(&mut tc, promise);
-                    return Err(ErrorCode::ExecutionFailed);
-                }
-                let value = promise.result(&tc);
-                replies.push(RuntimeMessage::Reply {
-                    id,
-                    value: result_string(&mut tc, value)?,
+                .remove(&completed_id)
+                .ok_or(ErrorCode::InvalidProgram)?
+                .restore(ctx)
+                .map_err(|_| ErrorCode::InvalidProgram)?;
+            if promise.state() != PromiseState::Resolved {
+                record_promise_rejection(ctx, &self.failures, promise);
+                return Err(ErrorCode::ExecutionFailed);
+            }
+            let value = promise
+                .result::<Value<'_>>()
+                .ok_or(ErrorCode::InvalidResult)?
+                .map_err(|error| {
+                    record_js_error(ctx, &self.failures, error, ErrorCode::ExecutionFailed)
+                })?;
+            replies.push(RuntimeMessage::Reply {
+                id: completed_id,
+                value: result_string(value)?,
+            });
+        }
+        if self.pending_promises.contains_key(&id) {
+            replies.push(RuntimeMessage::Pending { id });
+        }
+        Ok(replies)
+    }
+}
+
+fn restrict_globals(ctx: &Ctx<'_>) -> io::Result<()> {
+    let global = ctx.globals();
+    for name in [
+        "console",
+        "eval",
+        "ArrayBuffer",
+        "SharedArrayBuffer",
+        "Atomics",
+        "WebAssembly",
+        "DataView",
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float16Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+    ] {
+        global
+            .remove(name)
+            .map_err(|_| io::Error::other("failed to restrict UI globals"))?;
+    }
+    ctx.eval::<(), _>(
+        r#"
+            const deny = () => {
+                throw new EvalError("code generation from strings is disallowed");
+            };
+            const intrinsicFunction = Function;
+            const denyConstructor = function Function() {
+                deny();
+            };
+            globalThis.eval = deny;
+            globalThis.Function = denyConstructor;
+            for (const prototype of [
+                intrinsicFunction.prototype,
+                Object.getPrototypeOf(async function () {}),
+                Object.getPrototypeOf(function* () {}),
+                Object.getPrototypeOf(async function* () {}),
+            ]) {
+                Object.defineProperty(prototype, "constructor", {
+                    value: denyConstructor,
+                    writable: false,
+                    configurable: false,
                 });
             }
-            if self.pending_promises.contains_key(&id) {
-                replies.push(RuntimeMessage::Pending { id });
-            }
-            Ok(replies)
-        })();
-        if result.is_err() {
-            let message = tc.message();
-            failures::record(&mut tc, message);
-        }
-        result
-    }
+        "#,
+    )
+    .map_err(io::Error::other)?;
+    Ok(())
 }
 
-impl Drop for Engine {
-    fn drop(&mut self) {
-        // SAFETY: the executor drops only exited engines. OwnedIsolate's destructor exits it.
-        if !self.entered {
-            unsafe {
-                self.isolate.enter();
-            }
-        }
+fn record_js_error(
+    ctx: &Ctx<'_>,
+    failures: &failures::FailuresRef,
+    error: JsError,
+    code: ErrorCode,
+) -> ErrorCode {
+    match error {
+        JsError::Exception => failures::record_caught(ctx, failures),
+        error => failures::record_text(failures, error.to_string()),
     }
+    code
 }
 
-fn result_string(
-    scope: &mut v8::PinScope<'_, '_>,
-    result: v8::Local<v8::Value>,
-) -> Result<String, ErrorCode> {
-    let value = v8::Local::<v8::String>::try_from(result).map_err(|_| ErrorCode::InvalidResult)?;
-    if value.length() > MAX_RESULT || value.utf8_length(scope) > MAX_RESULT {
+fn record_static_module_error(
+    ctx: &Ctx<'_>,
+    failures: &failures::FailuresRef,
+    error: JsError,
+) -> ErrorCode {
+    match error {
+        JsError::Exception => failures::record_caught_module_import(ctx, failures),
+        error => failures::record_text(failures, error.to_string()),
+    }
+    ErrorCode::InvalidProgram
+}
+
+fn record_promise_rejection<'js>(
+    ctx: &Ctx<'js>,
+    failures: &failures::FailuresRef,
+    promise: Promise<'js>,
+) {
+    let reason = match promise.result::<Value<'_>>() {
+        Some(Ok(value)) => value,
+        Some(Err(_)) => ctx.catch(),
+        None => Value::new_undefined(ctx.clone()),
+    };
+    failures::record_value(ctx, reason, failures);
+}
+
+fn result_string(result: Value<'_>) -> Result<String, ErrorCode> {
+    let value = result.as_string().ok_or(ErrorCode::InvalidResult)?;
+    let value = value.to_string().map_err(|_| ErrorCode::InvalidResult)?;
+    if value.len() > MAX_RESULT {
         return Err(ErrorCode::QuotaExceeded);
     }
-    Ok(value.to_rust_string_lossy(scope))
-}
-
-unsafe extern "C" fn reject_wasm(
-    _context: v8::Local<v8::Context>,
-    _source: v8::Local<v8::String>,
-) -> bool {
-    false
+    Ok(value)
 }

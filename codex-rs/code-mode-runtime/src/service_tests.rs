@@ -461,7 +461,7 @@ async fn tool_start_acknowledgement_reports_termination_before_invocation() {
 
 fn hold_virtual_time() -> oneshot::Sender<()> {
     // A live blocking task prevents Tokio's paused clock from auto-advancing while
-    // we await the V8 thread. Tests advance time explicitly; dropping the guard
+    // we await the QuickJS thread. Tests advance time explicitly; dropping the guard
     // releases the task even if the test panics or is cancelled.
     let (guard, released) = oneshot::channel();
     tokio::task::spawn_blocking(move || {
@@ -937,7 +937,7 @@ for (const segments of [2, 5]) {
         encoded = "[".repeat(80) + encoded + "]".repeat(80);
         if (i < segments - 1) encoded = JSON.stringify({[keys[0]]: encoded});
     }
-    // Exercise Serde's depth reset without first requiring a deep V8 object.
+    // Exercise Serde's depth reset without first requiring a deeply nested JS object.
     rejects({[keys[0]]: encoded}, /reserved JSON object key/);
 }
 let value = 0;
@@ -948,7 +948,7 @@ for (let depth = 1; depth <= 160; depth++) {
             store("boundary", value);
             if (JSON.stringify(load("boundary")) !== JSON.stringify(value)) throw "changed boundary";
         } catch (e) {
-            // V8 can reach its stack limit before Serde's depth limit on Windows.
+            // QuickJS can reach its stack limit before Serde's depth limit on Windows.
             if (!String(e).includes("Maximum call stack size exceeded")) throw e;
         }
     }
@@ -1393,8 +1393,8 @@ async fn global_scope_contains_only_allowed_items() {
     let globals = serde_json::from_str::<Vec<String>>(text)
         .expect("global scope inspection should return a JSON array");
     let expected = [
-        "AggregateError",
         "ALL_TOOLS",
+        "AggregateError",
         "Array",
         "ArrayBuffer",
         "AsyncDisposableStack",
@@ -1402,6 +1402,7 @@ async fn global_scope_contains_only_allowed_items() {
         "BigInt64Array",
         "BigUint64Array",
         "Boolean",
+        "DOMException",
         "clearTimeout",
         "DataView",
         "Date",
@@ -1417,7 +1418,7 @@ async fn global_scope_contains_only_allowed_items() {
         "Int16Array",
         "Int32Array",
         "Int8Array",
-        "Intl",
+        "InternalError",
         "Iterator",
         "JSON",
         "Map",
@@ -1436,7 +1437,6 @@ async fn global_scope_contains_only_allowed_items() {
         "SuppressedError",
         "Symbol",
         "SyntaxError",
-        "Temporal",
         "TypeError",
         "URIError",
         "Uint16Array",
@@ -1446,10 +1446,10 @@ async fn global_scope_contains_only_allowed_items() {
         "WeakMap",
         "WeakRef",
         "WeakSet",
-        "__codexContentItems",
-        "add_content",
         "as_settled",
+        "atob",
         "audio",
+        "btoa",
         "decodeURI",
         "decodeURIComponent",
         "encodeURI",
@@ -1466,6 +1466,8 @@ async fn global_scope_contains_only_allowed_items() {
         "notify",
         "parseFloat",
         "parseInt",
+        "performance",
+        "queueMicrotask",
         "setTimeout",
         "store",
         "stream_settled",
@@ -1481,10 +1483,12 @@ async fn global_scope_contains_only_allowed_items() {
             "unexpected global {global} in {globals:?}"
         );
     }
+    assert!(!globals.iter().any(|global| global == "Intl"));
+    assert!(!globals.iter().any(|global| global == "Temporal"));
 }
 
 #[tokio::test]
-async fn v8_console_is_not_exposed_on_global_this() {
+async fn console_is_not_exposed_on_global_this() {
     let service = InProcessCodeModeSession::new();
 
     let response = execute(
@@ -1504,89 +1508,6 @@ async fn v8_console_is_not_exposed_on_global_this() {
             cell_id: cell_id("1"),
             content_items: vec![FunctionCallOutputContentItem::InputText {
                 text: "false".to_string(),
-            }],
-            result_buffered_for: Duration::ZERO,
-            error_text: None,
-        }
-    );
-}
-
-#[tokio::test]
-async fn date_locale_string_formats_with_icu_data() {
-    let service = InProcessCodeModeSession::new();
-
-    let response = execute(
-        &service,
-        ExecuteRequest {
-            source: r#"
-const value = new Date("2025-01-02T03:04:05Z")
-  .toLocaleString("fr-FR", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-    timeZone: "UTC",
-  });
-text(value);
-"#
-            .to_string(),
-            yield_time_ms: None,
-            ..execute_request("")
-        },
-    )
-    .await;
-
-    assert_eq!(
-        response,
-        RuntimeResponse::Result {
-            code_mode_host_duration: None,
-            cell_id: cell_id("1"),
-            content_items: vec![FunctionCallOutputContentItem::InputText {
-                text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
-            }],
-            result_buffered_for: Duration::ZERO,
-            error_text: None,
-        }
-    );
-}
-
-#[tokio::test]
-async fn intl_date_time_format_formats_with_icu_data() {
-    let service = InProcessCodeModeSession::new();
-
-    let response = execute(
-        &service,
-        ExecuteRequest {
-            source: r#"
-const formatter = new Intl.DateTimeFormat("fr-FR", {
-  weekday: "long",
-  month: "long",
-  day: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-  timeZone: "UTC",
-});
-text(formatter.format(new Date("2025-01-02T03:04:05Z")));
-"#
-            .to_string(),
-            yield_time_ms: None,
-            ..execute_request("")
-        },
-    )
-    .await;
-
-    assert_eq!(
-        response,
-        RuntimeResponse::Result {
-            code_mode_host_duration: None,
-            cell_id: cell_id("1"),
-            content_items: vec![FunctionCallOutputContentItem::InputText {
-                text: "jeudi 2 janvier \u{e0} 03:04:05".to_string(),
             }],
             result_buffered_for: Duration::ZERO,
             error_text: None,

@@ -1,4 +1,4 @@
-//! Bounded IPC and lifetime management for the dedicated V8 plugin process.
+//! Bounded IPC and lifetime management for the dedicated plugin process.
 
 pub mod framing;
 mod process;

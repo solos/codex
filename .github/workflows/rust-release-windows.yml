@@ -92,13 +92,6 @@ jobs:
           target: ${{ matrix.target }}
           cache-scope: bazel-release-${{ matrix.bundle }}
 
-      - name: Configure rusty_v8 artifact overrides and verify checksums
-        if: matrix.build-system == 'cargo'
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-          release-repository: ${{ vars.RUSTY_V8_RELEASE_REPOSITORY }}
-
       - name: Configure MSVC environment
         uses: ./.github/actions/setup-msvc-env
         with:

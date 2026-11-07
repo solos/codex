@@ -223,13 +223,6 @@ jobs:
           target_no_jitter="${target_no_jitter//-/_}"
           echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
 
-      - name: Configure rusty_v8 artifact overrides and verify checksums
-        if: ${{ matrix.build-system == 'cargo' }}
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-          release-repository: ${{ vars.RUSTY_V8_RELEASE_REPOSITORY }}
-
       - if: ${{ matrix.build-system == 'cargo' && contains(matrix.target, 'linux') }}
         name: Build bwrap and export digest
         shell: bash

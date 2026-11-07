@@ -6,8 +6,6 @@ load("//bazel/rules/testing:foreign_platform_binary.bzl", "foreign_platform_bina
 load("//bazel/rules/testing/wine:wine_runtime.bzl", "WINE_TEST_TARGET_COMPATIBLE_WITH", "wine_test_runtime")
 
 # Reserve 8 MiB of stack on Windows and statically link the CRT on MSVC.
-# V8's x64 allocator shim defines malloc/free; importing them from dynamic UCRT
-# as well replaces the import thunks during linking.
 WINDOWS_GNULLVM_RUSTC_LINK_FLAGS = [
     "-C",
     "link-arg=-Wl,--stack,8388608",  # 8 MiB

@@ -181,7 +181,7 @@ async fn unexpected_runtime_thread_exit_is_reported_to_the_session_owner() {
             .await
             .expect("runtime failure timeout")
             .expect("runtime failure"),
-        "code-mode V8 runtime thread ended unexpectedly"
+        "code-mode QuickJS runtime thread ended unexpectedly"
     );
     assert!(
         harness

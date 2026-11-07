@@ -35,6 +35,7 @@ use crate::runtime::PendingRuntimeMode;
 use crate::runtime::RuntimeCommand;
 use crate::runtime::RuntimeControlCommand;
 use crate::runtime::RuntimeEvent;
+use crate::runtime::RuntimeTermination;
 use crate::runtime::spawn_runtime;
 use crate::session_runtime::CellEvent;
 use crate::session_runtime::CreateCellRequest as CellRequest;
@@ -97,7 +98,7 @@ impl CellActor {
 struct CellContext {
     runtime_tx: std::sync::mpsc::Sender<RuntimeCommand>,
     runtime_control_tx: std::sync::mpsc::Sender<RuntimeControlCommand>,
-    runtime_terminate_handle: v8::IsolateHandle,
+    runtime_terminate_handle: RuntimeTermination,
     cell_state: Arc<CellState>,
 }
 
@@ -302,7 +303,7 @@ async fn run_cell<H: CellHost>(
                     {
                         runtime_failure_reported = true;
                         task_failure_handler(
-                            "code-mode V8 runtime thread ended unexpectedly".to_string(),
+                            "code-mode QuickJS runtime thread ended unexpectedly".to_string(),
                         );
                     }
                     finish_callbacks(
@@ -618,13 +619,13 @@ fn resume_for_observation(
 fn begin_termination(
     runtime_tx: &std::sync::mpsc::Sender<RuntimeCommand>,
     runtime_control_tx: &std::sync::mpsc::Sender<RuntimeControlCommand>,
-    runtime_terminate_handle: &v8::IsolateHandle,
+    runtime_terminate_handle: &RuntimeTermination,
     cancellation_token: &CancellationToken,
 ) {
     cancellation_token.cancel();
     let _ = runtime_tx.send(RuntimeCommand::Terminate);
     let _ = runtime_control_tx.send(RuntimeControlCommand::Terminate);
-    let _ = runtime_terminate_handle.terminate_execution();
+    let _ = runtime_terminate_handle.terminate();
 }
 
 #[cfg(test)]
