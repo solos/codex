@@ -361,7 +361,7 @@
           "type": "boolean"
         },
         "model_async_compact_threshold_percent": {
-          "description": "Percentage of the model's full context window that starts background compaction. Defaults to 65; valid values are 1\u2013100, including when disabled.",
+          "description": "Percentage of the model's full context window that starts background compaction. Defaults to 65; valid values are 1–100, including when disabled.",
           "format": "uint8",
           "maximum": 100.0,
           "minimum": 1.0,
@@ -674,6 +674,42 @@
         }
       ]
     },
+    "CodeIndexConfigToml": {
+      "additionalProperties": false,
+      "description": "Local code-index retrieval settings injected before a turn starts.",
+      "properties": {
+        "debug": {
+          "description": "Log injected paths, line ranges, and scores.",
+          "type": "boolean"
+        },
+        "embedding": {
+          "description": "Enable vector retrieval when the host installed an embedding provider.",
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "index_path": {
+          "description": "Optional SQLite index database path. Relative paths resolve against the turn cwd.",
+          "type": "string"
+        },
+        "max_results": {
+          "description": "Maximum number of fused chunks requested from the index.",
+          "format": "uint",
+          "maximum": 50.0,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "token_budget": {
+          "description": "Approximate token budget for injected code matches.",
+          "format": "uint",
+          "maximum": 16000.0,
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "CodeModeConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -896,6 +932,9 @@
             },
             "cli_daybreak": {
               "type": "boolean"
+            },
+            "code_index": {
+              "$ref": "#/definitions/FeatureToml_for_CodeIndexConfigToml"
             },
             "code_mode": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
@@ -1189,9 +1228,6 @@
               "type": "boolean"
             },
             "plugin_hooks": {
-              "type": "boolean"
-            },
-            "plugin_sharing": {
               "type": "boolean"
             },
             "plugins": {
@@ -1736,6 +1772,16 @@
         },
         {
           "$ref": "#/definitions/AsyncCompactionConfigToml"
+        }
+      ]
+    },
+    "FeatureToml_for_CodeIndexConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/CodeIndexConfigToml"
         }
       ]
     },
@@ -3718,7 +3764,7 @@
               "$ref": "#/definitions/FeatureToggleToml"
             }
           ],
-          "description": "Legacy no-op setting retained for compatibility. Use `cloud.skills` to configure cloud skills."
+          "description": "Legacy no-op setting retained for compatibility."
         }
       },
       "type": "object"
@@ -7512,6 +7558,9 @@
         "cli_daybreak": {
           "type": "boolean"
         },
+        "code_index": {
+          "$ref": "#/definitions/FeatureToml_for_CodeIndexConfigToml"
+        },
         "code_mode": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
@@ -7804,9 +7853,6 @@
           "type": "boolean"
         },
         "plugin_hooks": {
-          "type": "boolean"
-        },
-        "plugin_sharing": {
           "type": "boolean"
         },
         "plugins": {
@@ -8260,7 +8306,7 @@
       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
     },
     "model_post_turn_compact_threshold_percent": {
-      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0\u2013100.",
+      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0–100.",
       "format": "uint8",
       "maximum": 100.0,
       "minimum": 0.0,

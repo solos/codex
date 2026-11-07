@@ -1,0 +1,15 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+codex_rust_crate(
+    name = "code-index",
+    compile_data = glob(["migrations/**"]) + [
+        "tests/fixtures/mini_repo/.codexignore",
+        "tests/fixtures/mini_repo/.gitignore",
+        "tests/fixtures/mini_repo/README.md",
+        "tests/fixtures/mini_repo/ignored/private.rs",
+        "tests/fixtures/mini_repo/scripts/task.py",
+        "tests/fixtures/mini_repo/src/lib.rs",
+        "tests/fixtures/mini_repo/src/widget.ts",
+    ],
+    crate_name = "codex_code_index",
+)

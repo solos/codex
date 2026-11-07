@@ -28,6 +28,7 @@ members = [
     "code-mode-host",
     "code-mode-protocol",
     "code-mode-runtime",
+    "code-index",
     "plugin-host",
     "codex-home",
     "cli",
@@ -58,6 +59,7 @@ members = [
     "execpolicy",
     "ext/agent",
     "ext/agent-message-board",
+    "ext/code-index",
     "ext/connectors",
     "ext/extension-api",
     "ext/multi-env-copy-file",
@@ -199,6 +201,8 @@ codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
 codex-code-mode = { path = "code-mode" }
 codex-code-mode-protocol = { path = "code-mode-protocol" }
 codex-code-mode-runtime = { path = "code-mode-runtime" }
+codex-code-index = { path = "code-index" }
+codex-code-index-extension = { path = "ext/code-index" }
 codex-plugin-host = { path = "plugin-host" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
@@ -537,6 +541,9 @@ tonic-prost = "0.14.3"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
 tree-sitter-powershell = "=0.26.4"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
 ts-rs = "11"
 tungstenite = { version = "0.27.0", features = ["deflate", "proxy"] }
 uds_windows = "1.1.0"

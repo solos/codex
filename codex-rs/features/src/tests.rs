@@ -200,6 +200,55 @@ fn code_mode_host_feature_config_preserves_boolean_toggle() {
 }
 
 #[test]
+fn code_index_feature_is_opt_in_and_deserializes_retrieval_settings() {
+    let features: FeaturesToml = toml::from_str(
+        r#"
+[code_index]
+enabled = true
+token_budget = 2400
+max_results = 12
+index_path = ".codex/index.sqlite"
+embedding = true
+debug = true
+"#,
+    )
+    .expect("code-index feature settings should deserialize");
+
+    assert_eq!(
+        features.code_index,
+        Some(FeatureToml::Config(crate::CodeIndexConfigToml {
+            enabled: Some(true),
+            token_budget: Some(2_400),
+            max_results: Some(12),
+            index_path: Some(std::path::PathBuf::from(".codex/index.sqlite")),
+            embedding: Some(true),
+            debug: Some(true),
+        }))
+    );
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("code_index".to_string(), true)])
+    );
+
+    let mut resolved = Features::with_defaults();
+    assert!(!resolved.enabled(Feature::CodeIndex));
+    resolved.apply_toml(&features);
+    assert!(resolved.enabled(Feature::CodeIndex));
+}
+
+#[test]
+fn code_index_feature_accepts_a_boolean_toggle() {
+    for (config, enabled) in [("code_index = true", true), ("code_index = false", false)] {
+        let features: FeaturesToml = toml::from_str(config).expect("boolean toggle");
+        assert_eq!(features.code_index, Some(FeatureToml::Enabled(enabled)));
+        assert_eq!(
+            features.entries(),
+            BTreeMap::from([("code_index".to_string(), enabled)])
+        );
+    }
+}
+
+#[test]
 fn guardian_v2_feature_config_preserves_boolean_toggle() {
     let features: FeaturesToml =
         toml::from_str("guardianv2 = true").expect("Guardian v2 boolean should deserialize");

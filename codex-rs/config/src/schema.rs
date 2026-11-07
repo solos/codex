@@ -59,6 +59,15 @@ pub fn features_schema(schema_gen: &mut SchemaGenerator) -> Schema {
             );
             continue;
         }
+        if feature.id == codex_features::Feature::CodeIndex {
+            validation.properties.insert(
+                feature.key.to_string(),
+                schema_gen.subschema_for::<codex_features::FeatureToml<
+                    codex_features::CodeIndexConfigToml,
+                >>(),
+            );
+            continue;
+        }
         if feature.id == codex_features::Feature::CodeModeHost {
             validation.properties.insert(
                 feature.key.to_string(),
@@ -307,7 +316,8 @@ pub fn config_schema_json() -> anyhow::Result<Vec<u8>> {
     let schema = config_schema();
     let value = serde_json::to_value(schema)?;
     let value = canonicalize(&value);
-    let json = serde_json::to_vec_pretty(&value)?;
+    let mut json = serde_json::to_vec_pretty(&value)?;
+    json.push(b'\n');
     Ok(json)
 }
 
@@ -316,4 +326,39 @@ pub fn write_config_schema(out_path: &Path) -> anyhow::Result<()> {
     let json = config_schema_json()?;
     std::fs::write(out_path, json)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_index_feature_schema_exposes_structured_settings() {
+        let schema =
+            serde_json::to_value(config_schema()).expect("serialize generated config schema");
+
+        assert_eq!(
+            schema
+                .pointer(
+                    "/definitions/ConfigProfile/properties/features/properties/code_index/$ref"
+                )
+                .and_then(Value::as_str),
+            Some("#/definitions/FeatureToml_for_CodeIndexConfigToml")
+        );
+        let properties = schema
+            .pointer("/definitions/CodeIndexConfigToml/properties")
+            .and_then(Value::as_object)
+            .expect("code-index feature properties");
+        assert_eq!(
+            properties.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "debug",
+                "embedding",
+                "enabled",
+                "index_path",
+                "max_results",
+                "token_budget",
+            ]
+        );
+    }
 }

@@ -18,6 +18,7 @@ mod feature_configs;
 mod legacy;
 mod runtime_auth;
 pub use feature_configs::AsyncCompactionConfigToml;
+pub use feature_configs::CodeIndexConfigToml;
 pub use feature_configs::CodeModeConfigToml;
 pub use feature_configs::CodeModeHostConfigToml;
 pub use feature_configs::ContextManagementConfigToml;
@@ -130,6 +131,8 @@ pub enum Feature {
     StableEnvironmentTools,
     /// Copy files between explicitly selected execution environments.
     MultiEnvCopyFile,
+    /// Inject a bounded set of locally indexed code matches before a turn starts.
+    CodeIndex,
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Render client-supplied untrusted context as standalone named tool outputs.
@@ -904,6 +907,8 @@ pub struct FeaturesToml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_mode: Option<FeatureToml<CodeModeConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_index: Option<FeatureToml<CodeIndexConfigToml>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_mode_host: Option<FeatureToml<CodeModeHostConfigToml>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_prefixed_mcp_tool_names: Option<FeatureToml<NonPrefixedMcpToolNamesConfigToml>>,
@@ -959,6 +964,9 @@ impl FeaturesToml {
         }
         if let Some(enabled) = self.code_mode.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::CodeMode.key().to_string(), enabled);
+        }
+        if let Some(enabled) = self.code_index.as_ref().and_then(FeatureToml::enabled) {
+            entries.insert(Feature::CodeIndex.key().to_string(), enabled);
         }
         if let Some(enabled) = self.code_mode_host.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::CodeModeHost.key().to_string(), enabled);
@@ -1114,6 +1122,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::MultiEnvCopyFile,
         key: "multi_env_copy_file",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeIndex,
+        key: "code_index",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

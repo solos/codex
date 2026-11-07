@@ -12,6 +12,10 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 notify = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

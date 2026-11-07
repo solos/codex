@@ -152,6 +152,9 @@ enum Subcommand {
     /// Manage Codex plugins.
     Plugin(PluginCli),
 
+    /// Manage the local code index.
+    Index(codex_code_index::IndexCommand),
+
     /// [experimental] Run the app server or related tooling.
     AppServer(AppServerCommand),
 
@@ -942,6 +945,10 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Subcommand::Index(index_cli)) => {
+            codex_code_index::run_with_codex_exe(index_cli, arg0_paths.codex_self_exe.as_deref())
+                .await?;
+        }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
                 startup_config,
@@ -1504,6 +1511,10 @@ async fn run_debug_prompt_input_command(
         config.chatgpt_base_url.clone(),
         config.http_client_factory(),
     );
+    codex_code_index_extension::install(
+        &mut extensions,
+        codex_code_index_extension::CodeIndexExtensionConfig::from_config,
+    );
     codex_skills_extension::install(&mut extensions, |config: &Config| {
         codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
@@ -1696,6 +1707,7 @@ fn unsupported_subcommand_name_for_strict_config(
         }
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
+        Some(Subcommand::Index(_)) => Some("index"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
         Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -73,6 +73,7 @@ use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
+use codex_features::FeatureToml;
 use codex_features::FeaturesToml;
 use codex_login::CodexAuth;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
@@ -704,6 +705,49 @@ disable_in_process_fallback = true
     assert!(config.code_mode.disable_in_process_fallback);
     assert!(config.features.enabled(Feature::CodeMode));
     assert!(config.features.enabled(Feature::CodeModeHost));
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_resolves_code_index_config() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[features.code_index]
+enabled = true
+token_budget = 2400
+max_results = 12
+index_path = ".codex/index.sqlite"
+embedding = true
+debug = true
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(config.features.enabled(Feature::CodeIndex));
+    let effective = deserialize_config_toml_with_base(
+        config.config_layer_stack.effective_config(),
+        codex_home.path(),
+    )?;
+    let Some(FeatureToml::Config(code_index)) =
+        effective.features.and_then(|features| features.code_index)
+    else {
+        panic!("expected structured code-index config");
+    };
+    assert_eq!(code_index.token_budget, Some(2_400));
+    assert_eq!(code_index.max_results, Some(12));
+    assert_eq!(
+        code_index.index_path,
+        Some(std::path::PathBuf::from(".codex/index.sqlite"))
+    );
+    assert_eq!(code_index.embedding, Some(true));
+    assert_eq!(code_index.debug, Some(true));
     Ok(())
 }
 

@@ -66,6 +66,37 @@ impl FeatureConfig for CodeModeConfigToml {
     }
 }
 
+/// Local code-index retrieval settings injected before a turn starts.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeIndexConfigToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Approximate token budget for injected code matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 16000))]
+    pub token_budget: Option<usize>,
+    /// Maximum number of fused chunks requested from the index.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 50))]
+    pub max_results: Option<usize>,
+    /// Optional SQLite index database path. Relative paths resolve against the turn cwd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_path: Option<std::path::PathBuf>,
+    /// Enable vector retrieval when the host installed an embedding provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<bool>,
+    /// Log injected paths, line ranges, and scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+}
+
+impl FeatureConfig for CodeIndexConfigToml {
+    fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodeModeHostConfigToml {
