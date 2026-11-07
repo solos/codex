@@ -135,9 +135,7 @@ define_keymap_actions! {
         edit_queued_message => "Move forward through questions, then edit the last queued message.",
         prompt_stack_back => "Move back through questions toward the composer.",
         skip_question => "Skip the focused question.",
-        toggle_voice => "Start or stop a voice conversation.",
         open_presets => "Run or save reusable inputs.",
-        toggle_voice_mute => "Mute or unmute the voice microphone.",
     }
     composer "Composer" {
         submit => "Submit the current composer draft.",

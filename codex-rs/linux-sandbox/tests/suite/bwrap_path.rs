@@ -13,7 +13,7 @@ use std::process::Command;
 
 #[test]
 fn child_workdir_does_not_probe_or_launch_writable_parent_bwrap() {
-    // Bazel can mount the default temp directory noexec.
+    // Some CI sandboxes mount the default temp directory noexec.
     let temp = tempfile::tempdir_in(std::env::current_dir().expect("current directory"))
         .or_else(|_| tempfile::tempdir())
         .expect("create fixture");

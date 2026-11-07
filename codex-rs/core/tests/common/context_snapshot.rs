@@ -356,8 +356,8 @@ pub fn format_context_snapshot(
     result
 }
 
-/// Sort standalone JSON object lines embedded in rendered context. Cargo and Bazel can enable
-/// different serde_json map ordering features, but the model-visible values are the same.
+/// Sort standalone JSON object lines embedded in rendered context. Feature sets can enable
+/// different serde_json map ordering behavior, but the model-visible values are the same.
 pub fn normalize_json_lines(snapshot: &str) -> String {
     snapshot
         .lines()

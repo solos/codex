@@ -219,7 +219,7 @@ fn legacy_desktop_reuses_only_equivalent_permissions() -> Result<()> {
 }
 
 fn current_account_name() -> Result<String> {
-    // Bazel does not provide USERDOMAIN or USERNAME in the test environment.
+    // The test environment may not provide USERDOMAIN or USERNAME.
     let mut account = [0; (DNLEN + UNLEN + 2) as usize];
     let mut length = account.len() as u32;
     if !unsafe { GetUserNameExW(NameSamCompatible, account.as_mut_ptr(), &mut length) } {

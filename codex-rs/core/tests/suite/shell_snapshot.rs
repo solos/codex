@@ -1113,8 +1113,7 @@ async fn unified_exec_snapshot_still_intercepts_apply_patch() -> Result<()> {
     let args = json!({
         "cmd": script,
         // Keep this above the default because intercepted apply_patch still
-        // performs filesystem work that can be slow in Bazel macOS test
-        // environments.
+        // performs filesystem work that can be slow in macOS CI environments.
         "yield_time_ms": 5_000,
     });
     let call_id = "shell-snapshot-apply-patch";

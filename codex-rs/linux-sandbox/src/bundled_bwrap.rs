@@ -1,6 +1,5 @@
 use std::ffi::CStr;
 use std::ffi::CString;
-use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -10,7 +9,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::bazel_bwrap;
 use crate::exec_util::argv_to_cstrings;
 use crate::exec_util::make_files_inheritable;
 use codex_install_context::InstallContext;
@@ -28,38 +26,23 @@ pub(crate) struct BundledBwrapLauncher {
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
     let current_exe = std::env::current_exe().ok()?;
-    find_program(
-        InstallContext::current(),
-        &current_exe,
-        Path::new("."),
-        |key| std::env::var_os(key),
-    )
-    .map(|program| BundledBwrapLauncher { program })
+    find_program(InstallContext::current(), &current_exe)
+        .map(|program| BundledBwrapLauncher { program })
 }
 
 /// Discover the bundled fallback for an explicit launcher and its environment.
-pub fn find_bundled_bwrap_for_exe(
-    exe: &Path,
-    command_cwd: &Path,
-    env: impl Fn(&str) -> Option<OsString>,
-) -> Option<AbsolutePathBuf> {
+pub fn find_bundled_bwrap_for_exe(exe: &Path) -> Option<AbsolutePathBuf> {
     let exe = std::fs::canonicalize(exe).ok()?;
     let context = InstallContext::from_exe(
         /*is_macos*/ false,
         Some(&exe),
         /*method_override*/ None,
     );
-    find_program(&context, &exe, command_cwd, env)
+    find_program(&context, &exe)
 }
 
-fn find_program(
-    context: &InstallContext,
-    exe: &Path,
-    cwd: &Path,
-    env: impl Fn(&str) -> Option<OsString>,
-) -> Option<AbsolutePathBuf> {
-    find_for_install_context(context)
-        .or_else(|| find_legacy_for_exe(exe, bazel_bwrap::candidate(cwd, env)))
+fn find_program(context: &InstallContext, exe: &Path) -> Option<AbsolutePathBuf> {
+    find_for_install_context(context).or_else(|| find_legacy_for_exe(exe))
 }
 
 impl BundledBwrapLauncher {
@@ -107,8 +90,8 @@ fn find_for_install_context(context: &InstallContext) -> Option<AbsolutePathBuf>
         .filter(|path| is_executable_file(path))
 }
 
-fn find_legacy_for_exe(exe: &Path, bazel_candidate: Option<PathBuf>) -> Option<AbsolutePathBuf> {
-    legacy_candidates_for_exe(exe, bazel_candidate)
+fn find_legacy_for_exe(exe: &Path) -> Option<AbsolutePathBuf> {
+    legacy_candidates_for_exe(exe)
         .into_iter()
         .find(|candidate| is_executable_file(candidate))
         .map(|path| {
@@ -121,7 +104,7 @@ fn find_legacy_for_exe(exe: &Path, bazel_candidate: Option<PathBuf>) -> Option<A
         })
 }
 
-fn legacy_candidates_for_exe(exe: &Path, bazel_candidate: Option<PathBuf>) -> Vec<PathBuf> {
+fn legacy_candidates_for_exe(exe: &Path) -> Vec<PathBuf> {
     let Some(exe_dir) = exe.parent() else {
         return Vec::new();
     };
@@ -132,9 +115,6 @@ fn legacy_candidates_for_exe(exe: &Path, bazel_candidate: Option<PathBuf>) -> Ve
         candidates.push(package_target_dir.join("codex-resources").join("bwrap"));
     }
     candidates.push(exe_dir.join("bwrap"));
-    if let Some(path) = bazel_candidate {
-        candidates.push(path);
-    }
     candidates
 }
 

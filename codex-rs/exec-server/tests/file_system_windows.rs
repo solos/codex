@@ -473,7 +473,7 @@ async fn file_system_elevated_relative_read_denial_uses_policy_cwd(
 ) -> Result<()> {
     let _account_guard = WindowsSandboxAccountTestGuard::acquire()?;
     // Both implementations re-enter this test binary; the elevated backend finds its helpers
-    // next to that binary, while Cargo and Bazel provide them separately.
+    // next to that binary, while the test fixture provides them separately.
     let test_exe = std::env::current_exe()?;
     let resources = test_exe
         .parent()

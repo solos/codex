@@ -180,7 +180,7 @@ async fn remote_board_uses_the_existing_tools_and_session_identity() -> anyhow::
         "remote_board_notification",
         serde_json::to_string_pretty(&notification)?
     );
-    // Normalize tool JSON key order across Cargo and Bazel feature sets.
+    // Normalize tool JSON key order across feature sets.
     let mut bodies = requests
         .iter()
         .map(responses::ResponsesRequest::body_json)

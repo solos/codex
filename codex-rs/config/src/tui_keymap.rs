@@ -173,10 +173,6 @@ pub struct TuiGlobalKeymap {
 pub struct TuiChatKeymap {
     /// Open saved prompts and slash commands.
     pub open_presets: Option<KeybindingsSpec>,
-    /// Start or stop a voice conversation.
-    pub toggle_voice: Option<KeybindingsSpec>,
-    /// Toggle the microphone in an active voice conversation.
-    pub toggle_voice_mute: Option<KeybindingsSpec>,
     /// Interrupt the active turn.
     pub interrupt_turn: Option<KeybindingsSpec>,
     /// Decrease the active reasoning effort.

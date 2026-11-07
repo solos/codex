@@ -526,7 +526,6 @@ impl ChatWidget {
             self.bottom_pane.clear_pending_questions();
         }
         self.dismiss_backend_banner_for_new_turn();
-        self.note_realtime_typed_input(&submitted_message.text);
         if render_in_history {
             self.input_queue.user_turn_pending_start = true;
             self.input_queue.pending_user_message_client_id = Some(client_user_message_id.clone());

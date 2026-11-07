@@ -490,9 +490,6 @@ impl App {
         chat_widget.fork_in_progress = self.chat_widget.fork_in_progress;
         self.pending_right_click_paste = None;
         self.config_notification_test_pending = None;
-        if !self.chat_widget.realtime_conversation_is_running() {
-            self.retain_realtime_replay_state_before_replace();
-        }
         self.commit_animation = None;
         // Transfer the last-written terminal title to the replacement widget
         // so it knows what OSC title is currently displayed. Without this, the
@@ -527,11 +524,7 @@ impl App {
         }
         chat_widget.restore_kill_buffer_snapshot(self.chat_widget.take_kill_buffer_snapshot());
         crate::markdown_render::preferences::init(chat_widget.local_settings.tui.rendering);
-        let mut previous = std::mem::replace(&mut self.chat_widget, chat_widget);
-        if previous.realtime_conversation_is_running() {
-            previous.park_voice();
-            self.background_voice = Some(Box::new(previous));
-        }
+        self.chat_widget = chat_widget;
         self.sync_active_agent_label();
     }
 
@@ -788,7 +781,6 @@ impl App {
     }
 
     pub(super) async fn reset_thread_event_state(&mut self) {
-        let voice_owner = self.voice_owner_thread_id();
         let mut previous_pending = std::mem::take(&mut self.pending_app_server_requests);
         // Move retained tasks' approvals to background routing before clearing request bookkeeping.
         for (thread_id, requests) in &mut self.agents_overview.dispatched_requests {
@@ -804,18 +796,8 @@ impl App {
                 }
             }
         }
-        if voice_owner.is_some() {
-            for (thread_id, channel) in &self.thread_event_channels {
-                if Some(*thread_id) != voice_owner && !self.side_threads.contains_key(thread_id) {
-                    for request in channel.store.lock().await.pending_replay_requests() {
-                        previous_pending.resolve_notification(&thread_id.to_string(), request.id());
-                    }
-                }
-            }
-        }
         self.thread_event_listener_tasks.retain(|id, task| {
-            if Some(*id) == voice_owner
-                || self.side_threads.contains_key(id)
+            if self.side_threads.contains_key(id)
                 || self.agents_overview.dispatched_requests.contains_key(id)
             {
                 true
@@ -825,10 +807,7 @@ impl App {
             }
         });
         self.thread_event_channels
-            .retain(|id, _| Some(*id) == voice_owner || self.side_threads.contains_key(id));
-        self.pending_realtime_speech_replay.clear();
-        self.pending_realtime_transcript_replay.clear();
-        self.realtime_replay_order.clear();
+            .retain(|id, _| self.side_threads.contains_key(id));
         self.pending_server_profiles.clear();
         self.agents_overview.activity.clear();
         self.agent_navigation.clear();
@@ -838,21 +817,17 @@ impl App {
         self.last_subagent_backfill_attempt = None;
         self.primary_session_configured = None;
         self.pending_primary_events.clear();
-        if voice_owner.is_none() {
-            let side_thread_ids: Vec<_> = self.side_threads.keys().copied().collect();
-            for thread_id in side_thread_ids {
-                if let Some(channel) = self.thread_event_channels.get(&thread_id) {
-                    for request in channel.store.lock().await.pending_replay_requests() {
-                        if let Some(request) = previous_pending.buffered_request(request) {
-                            let _ = self
-                                .pending_app_server_requests
-                                .note_buffered_request(&request);
-                        }
+        let side_thread_ids: Vec<_> = self.side_threads.keys().copied().collect();
+        for thread_id in side_thread_ids {
+            if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                for request in channel.store.lock().await.pending_replay_requests() {
+                    if let Some(request) = previous_pending.buffered_request(request) {
+                        let _ = self
+                            .pending_app_server_requests
+                            .note_buffered_request(&request);
                     }
                 }
             }
-        } else {
-            self.pending_app_server_requests = previous_pending;
         }
         self.pending_startup_thread_start = false;
         self.chat_widget.set_pending_thread_approvals(Vec::new());

@@ -210,7 +210,6 @@ fn restricted_input_preserves_blocked_drafts_and_attachments() {
             "/review",
             "/rename changed",
             "/compact",
-            "/voice",
             "/unknown",
             "/status extra",
             "/status\nkeep my draft",

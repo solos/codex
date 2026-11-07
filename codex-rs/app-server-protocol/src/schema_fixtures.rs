@@ -317,9 +317,8 @@ fn files_recursive(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
             let entry =
                 entry.with_context(|| format!("failed to read dir entry in {}", dir.display()))?;
             let path = entry.path();
-            // On some platforms, Bazel runfiles are symlinks. `DirEntry::file_type()` does not
-            // follow symlinks, so use `metadata()` here to treat symlinks as the files/dirs they
-            // point to.
+            // Fixture trees can contain symlinks. `DirEntry::file_type()` does not follow
+            // symlinks, so use `metadata()` to treat them as the files/directories they point to.
             let metadata = std::fs::metadata(&path)
                 .with_context(|| format!("failed to stat {}", path.display()))?;
             if metadata.is_dir() {

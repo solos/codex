@@ -361,9 +361,6 @@ pub(super) enum HistoryCapabilities {
     ConfigReadUnsupported(i64),
     ConfigReadFails,
     SuperBindingsUnsupported,
-    ConfigReadUnknownVoice,
-    VoiceCatalogCustom,
-    VoiceCatalogUnavailable,
 }
 
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
@@ -432,49 +429,23 @@ pub(super) async fn start_recording_app_server_with_history(
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
     loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
-    start_recording_app_server_with_realtime_speech(
+    start_recording_app_server_impl(
         config,
         history_capabilities,
         blocked_thread_list,
         failed_thread_name,
         thread_params_mode,
-        RealtimeRequestBehavior::Forward,
         loader_overrides,
     )
     .await
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum RealtimeRequestBehavior {
-    Forward,
-    AcceptStart,
-    AcceptSpeech,
-    AcceptSpeechAndStallStop,
-}
-
-pub(super) async fn start_recording_realtime_speech_app_server(
-    config: &Config,
-    realtime_behavior: RealtimeRequestBehavior,
-) -> Result<RecordingAppServer> {
-    start_recording_app_server_with_realtime_speech(
-        config,
-        HistoryCapabilities::Current,
-        /*blocked_thread_list*/ None,
-        /*failed_thread_name*/ None,
-        crate::app_server_session::ThreadParamsMode::Embedded,
-        realtime_behavior,
-        LoaderOverrides::default(),
-    )
-    .await
-}
-
-pub(super) async fn start_recording_app_server_with_realtime_speech(
+async fn start_recording_app_server_impl(
     config: &Config,
     history_capabilities: HistoryCapabilities,
     blocked_thread_list: Option<(ThreadId, oneshot::Sender<()>, oneshot::Receiver<()>)>,
     failed_thread_name: Option<&'static str>,
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
-    realtime_behavior: RealtimeRequestBehavior,
     loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
     let state_db =
@@ -589,17 +560,6 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         .and_then(|params| params.get("dynamicTools"))
                         .and_then(serde_json::Value::as_array)
                         .is_some_and(|tools| tools.iter().any(|tool| tool["type"] == "namespace"));
-                let fake_realtime_response = (realtime_behavior
-                    == RealtimeRequestBehavior::AcceptStart
-                    && request.method_name() == "thread/realtime/start")
-                    || (matches!(
-                        realtime_behavior,
-                        RealtimeRequestBehavior::AcceptSpeech
-                            | RealtimeRequestBehavior::AcceptSpeechAndStallStop
-                    ) && request.method_name() == "thread/realtime/appendSpeech");
-                if fake_realtime_response {
-                    return Some(Ok(Ok(serde_json::json!({}))));
-                }
                 if (matches!(
                     history_capabilities,
                     HistoryCapabilities::ItemsListFails
@@ -638,11 +598,6 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         "Invalid configuration: unknown key `super-left`",
                         None,
                     ));
-                }
-                if history_capabilities == HistoryCapabilities::VoiceCatalogUnavailable
-                    && request.method_name() == "thread/realtime/listVoices"
-                {
-                    return Some(make_error(-32601, "method not found", None));
                 }
                 if matches!(
                     history_capabilities,
@@ -724,19 +679,6 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
         after_request: {
             let inventories = Arc::clone(&inventories);
             Arc::new(move |request, result| {
-                if history_capabilities == HistoryCapabilities::ConfigReadUnknownVoice
-                    && matches!(request, ClientRequest::ConfigRead { .. })
-                    && let Ok(value) = result
-                {
-                    value["config"]["realtime"]["voice"] = serde_json::json!("future_voice");
-                }
-                if history_capabilities == HistoryCapabilities::VoiceCatalogCustom
-                    && matches!(request, ClientRequest::ThreadRealtimeListVoices { .. })
-                    && let Ok(value) = result
-                {
-                    value["voices"]["v1"] = serde_json::json!(["maple", "cove", "juniper"]);
-                    value["voices"]["defaultV1"] = serde_json::json!("maple");
-                }
                 if request.method_name() == "thread/backgroundTerminals/list" {
                     let inventory = inventories.fetch_add(1, Ordering::SeqCst) + 1;
                     if matches!(inventory, 2 | 4) {

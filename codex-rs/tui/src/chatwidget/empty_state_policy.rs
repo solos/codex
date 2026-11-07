@@ -12,13 +12,6 @@ impl ChatWidget {
             .active_cell
             .as_deref()
             .into_iter()
-            .chain(
-                self.realtime_conversation
-                    .pending_history_cells
-                    .iter()
-                    .chain(self.realtime_conversation.live_transcript_cells())
-                    .map(AsRef::as_ref),
-            )
             .all(is_startup_cell);
         if !startup_only
             || self.is_user_turn_pending_or_running()

@@ -185,7 +185,7 @@ text(JSON.stringify(results));"#;
             .rewrite_known_segments()
             .include_request_settings(),
     );
-    // The starting exec schema varies across Cargo and Bazel builds. The assertions above
+    // The starting exec schema varies across feature sets. The assertions above
     // still compare every real prefix byte; the formatter has already grouped the windows.
     let snapshot = regex_lite::Regex::new(
         r"(?m)(^00:additional_tools/developer \(\d+; hash=|^ +- namespace/functions; hash=)[0-9a-f]{16}",

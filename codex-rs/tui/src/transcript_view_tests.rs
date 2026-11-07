@@ -76,7 +76,7 @@ pub(super) fn text(buffer: &Buffer) -> String {
 #[test]
 fn consecutive_user_prompts_share_one_background_block() {
     use crate::history_cell::AgentMessageCell;
-    use crate::history_cell::new_spoken_user_prompt;
+    use crate::history_cell::new_user_prompt as make_user_prompt;
     use codex_protocol::user_input::TextElement;
 
     let cells: Vec<Arc<dyn HistoryCell>> = vec![
@@ -86,7 +86,12 @@ fn consecutive_user_prompts_share_one_background_block() {
             vec!["Assistant response".into()],
             /*is_first_line*/ true,
         )),
-        Arc::new(new_spoken_user_prompt(String::new())),
+        Arc::new(make_user_prompt(
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )),
         Arc::new(new_user_prompt(
             "   ".into(),
             vec![TextElement::new((0..3).into(), Some("   ".into()))],
@@ -1307,57 +1312,6 @@ fn user_prompt_has_a_background_without_a_terminal_palette() {
                 "user_prompt_has_a_background_without_a_terminal_palette",
                 format!("{buffer:?}")
             );
-        },
-    );
-}
-
-#[test]
-fn spoken_prompt_selection_keeps_its_fallback_contrast() {
-    use crate::history_cell::new_spoken_user_prompt;
-    use ratatui::style::Color;
-    use ratatui::style::Modifier;
-
-    crate::terminal_palette::with_test_default_colors(
-        /*colors*/ None::<crate::terminal_probe::DefaultColors>,
-        || {
-            let cells: Vec<Arc<dyn HistoryCell>> =
-                vec![Arc::new(new_spoken_user_prompt("one\nnext".into()))];
-            for detailed in [false, true] {
-                let mut view = TranscriptView {
-                    detailed,
-                    ..TranscriptView::default()
-                };
-                let before = render(&mut view, &cells, /*width*/ 20, /*height*/ 5);
-                let rendered = text(&before);
-                let first = rendered
-                    .lines()
-                    .position(|row| row.contains("› one"))
-                    .unwrap() as u16;
-                let second = rendered
-                    .lines()
-                    .position(|row| row.contains("next"))
-                    .unwrap() as u16;
-                view.begin_selection(&cells, /*column*/ 2, first, /*clicks*/ 1);
-                view.extend_selection(/*column*/ 2, second);
-                let selected = render(&mut view, &cells, /*width*/ 20, /*height*/ 5);
-                let newline = &selected[(5, first)];
-                assert_eq!(
-                    (
-                        view.selected_text(&cells).as_deref(),
-                        selected[(0, first)].fg,
-                        newline.fg,
-                        newline.bg,
-                        newline.modifier.contains(Modifier::REVERSED),
-                    ),
-                    (
-                        Some("one\n"),
-                        Color::Red,
-                        Color::Reset,
-                        Color::DarkGray,
-                        true
-                    )
-                );
-            }
         },
     );
 }

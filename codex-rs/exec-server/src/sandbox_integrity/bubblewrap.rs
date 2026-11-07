@@ -10,7 +10,6 @@ use codex_sandboxing::SandboxType;
 use codex_shell_command::shell_detect::get_user_home_path;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
-use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 
@@ -35,11 +34,8 @@ pub(super) fn critical_dependencies(
         .map_err(io::Error::other)?;
     let mut dependencies = codex_and_launcher_dependencies(request);
     if let Some(exe) = request.command.first()
-        && let Some(bwrap) = codex_linux_sandbox::find_bundled_bwrap_for_exe(
-            &command_cwd.as_path().join(exe),
-            command_cwd.as_path(),
-            |key| request.env.get(key).map(OsString::from),
-        )
+        && let Some(bwrap) =
+            codex_linux_sandbox::find_bundled_bwrap_for_exe(&command_cwd.as_path().join(exe))
     {
         dependencies.push(("bundled_bwrap_candidate", Ok(bwrap.into_path_buf())));
     }

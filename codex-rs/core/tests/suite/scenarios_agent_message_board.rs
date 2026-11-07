@@ -217,7 +217,7 @@ async fn board_post_and_reads_reach_model_context_without_self_notices(
             .iter()
             .all(|request| !request.body_contains_text("Message Type: CHANNEL_POST"))
     );
-    // Cargo and Bazel can enable different serde_json ordering features. Normalize only
+    // Feature sets can enable different serde_json ordering behavior. Normalize only
     // the snapshot copies so the assertion compares JSON content, not object key order.
     let mut bodies = requests
         .iter()

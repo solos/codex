@@ -30,7 +30,6 @@ Use **/hooks** to view and manage lifecycle hooks.
 Use **/archive** to archive the current session.
 When worktree support is available, use **/worktree** to start or continue a conversation in a separate Git worktree.
 Coming back to a conversation? Use **/recap** to summarize it.
-When voice is available, use **/voice** to start or stop a voice conversation, or **/voice settings** to choose a voice.
 When goals are enabled, use **/goal** to set or inspect the objective for a long-running task.
 Use **/agents** to open the agent command center.
 Use **/subagents** to switch between this session’s subagents.

@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::PathBuf;
 
 use codex_app_server_protocol::AskForApproval;
@@ -21,98 +20,13 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use serde::Serialize;
-use serde::Serializer;
 use serde_json::Value;
-
-/// Keeps ICE credentials out of command diagnostics and session recordings.
-/// Convert back to a string only when sending the offer to app-server signaling.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RealtimeOfferSdp(String);
-
-impl From<String> for RealtimeOfferSdp {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<RealtimeOfferSdp> for String {
-    fn from(value: RealtimeOfferSdp) -> Self {
-        value.0
-    }
-}
-
-impl fmt::Debug for RealtimeOfferSdp {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
-    }
-}
-
-impl Serialize for RealtimeOfferSdp {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str("<redacted>")
-    }
-}
-
-/// Keeps spoken answers out of command diagnostics and session recordings.
-/// Convert back to a string only at the app-server signaling boundary.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct RealtimeSpeechText(String);
-
-impl From<String> for RealtimeSpeechText {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<RealtimeSpeechText> for String {
-    fn from(value: RealtimeSpeechText) -> Self {
-        value.0
-    }
-}
-
-impl RealtimeSpeechText {
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for RealtimeSpeechText {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("<redacted>")
-    }
-}
-
-impl Serialize for RealtimeSpeechText {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str("<redacted>")
-    }
-}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) enum AppCommand {
     Interrupt,
     CleanBackgroundTerminals,
-    RealtimeConversationStart {
-        thread_id: ThreadId,
-        offer_sdp: RealtimeOfferSdp,
-    },
-    RealtimeConversationStop {
-        thread_id: ThreadId,
-    },
-    RealtimeConversationSpeech {
-        thread_id: ThreadId,
-        attempt_id: u64,
-        input_generation: u64,
-        delivery_id: u64,
-        text: RealtimeSpeechText,
-    },
     RunUserShellCommand {
         command: String,
     },
@@ -371,7 +285,3 @@ impl From<&AppCommand> for AppCommand {
         value.clone()
     }
 }
-
-#[cfg(test)]
-#[path = "app_command_tests.rs"]
-mod tests;

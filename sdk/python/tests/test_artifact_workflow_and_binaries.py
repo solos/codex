@@ -145,7 +145,6 @@ def test_root_format_driver_covers_all_formatter_groups(
     """The shared driver should retain every formatter in both modes."""
     script = _load_root_format_script_module()
     for name in (
-        "bazel/rules/example.rs",
         "codex-rs/src/lib.rs",
         "codex-rs/new file.rs",
     ):
@@ -166,11 +165,10 @@ def test_root_format_driver_covers_all_formatter_groups(
         assert cwd == tmp_path
         if args == git_ls_files_args + ["--", "*.rs"]:
             return (
-                b"codex-rs/src/lib.rs\0bazel/rules/example.rs\0"
-                b"codex-rs/new file.rs\0codex-rs/deleted.rs\0"
+                b"codex-rs/src/lib.rs\0codex-rs/new file.rs\0codex-rs/deleted.rs\0"
             )
         assert args == git_ls_files_args
-        return b"MODULE.bazel\0README.md\0third_party/voice/BUILD.bazel\0"
+        return b"README.md\0justfile\0scripts/format.py\0"
 
     monkeypatch.setattr(script, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(script.subprocess, "check_output", fake_check_output)
@@ -180,12 +178,11 @@ def test_root_format_driver_covers_all_formatter_groups(
     assert [group.name for group in formatters] == [
         "Just",
         "Rust",
-        "Bazel/Starlark",
         "Python SDK",
         "Python scripts",
     ]
     assert [group.name for group in checks] == [group.name for group in formatters]
-    assert [len(group.commands) for group in formatters] == [1, 1, 1, 2, 1]
+    assert [len(group.commands) for group in formatters] == [1, 1, 2, 1]
     assert [len(group.commands) for group in checks] == [
         len(group.commands) for group in formatters
     ]
@@ -207,22 +204,22 @@ def test_root_format_driver_covers_all_formatter_groups(
     )
     assert all(
         command.args[: len(sdk_uv_run_args)] == sdk_uv_run_args
-        for group in (formatters[3], checks[3])
+        for group in (formatters[2], checks[2])
         for command in group.commands
     )
     assert all(
         command.args[: len(scripts_uv_run_args)] == scripts_uv_run_args
-        for group in (formatters[4], checks[4])
+        for group in (formatters[3], checks[3])
         for command in group.commands
     )
-    assert formatters[3].commands[0].args[-5:] == (
+    assert formatters[2].commands[0].args[-5:] == (
         "ruff",
         "check",
         "--fix",
         "--fix-only",
         "sdk/python",
     )
-    assert checks[3].commands[0].args[-4:] == (
+    assert checks[2].commands[0].args[-4:] == (
         "ruff",
         "check",
         "--diff",
@@ -240,7 +237,6 @@ def test_root_format_driver_covers_all_formatter_groups(
         "imports_granularity=Item,skip_children=true",
     )
     rust_files = (
-        os.path.join("..", "bazel", "rules", "example.rs"),
         "new file.rs",
         os.path.join("src", "lib.rs"),
     )
@@ -250,30 +246,11 @@ def test_root_format_driver_covers_all_formatter_groups(
     assert checks[1].commands == (
         script.Command(rustfmt_args + ("--check",) + rust_files, tmp_path / "codex-rs"),
     )
-    format_buildifier_args = formatters[2].commands[-1].args
-    check_buildifier_args = checks[2].commands[-1].args
-    assert format_buildifier_args[:4] == (
-        "dotslash",
-        str(script.REPO_ROOT / "tools" / "buildifier"),
-        "-mode=fix",
-        "-lint=off",
-    )
-    assert check_buildifier_args[:4] == (
-        "dotslash",
-        str(script.REPO_ROOT / "tools" / "buildifier"),
-        "-mode=check",
-        "-lint=off",
-    )
-    assert format_buildifier_args[4:] == check_buildifier_args[4:]
-    assert format_buildifier_args[4:] == (
-        "MODULE.bazel",
-        "third_party/voice/BUILD.bazel",
-    )
-    assert [group.commands[-1].args[-3:] for group in formatters[3:]] == [
+    assert [group.commands[-1].args[-3:] for group in formatters[2:]] == [
         ("ruff", "format", "sdk/python"),
         ("ruff", "format", "."),
     ]
-    assert [group.commands[-1].args[-4:] for group in checks[3:]] == [
+    assert [group.commands[-1].args[-4:] for group in checks[2:]] == [
         ("ruff", "format", "--check", "sdk/python"),
         ("ruff", "format", "--check", "."),
     ]

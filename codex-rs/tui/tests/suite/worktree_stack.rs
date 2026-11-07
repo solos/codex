@@ -1,6 +1,6 @@
 //! Exercises stack-sensitive session transitions through the real TUI event loop.
 //!
-//! Uses the CLI binary when available (including Bazel CI) to cover its dispatch frames.
+//! Uses the CLI binary when available to cover its dispatch frames.
 
 use super::focus_palette::PtyCodex;
 use super::focus_palette::write_test_config;

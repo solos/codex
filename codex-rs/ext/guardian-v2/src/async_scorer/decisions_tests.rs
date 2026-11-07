@@ -138,7 +138,7 @@ async fn decisions_key_lookup_honors_override_or_reloaded_login() {
 
 #[test]
 fn decisions_prefers_cached_api_key_over_openai_env() -> anyhow::Result<()> {
-    // Bazel runs tests in a shared process. Set keys only in a child so other tests cannot see them.
+    // Tests share a process. Set keys only in a child so other tests cannot see them.
     if std::env::var_os("CODEX_GUARDIAN_DECISIONS_TEST_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe()?)
             .args(["--exact", std::thread::current().name().unwrap()])

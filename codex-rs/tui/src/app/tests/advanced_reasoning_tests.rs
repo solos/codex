@@ -80,7 +80,6 @@ async fn switching_from_ultra_thread_restores_configured_plan_effort() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
-            delegated_turns: Vec::new(),
             session: Some(ultra_session),
             turns: Vec::new(),
             events: Vec::new(),
@@ -91,7 +90,6 @@ async fn switching_from_ultra_thread_restores_configured_plan_effort() {
     );
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
-            delegated_turns: Vec::new(),
             session: Some(normal_session),
             turns: Vec::new(),
             events: Vec::new(),
@@ -126,7 +124,6 @@ async fn switching_threads_restores_session_speed_for_the_next_turn() {
         ..test_thread_session(thread_id, test_path_buf("/tmp/project"))
     };
     let snapshot = |session| ThreadEventSnapshot {
-        delegated_turns: Vec::new(),
         session: Some(session),
         turns: Vec::new(),
         events: Vec::new(),

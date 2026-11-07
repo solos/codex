@@ -46,7 +46,7 @@ fn finds_legacy_standalone_bundled_bwrap_next_to_exe_resources() {
     write_executable(&expected_bwrap);
 
     assert_eq!(
-        find_legacy_for_exe(&exe, /*bazel_candidate*/ None),
+        find_legacy_for_exe(&exe),
         Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
     );
 }
@@ -61,7 +61,7 @@ fn finds_npm_bundled_bwrap_next_to_target_vendor_dir() {
     write_executable(&expected_bwrap);
 
     assert_eq!(
-        find_legacy_for_exe(&exe, /*bazel_candidate*/ None),
+        find_legacy_for_exe(&exe),
         Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
     );
 }
@@ -75,7 +75,7 @@ fn finds_adjacent_dev_bwrap() {
     write_executable(&expected_bwrap);
 
     assert_eq!(
-        find_legacy_for_exe(&exe, /*bazel_candidate*/ None),
+        find_legacy_for_exe(&exe),
         Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
     );
 }

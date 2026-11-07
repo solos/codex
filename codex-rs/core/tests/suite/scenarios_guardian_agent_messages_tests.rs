@@ -52,7 +52,7 @@ async fn encrypted_parent_reply_survives_incremental_guardian_reviews(
     };
     let assessment = || {
         responses::sse(vec![
-            // Keep wire text stable across Cargo and Bazel's serde_json feature sets.
+            // Keep wire text stable across serde_json feature sets.
             responses::ev_assistant_message(
                 "assessment",
                 r#"{"outcome":"deny","rationale":"Mock assessment; no command is executed.","risk_level":"high","user_authorization":"low"}"#,

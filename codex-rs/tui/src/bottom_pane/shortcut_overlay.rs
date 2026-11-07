@@ -75,7 +75,6 @@ pub(super) fn lines(props: &FooterProps, width: u16) -> Vec<Line<'static>> {
     }
     session.push(hints.reasoning_down, "Less reasoning");
     session.push(hints.reasoning_up, "More reasoning");
-    session.push(hints.toggle_voice, "Voice");
     session.push(hints.agents, "Agents (empty prompt)");
     session.entries.push(Shortcut {
         key: format!(

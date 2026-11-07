@@ -1,22 +1,15 @@
 name: Run argument comment lint
-description: Run argument-comment-lint on codex-rs via Bazel.
-
-inputs:
-  target:
-    description: Runner target passed to prepare-bazel-ci.
-    required: true
-  buildbuddy-api-key:
-    description: BuildBuddy API key used by Bazel CI.
-    required: false
-    default: ""
+description: Run argument-comment-lint across the Cargo workspace.
 
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/prepare-bazel-ci
+    - uses: ./.github/actions/setup-ci
+
+    - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       with:
-        target: ${{ inputs.target }}
-        cache-scope: bazel-argument-comment-lint
+        toolchain: nightly-2026-08-20
+        components: llvm-tools-preview, rustc-dev, rust-src
 
     - name: Install Linux sandbox build dependencies
       if: ${{ runner.os == 'Linux' }}
@@ -25,30 +18,10 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
-    - name: Run argument comment lint on codex-rs via Bazel
-      if: ${{ runner.os != 'Windows' }}
-      env:
-        BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
+    - name: Install cargo-dylint tooling
       shell: bash
-      run: |
-        bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-        ./.github/scripts/run-bazel-ci.sh \
-          -- \
-          build \
-          --config=argument-comment-lint \
-          --keep_going \
-          --build_metadata=COMMIT_SHA=${GITHUB_SHA} \
-          -- \
-          ${bazel_targets}
+      run: cargo install --locked cargo-dylint@6.1.0 dylint-link@6.1.0
 
-    - name: Run argument comment lint on codex-rs via Bazel
-      if: ${{ runner.os == 'Windows' }}
-      env:
-        BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
+    - name: Run argument comment lint
       shell: bash
-      run: |
-        ./.github/scripts/run-argument-comment-lint-bazel.sh \
-          --config=argument-comment-lint \
-          --platforms=//:local_windows \
-          --keep_going \
-          --build_metadata=COMMIT_SHA=${GITHUB_SHA}
+      run: python3 tools/argument-comment-lint/run.py

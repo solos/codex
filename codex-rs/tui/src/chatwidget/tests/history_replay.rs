@@ -1012,17 +1012,16 @@ async fn prompt_edit_stops_streaming_without_submitting_queued_input() {
                 questions: None,
             }),
             ThreadItem::untimed(AppServerThreadItemPayload::UserMessage {
-                id: "voice-steer".to_string(),
+                id: "steer".to_string(),
                 client_id: None,
                 content: vec![UserInput::Text {
-                    text: "<realtime_delegation><input>voice input</input></realtime_delegation>"
-                        .to_string(),
+                    text: "steer input".to_string(),
                     text_elements: Vec::new(),
                 }],
             }),
             ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
                 id: "private-commentary".to_string(),
-                text: "hidden voice commentary".to_string(),
+                text: "hidden commentary".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
                 delivery: None,

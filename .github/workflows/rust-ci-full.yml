@@ -93,9 +93,6 @@ jobs:
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
-    environment:
-      name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -110,11 +107,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Run argument comment lint on codex-rs via Bazel
+      - name: Run argument comment lint on codex-rs
         uses: ./.github/actions/run-argument-comment-lint
-        with:
-          target: ${{ runner.os }}
-          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:

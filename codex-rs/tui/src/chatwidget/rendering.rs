@@ -184,22 +184,6 @@ impl ChatWidget {
         };
         let mut flex = FlexRenderable::new();
         flex.push(/*flex*/ 1, active_cell_renderable);
-        for cell in self
-            .realtime_conversation
-            .pending_history_cells
-            .iter()
-            .chain(self.realtime_conversation.live_transcript_cells())
-        {
-            flex.push(
-                /*flex*/ 1,
-                RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
-                    child: cell.as_ref(),
-                    top: 1,
-                    right: active_cell_right_reserve,
-                    persistent_layout: None,
-                })),
-            );
-        }
 
         if let Some(cell) = self.pending_rate_limit_reset_hint() {
             flex.push(
@@ -291,22 +275,10 @@ impl ChatWidget {
         width: u16,
         render_cell: impl Fn(&dyn HistoryCell, u16) -> Vec<HyperlinkLine>,
     ) -> Option<Vec<HyperlinkLine>> {
-        let cells = self
-            .transcript
-            .active_cell
-            .as_deref()
-            .into_iter()
-            .chain(
-                self.realtime_conversation
-                    .pending_history_cells
-                    .iter()
-                    .chain(self.realtime_conversation.live_transcript_cells())
-                    .map(AsRef::as_ref),
-            )
-            .chain(
-                self.pending_rate_limit_reset_hint()
-                    .map(|cell| cell as &dyn HistoryCell),
-            );
+        let cells = self.transcript.active_cell.as_deref().into_iter().chain(
+            self.pending_rate_limit_reset_hint()
+                .map(|cell| cell as &dyn HistoryCell),
+        );
         let mut lines = Vec::new();
         for cell in cells {
             let cell_lines = render_cell(cell, width);

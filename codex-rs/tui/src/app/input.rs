@@ -241,48 +241,39 @@ impl App {
                     KeymapContextSet::transcript()
                 } else {
                     KeymapContextSet::new(context)
-                }
-                .with_voice_toggle(&self.keymap);
+                };
             return if self.backtrack.overlay_preview_active && context == KeymapContext::Pager {
-                KeymapContextSet::browsing().with_voice_toggle(&self.keymap)
+                KeymapContextSet::browsing()
             } else {
                 contexts
             };
         }
         if self.transcript_view.is_search_editing() && self.chat_widget.no_modal_or_popup_active() {
-            return KeymapContextSet::new(KeymapContext::Editor).with_voice_toggle(&self.keymap);
+            return KeymapContextSet::new(KeymapContext::Editor);
         }
         if self.transcript_view.is_select_mode() && self.chat_widget.no_modal_or_popup_active() {
-            return KeymapContextSet::transcript().with_voice_toggle(&self.keymap);
+            return KeymapContextSet::transcript();
         }
         if self.transcript_view.is_activity_focused() && self.chat_widget.no_modal_or_popup_active()
         {
-            return KeymapContextSet::activity().with_voice_toggle(&self.keymap);
+            return KeymapContextSet::activity();
         }
         if self.backtrack.overlay_preview_active && self.chat_widget.no_modal_or_popup_active() {
-            return KeymapContextSet::browsing().with_voice_toggle(&self.keymap);
+            return KeymapContextSet::browsing();
         }
-        let voice_available = self.chat_widget.realtime_microphone_shortcut_available()
-            || self.voice_owner_thread_id().is_some();
         let contexts = self.chat_widget.keymap_contexts();
-        let contexts = if self.chat_widget.no_modal_or_popup_active() {
+        if self.chat_widget.no_modal_or_popup_active() {
             let contexts = contexts
                 .with(KeymapContext::Global)
                 .with(KeymapContext::Chat);
-            let contexts = if self.transcript_view.is_detailed() {
+            if self.transcript_view.is_detailed() {
                 contexts.with_transcript_close()
-            } else {
-                contexts
-            };
-            if voice_available {
-                contexts.with(KeymapContext::Voice)
             } else {
                 contexts
             }
         } else {
             contexts
-        };
-        contexts.with_voice_toggle(&self.keymap)
+        }
     }
 
     pub(super) async fn launch_external_editor(&mut self, tui: &mut tui::Tui) {

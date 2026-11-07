@@ -81,15 +81,10 @@ impl App {
             contexts.contains_action(action)
                 && if search_editing {
                     action.context == crate::keymap::KeymapContext::Editor
-                        || matches!(
-                            (action.context, action.action),
-                            (crate::keymap::KeymapContext::Chat, "toggle_voice")
-                        )
                 } else {
                     matches!(
                         (action.context, action.action),
                         (crate::keymap::KeymapContext::Global, "find_transcript")
-                            | (crate::keymap::KeymapContext::Chat, "toggle_voice")
                             | (
                                 crate::keymap::KeymapContext::Pager,
                                 "find"

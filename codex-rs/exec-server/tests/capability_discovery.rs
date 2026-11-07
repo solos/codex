@@ -683,14 +683,8 @@ async fn executor_legacy_exec_uses_process_cwd_for_relative_denials() -> anyhow:
     #[cfg(target_os = "linux")]
     let process_env = {
         let mut process_env = process_env;
-        // Bazel-provided bubblewrap lives in runfiles, not necessarily on the process PATH.
-        for name in [
-            "CARGO_BIN_EXE_bwrap",
-            "RUNFILES_DIR",
-            "RUNFILES_MANIFEST_FILE",
-            "TEST_SRCDIR",
-            "TEST_WORKSPACE",
-        ] {
+        // Cargo exposes the test bwrap path separately from the process PATH.
+        for name in ["CARGO_BIN_EXE_bwrap"] {
             if let Ok(value) = std::env::var(name) {
                 process_env.insert(name.to_string(), value);
             }

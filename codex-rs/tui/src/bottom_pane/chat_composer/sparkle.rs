@@ -377,7 +377,6 @@ impl ChatComposer {
             || self.draft.paste_burst.is_active()
             || !self.draft.input_enabled
             || self.is_task_running
-            || self.voice_strip.is_some()
             || self.popup_active()
             || self.footer_mode() == FooterMode::ShortcutOverlay
             || area.height < 3

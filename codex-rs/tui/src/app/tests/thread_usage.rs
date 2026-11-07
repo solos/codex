@@ -319,7 +319,7 @@ async fn terminal_reflow_rebases_pending_status_update_to_new_width() -> Result<
         .lines
         .clone();
     assert_ne!(original, resized);
-    // Bazel tests run without a TTY, so model the settled viewport explicitly
+    // Tests run without a TTY, so model the settled viewport explicitly
     // before simulating an asynchronous usage update after resize replay.
     tui.terminal.set_viewport_area(viewport);
     app.handle_event(

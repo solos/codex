@@ -122,10 +122,6 @@ impl super::ChatComposer {
                 history_search: self.footer.history_search_key,
                 reasoning_down: self.footer.reasoning_down_key,
                 reasoning_up: self.footer.reasoning_up_key,
-                toggle_voice: self
-                    .footer
-                    .toggle_voice_key
-                    .filter(|_| self.voice_command_enabled && !self.side_conversation_active),
             },
             active_agent_label: self.footer.active_agent_label.clone(),
         }
@@ -376,7 +372,6 @@ pub(super) struct FooterState {
     pub(super) history_search_key: Option<ShortcutHint>,
     pub(super) reasoning_down_key: Option<ShortcutHint>,
     pub(super) reasoning_up_key: Option<ShortcutHint>,
-    pub(super) toggle_voice_key: Option<ShortcutHint>,
 }
 
 #[derive(Clone, Debug)]

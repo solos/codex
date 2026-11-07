@@ -52,15 +52,8 @@ pub(super) fn line(
     };
     Some((
         truncate_line_with_ellipsis_if_overflow(
-            Line::from(vec![
-                if prompt.is_spoken() {
-                    "› ".red().bold()
-                } else {
-                    "› ".bold().dim()
-                },
-                message.into(),
-            ])
-            .style(crate::style::history_prompt_style()),
+            Line::from(vec!["› ".bold().dim(), message.into()])
+                .style(crate::style::history_prompt_style()),
             usize::from(width.saturating_sub(1)),
         ),
         EntryKey::cell(&cells[index]),

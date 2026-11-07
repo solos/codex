@@ -220,17 +220,7 @@ impl AgentsOverviewView {
                 ),
                 buf,
             );
-            let (mut title, status_area, updated) = columns(rect);
-            if task.has_voice && title.width >= 8 {
-                let badge = Rect::new(
-                    title.right() - 8,
-                    title.y,
-                    /*width*/ 8,
-                    /*height*/ 1,
-                );
-                title.width -= 8;
-                line(Line::from("  voice").style(style), badge, buf);
-            }
+            let (title, status_area, updated) = columns(rect);
             let title_style = if index == self.selected {
                 style
             } else {

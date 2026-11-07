@@ -157,7 +157,6 @@ pub struct TestAppServer {
     // removing an owned CODEX_HOME that may still be its cwd on Windows.
     _delayed_exec_server: Option<(LocalWebsocketExecServer, WebsocketDelayInterposer)>,
     _attribution_settings_server: Option<MockServer>,
-    _owned_install_dir: Option<TempDir>,
     _owned_codex_home: Option<TempDir>,
 }
 
@@ -345,7 +344,6 @@ impl TestAppServer {
             json_logs,
             _delayed_exec_server: None,
             _attribution_settings_server: None,
-            _owned_install_dir: None,
             _owned_codex_home: None,
         })
     }
@@ -2025,47 +2023,11 @@ impl TestAppServerBuilder {
                 (None, None)
             }
         };
-        let custom_program = program.is_some();
         let mut program = match program {
             Some(program) => program,
             None => codex_utils_cargo_bin::cargo_bin("codex-app-server")
                 .context("should find binary for codex-app-server")?,
         };
-        let mut owned_install_dir = None;
-        if !custom_program
-            && codex_utils_cargo_bin::runfiles_available()
-            && let Ok(code_mode_host_program) =
-                codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")
-        {
-            // Bazel keeps binary targets in separate package directories.
-            // Recreate the installed sibling layout without a path override.
-            // Prefer Bazel's TEST_TMPDIR so staging can share a filesystem with
-            // the binaries and avoid expensive cross-filesystem copies.
-            let install_dir = match std::env::var_os("TEST_TMPDIR") {
-                Some(test_tmpdir) => TempDir::new_in(test_tmpdir)?,
-                None => TempDir::new()?,
-            };
-            let staged_program = install_dir.path().join(
-                program
-                    .file_name()
-                    .context("app-server executable should have a filename")?,
-            );
-            let staged_host = install_dir.path().join(
-                code_mode_host_program
-                    .file_name()
-                    .context("code-mode host executable should have a filename")?,
-            );
-            for (source, destination) in [
-                (&program, &staged_program),
-                (&code_mode_host_program, &staged_host),
-            ] {
-                std::fs::hard_link(source, destination)
-                    .or_else(|_| codex_utils_cargo_bin::copy_executable(source, destination))
-                    .with_context(|| format!("stage executable {}", source.display()))?;
-            }
-            program = staged_program;
-            owned_install_dir = Some(install_dir);
-        }
         let env_overrides = env_overrides
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_deref()))
@@ -2079,7 +2041,6 @@ impl TestAppServerBuilder {
         )
         .await?;
         app_server.auto_env = auto_env;
-        app_server._owned_install_dir = owned_install_dir;
         app_server._owned_codex_home = owned_codex_home;
         app_server._delayed_exec_server = delayed_exec_server;
         app_server._attribution_settings_server = attribution_settings_server;

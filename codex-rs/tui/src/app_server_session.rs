@@ -13,7 +13,6 @@ pub(crate) mod provider_selection;
 #[cfg(test)]
 #[path = "app_server_session/provider_selection_tests.rs"]
 mod provider_selection_tests;
-mod realtime;
 mod rollout_history;
 mod startup_launch;
 mod thread_list;

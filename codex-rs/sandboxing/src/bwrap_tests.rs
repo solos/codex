@@ -405,9 +405,9 @@ fn write_fake_bwrap(contents: &str) -> tempfile::TempPath {
 fn write_fake_bwrap_in(dir: &Path, contents: &str) -> tempfile::TempPath {
     use tempfile::NamedTempFile;
 
-    // Bazel can mount the OS temp directory `noexec`, so prefer the current
-    // working directory for fake executables and fall back to the default temp
-    // dir outside that environment.
+    // Some CI sandboxes mount the OS temp directory `noexec`, so prefer the
+    // current working directory for fake executables and fall back to the
+    // default temp directory outside that environment.
     let temp_file = NamedTempFile::new_in(dir)
         .ok()
         .unwrap_or_else(|| NamedTempFile::new().expect("temp file"));

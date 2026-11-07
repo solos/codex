@@ -341,11 +341,6 @@ impl App {
             }
         }
 
-        let voice_owner = self.voice_owner_thread_id().map(|id| id.to_string());
-        let voice_session = threads
-            .iter()
-            .find(|thread| Some(&thread.id) == voice_owner.as_ref())
-            .map(|thread| &thread.session_id);
         let mut roots = threads
             .iter()
             .filter(|thread| thread.parent_thread_id.is_none())
@@ -371,7 +366,6 @@ impl App {
                 thread_id,
                 group,
                 is_current: self.primary_thread_id == Some(thread_id),
-                has_voice: voice_session == Some(&root.session_id),
             });
         }
 
@@ -835,7 +829,6 @@ impl App {
                 if previous_running_thread_ids.is_empty()
                     && thread_id != root_thread_id
                     && !self.side_threads.contains_key(&thread_id)
-                    && self.voice_owner_thread_id() != Some(thread_id)
                     && Some(thread_id) != previous_displayed_thread_id
                     && !self.agents_overview.blank_sessions.contains_key(&thread_id)
                     && let Err(error) = StartupDraftPump::run_with_optional_draft(

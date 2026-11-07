@@ -356,22 +356,7 @@ mod recap;
 mod reset_credits;
 pub(crate) use self::rate_limits::limit_label_for_window;
 mod completion;
-mod realtime;
-mod realtime_settings;
-mod realtime_split_flap;
-pub(crate) use realtime::MAX_REPLAY_TRANSCRIPT_CELLS;
-pub(crate) use realtime::MAX_TRANSCRIPT_BYTES;
-pub(crate) use realtime::RealtimeFailureCause;
-pub(crate) use realtime::RealtimeTranscriptRecord;
-pub(crate) use realtime::is_private_realtime_agent_item;
-pub(crate) use realtime::realtime_delegation_display_text;
-pub(crate) use realtime::realtime_delegation_input;
-#[cfg(test)]
-pub(crate) use realtime::tests::activate_voice_for_thread;
-#[cfg(test)]
-pub(crate) use realtime::tests::commit_realtime_history_events;
 mod reasoning_shortcuts;
-use self::realtime::RealtimeConversationUiState;
 mod rendering;
 mod replay;
 mod review;
@@ -620,8 +605,6 @@ pub(crate) struct ChatWidget {
     unified_exec_wait_streak: Option<UnifiedExecWaitStreak>,
     turn_lifecycle: TurnLifecycleState,
     safety_recourse: Option<safety_recourse::PendingRecourse>,
-    realtime_conversation: RealtimeConversationUiState,
-    realtime_conversation_available_for_thread: bool,
     safety_buffering: SafetyBufferingState,
     task_complete_pending: bool,
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
@@ -1186,8 +1169,6 @@ impl ChatWidget {
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
         self.bottom_pane.pre_draw_tick();
-        self.flush_realtime_transcript_history();
-        self.refresh_realtime_microphone_level();
         if let Some(pet) = self.ambient_pet.as_ref() {
             pet.schedule_next_frame();
         }
@@ -1326,18 +1307,6 @@ impl ChatWidget {
         from_replay: bool,
         turn_id: &str,
     ) {
-        if let Some(input) = realtime::realtime_delegation_input(items) {
-            if !from_replay && self.should_hide_realtime_delegation(turn_id) {
-                return;
-            }
-            let input = realtime::realtime_delegation_display_text(input);
-            let projected = [UserInput::Text {
-                text: input,
-                text_elements: Vec::new(),
-            }];
-            self.on_committed_user_message(&projected, client_id, from_replay, turn_id);
-            return;
-        }
         let display = Self::user_message_display_from_inputs(items);
         if from_replay {
             if self.review.is_review_mode {
@@ -1984,7 +1953,7 @@ impl ChatWidget {
     /// Returns a cache key describing the current in-flight cells for the transcript overlay.
     ///
     /// `Ctrl+T` renders committed transcript cells plus a render-only live tail derived from the
-    /// current active, realtime, and rate-limit cells, and the overlay caches that tail; this
+    /// current active and rate-limit cells, and the overlay caches that tail; this
     /// key is what it uses to decide whether it must recompute. When there are no live cells, this
     /// returns `None` so the overlay can drop the tail entirely.
     ///
@@ -1992,17 +1961,8 @@ impl ChatWidget {
     /// tick are unchanged. Stable sources still require a revision bump when their content changes.
     pub(crate) fn active_cell_transcript_key(&self) -> Option<ActiveCellTranscriptKey> {
         let cell = self.transcript.active_cell.as_ref();
-        let mut realtime_cells = self.realtime_conversation.live_transcript_cells();
         let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
-        if cell.is_none()
-            && self
-                .realtime_conversation
-                .live_transcript_cells()
-                .next()
-                .is_none()
-            && self.realtime_conversation.pending_history_cells.is_empty()
-            && rate_limit_reset_hint.is_none()
-        {
+        if cell.is_none() && rate_limit_reset_hint.is_none() {
             return None;
         }
         let live_sources: [Option<&dyn HistoryCell>; 2] = [
@@ -2013,21 +1973,12 @@ impl ChatWidget {
             cacheable: live_sources
                 .into_iter()
                 .flatten()
-                .chain(
-                    self.realtime_conversation
-                        .pending_history_cells
-                        .iter()
-                        .chain(self.realtime_conversation.live_transcript_cells())
-                        .map(AsRef::as_ref),
-                )
                 .all(HistoryCell::has_stable_transcript_height),
             revision: self.transcript.active_cell_revision,
             is_stream_continuation: cell
                 .map(|cell| cell.is_stream_continuation())
                 .unwrap_or(/*default*/ false),
-            animation_tick: cell
-                .and_then(|cell| cell.transcript_animation_tick())
-                .or_else(|| realtime_cells.find_map(|cell| cell.transcript_animation_tick())),
+            animation_tick: cell.and_then(|cell| cell.transcript_animation_tick()),
         })
     }
 
@@ -2079,13 +2030,6 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
 
 impl Drop for ChatWidget {
     fn drop(&mut self) {
-        if self.realtime_conversation.handle.is_some()
-            && let Some(thread_id) = self.thread_id
-        {
-            self.app_event_tx
-                .send(AppEvent::StopRealtimeConversation { thread_id });
-        }
-        self.reset_realtime_conversation();
         self.stop_rate_limit_poller();
     }
 }

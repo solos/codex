@@ -15,9 +15,6 @@ def prepare_winget_package(package: Path) -> None:
     if metadata["entrypoint"] != "bin/codex.exe":
         raise ValueError("WinGet requires the canonical Codex entrypoint")
     entrypoint = f"codex-{target}.exe"
-    manifest_path = package / "codex-resources/voice/manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["sha256"][entrypoint] = manifest["sha256"].pop("bin/codex.exe")
     (package / "bin/codex.exe").rename(package / entrypoint)
     (package / "bin/codex-code-mode-host.exe").rename(
         package / "codex-code-mode-host.exe"
@@ -27,8 +24,9 @@ def prepare_winget_package(package: Path) -> None:
     for helper in ("codex-command-runner.exe", "codex-windows-sandbox-setup.exe"):
         shutil.copy2(package / "codex-resources" / helper, package / helper)
     metadata["entrypoint"] = entrypoint
-    for path, value in ((metadata_path, metadata), (manifest_path, manifest)):
-        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":

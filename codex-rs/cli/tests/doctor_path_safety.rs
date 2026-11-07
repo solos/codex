@@ -405,7 +405,7 @@ fn doctor_reports_only_safe_config_error_metadata() -> Result<()> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(!stdout.contains("doctor-test-credential"));
             assert!(!stdout.contains("sk-proj-ABC123example"));
-            // Keep snapshots stable across serde_json feature sets in Cargo and Bazel.
+            // Keep snapshots stable across serde_json feature sets.
             check.sort_all_objects();
             insta::assert_snapshot!(snapshot_name, serde_json::to_string_pretty(&check)?);
         }

@@ -2170,13 +2170,6 @@ async fn experimental_features_popup_snapshot() {
             description: "Allow the model to run shell commands.".to_string(),
             enabled: true,
         },
-        ExperimentalFeatureItem {
-            key: "voice_conversations".to_string(),
-            writable: true,
-            name: "Voice conversations".to_string(),
-            description: "Talk with Codex using /voice.".to_string(),
-            enabled: false,
-        },
     ];
     let view = ExperimentalFeaturesView::new(
         features,

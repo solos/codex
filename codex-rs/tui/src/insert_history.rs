@@ -819,14 +819,19 @@ mod tests {
     #[test]
     fn vt100_spoken_prompt_keeps_its_marker_color_without_a_terminal_palette() {
         use crate::history_cell::HistoryCell;
-        use crate::history_cell::new_spoken_user_prompt;
+        use crate::history_cell::new_user_prompt;
 
         crate::terminal_palette::with_test_default_colors(
             /*colors*/ None::<crate::terminal_probe::DefaultColors>,
             || {
                 let width = 30;
-                let lines = new_spoken_user_prompt("hello from voice".into())
-                    .display_hyperlink_lines(width);
+                let lines = new_user_prompt(
+                    "hello from assistant".into(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .display_hyperlink_lines(width);
                 let mut snapshots = Vec::new();
                 for policy in [
                     HistoryLineWrapPolicy::PreWrap,
@@ -850,9 +855,9 @@ mod tests {
                     ));
                 }
                 insta::assert_snapshot!(snapshots.join("\n"), @"
-                PreWrap: › hello from voice
+                PreWrap: › hello from assistant
                 marker: Idx(1), text: Default, background: Idx(8)
-                Terminal: › hello from voice
+                Terminal: › hello from assistant
                 marker: Idx(1), text: Default, background: Idx(8)
                 ");
             },

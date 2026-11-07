@@ -23,7 +23,6 @@ _MODULE_DIR = Path(__file__).resolve().parent
 if str(_MODULE_DIR) not in sys.path:
     # Some execution environments set PYTHONSAFEPATH. Add only this
     # trusted package directory so direct `python path/to/script.py` usage
-    # continues to work alongside the Bazel entry point.
     sys.path.insert(0, str(_MODULE_DIR))
 
 from official_conformance import (  # noqa: E402 - direct scripts must first add their sibling directory.

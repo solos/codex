@@ -1,7 +1,6 @@
 //! Sticky context follows the visible turn while leaving source text and hit rows intact.
 
 use super::*;
-use crate::history_cell::new_spoken_user_prompt;
 use crate::history_cell::new_user_prompt;
 use crate::transcript_view::tests::cell;
 use crate::transcript_view::tests::render;
@@ -98,10 +97,12 @@ fn header_sanitizes_controls_and_truncates_by_display_width() {
 
 #[test]
 fn pinned_prompt_matches_the_original_prompt_style() {
-    for prompt in [
-        new_user_prompt("keep going".into(), Vec::new(), Vec::new(), Vec::new()),
-        new_spoken_user_prompt("keep going".into()),
-    ] {
+    for prompt in [new_user_prompt(
+        "keep going".into(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )] {
         let width = 30;
         let mut expected = Buffer::empty(Rect::new(
             /*x*/ 0, /*y*/ 0, width, /*height*/ 3,

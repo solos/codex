@@ -130,7 +130,6 @@ impl HistoryCell for PresentationCell {
 async fn owned_live_history_keeps_all_sources_in_each_presentation() {
     let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
     widget.transcript.active_cell = Some(Box::new(PresentationCell("active")));
-    widget.realtime_conversation.live_transcript_cell = Some(Box::new(PresentationCell("voice")));
     widget.pending_rate_limit_reset_hint = Some(history_cell::PlainHistoryCell::new(vec![
         "rate limit hint".into(),
     ]));
@@ -150,82 +149,16 @@ async fn owned_live_history_keeps_all_sources_in_each_presentation() {
     insta::assert_snapshot!(format!("{compact}\n---\n{raw}\n---\n{detailed}"), @"
     compact active
 
-    compact voice
-
     rate limit hint
     ---
     raw active
-
-    raw voice
 
     rate limit hint
     ---
     detailed active
 
-    detailed voice
-
     rate limit hint
     ");
-
-    widget.local_settings.tui.animations = false;
-    widget.realtime_conversation = Default::default();
-    crate::chatwidget::realtime::tests::activate_voice_for_thread(&mut widget, ThreadId::new());
-    widget.realtime_conversation.pending_history_cells.extend([
-        Box::new(PresentationCell("deferred first")) as Box<dyn HistoryCell>,
-        Box::new(PresentationCell("deferred second")) as Box<dyn HistoryCell>,
-    ]);
-    widget.on_realtime_transcript_delta("assistant".into(), "assistant ".into());
-    widget.on_realtime_transcript_delta("user".into(), "user caption".into());
-    widget.on_realtime_transcript_done("user".into(), "user caption".into());
-    widget.on_realtime_transcript_delta("assistant".into(), "caption".into());
-    let expected = [
-        "active",
-        "deferred first",
-        "deferred second",
-        "user caption",
-        "assistant caption",
-        "rate limit hint",
-    ];
-
-    for latest_speaker in ["assistant", "user"] {
-        widget.on_realtime_transcript_delta(latest_speaker.into(), String::new());
-        widget.set_raw_output_mode(/*enabled*/ false);
-        let compact = text(widget.active_cell_display_hyperlink_lines(/*width*/ 80));
-        let frame = render_frame(&widget, /*width*/ 80);
-        let inline = frame
-            .content
-            .chunks(usize::from(frame.area.width))
-            .map(|row| {
-                row.iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        widget.set_raw_output_mode(/*enabled*/ true);
-        let raw = text(widget.active_cell_display_hyperlink_lines(/*width*/ 80));
-        let detailed = text(widget.active_cell_transcript_hyperlink_lines(/*width*/ 80));
-        for (presentation, rendered) in [
-            ("compact", compact),
-            ("inline", inline),
-            ("raw", raw),
-            ("detailed", detailed),
-        ] {
-            let actual = rendered
-                .lines()
-                .filter_map(|line| {
-                    expected
-                        .iter()
-                        .find(|source| line.contains(**source))
-                        .copied()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                actual, expected,
-                "{presentation}; latest speaker {latest_speaker}"
-            );
-        }
-    }
 }
 
 #[tokio::test]

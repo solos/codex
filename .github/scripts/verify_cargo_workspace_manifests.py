@@ -73,10 +73,8 @@ def main() -> int:
         "features."
     )
     print(
-        "Workspace crate features are disallowed because our Bazel build setup "
-        "does not honor them today, which can let issues hidden behind feature "
-        "gates go unnoticed, and because they add extra crate build "
-        "permutations we want to avoid."
+        "Workspace crate features are disallowed because they add extra crate "
+        "build permutations and can hide issues behind feature gates."
     )
     print(
         "Cargo only applies `codex-rs/Cargo.toml` `[workspace.lints.clippy]` "
@@ -86,10 +84,7 @@ def main() -> int:
     print("[lints]")
     print("workspace = true")
     print()
-    print(
-        "Without that opt-in, `cargo clippy` can miss violations that Bazel clippy "
-        "catches."
-    )
+    print("Without that opt-in, `cargo clippy` can miss workspace lint violations.")
     print()
     print(
         "Package-name checks apply to `codex-rs/<crate>/Cargo.toml` and "

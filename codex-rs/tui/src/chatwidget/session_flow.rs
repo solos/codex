@@ -101,10 +101,6 @@ impl ChatWidget {
                 thread_id: session.thread_id,
             });
         }
-        self.realtime_conversation_available_for_thread =
-            codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
-        self.bottom_pane
-            .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
@@ -339,7 +335,6 @@ impl ChatWidget {
     ) {
         self.current_rollout_path = rollout_path;
         self.input_queue.clear();
-        self.reset_realtime_conversation();
         // Finish any output not yet drained from the old runtime without live completion actions.
         self.on_task_complete(
             /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ true,
@@ -350,16 +345,7 @@ impl ChatWidget {
         self.transcript.reset_copy_history();
         self.transcript.reset_turn_flags();
         for turn in retained_turns {
-            let mut replaying_delegation = false;
             for item in turn.item_payloads() {
-                if matches!(item, ThreadItemPayload::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                {
-                    replaying_delegation = true;
-                }
-                if replaying_delegation && realtime::is_private_realtime_agent_item(item) {
-                    continue;
-                }
                 let (markdown, source) = match item {
                     ThreadItemPayload::AgentMessage { text, .. } => (
                         parse_assistant_markdown(text, self.config.cwd.as_path()).visible_markdown,

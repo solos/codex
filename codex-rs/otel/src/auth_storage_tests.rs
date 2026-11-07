@@ -9,8 +9,8 @@ use opentelemetry_sdk::metrics::data::MetricData;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 
-// Provider installation is process-global. Isolate these cases even under Bazel/libtest,
-// which otherwise runs all unit tests in a shared process.
+// Provider installation is process-global. Isolate these cases because libtest
+// otherwise runs all unit tests in a shared process.
 fn run_in_subprocess() -> bool {
     if std::env::var_os("CODEX_AUTH_STORAGE_TEST_CHILD").is_some() {
         return false;

@@ -123,7 +123,6 @@ pub(crate) struct FooterKeyHints {
     pub(crate) history_search: Option<ShortcutHint>,
     pub(crate) reasoning_down: Option<ShortcutHint>,
     pub(crate) reasoning_up: Option<ShortcutHint>,
-    pub(crate) toggle_voice: Option<ShortcutHint>,
 }
 
 impl FooterKeyHints {
@@ -142,7 +141,6 @@ impl FooterKeyHints {
             history_search: Some(key_hint::ctrl(KeyCode::Char('r')).into()),
             reasoning_down: Some(key_hint::alt(KeyCode::Char(',')).into()),
             reasoning_up: Some(key_hint::alt(KeyCode::Char('.')).into()),
-            toggle_voice: Some(key_hint::plain(KeyCode::F(8)).into()),
         }
     }
 }
@@ -917,15 +915,7 @@ pub(crate) fn footer_hint_items_line(items: &[(String, String)]) -> Line<'static
             spans.push(" · ".set_style(secondary_text_style()));
         }
         spans.extend(key_hint::key_label_spans(key));
-        if idx == 0
-            && key == "voice"
-            && let Some(label) = label.strip_prefix("● ")
-        {
-            spans.push(" ●".red());
-            spans.push(format!(" {label}").set_style(secondary_text_style()));
-        } else {
-            spans.push(format!(" {label}").set_style(secondary_text_style()));
-        }
+        spans.push(format!(" {label}").set_style(secondary_text_style()));
     }
     Line::from(spans)
 }
@@ -981,43 +971,6 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::Backend;
     use ratatui::backend::TestBackend;
-
-    #[test]
-    fn voice_live_microphone_indicator_is_red() {
-        let line = footer_hint_items_line(&[("voice".into(), "● listen".into())]);
-        assert_eq!(line.spans[1].style.fg, Some(ratatui::style::Color::Red));
-    }
-
-    #[test]
-    fn voice_footer_rendering_preserves_text_and_styles() {
-        let items = [
-            ("voice".into(), "● listen".into()),
-            ("ctrl+m".into(), "mute".into()),
-        ];
-        let mut terminal =
-            Terminal::new(TestBackend::new(/*width*/ 40, /*height*/ 1)).expect("create terminal");
-        terminal
-            .draw(|frame| render_footer_hint_items(frame.area(), frame.buffer_mut(), &items))
-            .expect("render voice footer");
-        let backend = terminal.backend();
-        let mut previous_style = None;
-        let style_runs = (0..40)
-            .filter_map(|x| {
-                let cell = backend.buffer().cell((x, 0))?;
-                let style = cell.style();
-                if previous_style == Some(style) {
-                    None
-                } else {
-                    previous_style = Some(style);
-                    Some((x, style))
-                }
-            })
-            .collect::<Vec<_>>();
-        insta::assert_debug_snapshot!(
-            "voice_footer_rendered_styles",
-            (backend.to_string(), style_runs)
-        );
-    }
 
     fn snapshot_footer(name: &str, props: FooterProps) {
         snapshot_footer_with_mode_indicator(

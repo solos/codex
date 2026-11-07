@@ -42,7 +42,6 @@ jobs:
           for f in "${files[@]}"; do
             [[ $f == codex-rs/* ]] && codex=true
             [[ $f == codex-rs/* || $f == tools/argument-comment-lint/* || $f == justfile ]] && argument_comment_lint=true
-            [[ $f == defs.bzl || $f == workspace_root_test_launcher.sh.tpl || $f == workspace_root_test_launcher.bat.tpl ]] && argument_comment_lint=true
             [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml ]] && argument_comment_lint_package=true
             [[ $f == .github/* ]] && workflows=true
           done
@@ -166,9 +165,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     needs: changed
-    environment:
-      name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
@@ -201,12 +197,9 @@ jobs:
         if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
         with:
           persist-credentials: false
-      - name: Run argument comment lint on codex-rs via Bazel
+      - name: Run argument comment lint on codex-rs
         if: ${{ steps.argument_comment_lint_gate.outputs.run == 'true' }}
         uses: ./.github/actions/run-argument-comment-lint
-        with:
-          target: ${{ runner.os }}
-          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'

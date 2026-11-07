@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rustc-check-cfg=cfg(codex_bazel)");
     println!("cargo:rerun-if-changed=src/grpc");
 
     let mut config = tonic_prost_build::Config::new();

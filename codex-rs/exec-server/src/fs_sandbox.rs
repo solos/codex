@@ -51,16 +51,6 @@ const FS_HELPER_ENV_ALLOWLIST: &[&str] = &["PATH", "TMPDIR", "TMP", "TEMP"];
 const FS_HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
 #[cfg(any(windows, test))]
 const MAX_FS_HELPER_STDERR_BYTES: u64 = 4096;
-#[cfg(debug_assertions)]
-const FS_HELPER_BAZEL_BWRAP_ENV_ALLOWLIST: &[&str] = &[
-    "CARGO_BIN_EXE_bwrap",
-    "RUNFILES_DIR",
-    "RUNFILES_MANIFEST_FILE",
-    "RUNFILES_MANIFEST_ONLY",
-    "TEST_SRCDIR",
-    "TEST_WORKSPACE",
-];
-
 #[derive(Debug, PartialEq, Eq)]
 struct SandboxCwd {
     uri: PathUri,
@@ -372,23 +362,12 @@ fn helper_env_key_is_allowed(key: &str) -> bool {
     FS_HELPER_ENV_ALLOWLIST.contains(&key)
         // CoreFoundation consults this before falling back to user lookup during helper startup.
         || (cfg!(target_os = "macos") && key == "__CF_USER_TEXT_ENCODING")
-        || bazel_bwrap_env_key_is_allowed(key)
         // MXC needs SystemDrive to resolve platform directories, and SystemRoot and
         // LOCALAPPDATA to create the sandboxed helper process.
         || (cfg!(windows)
             && ["PATH", "SystemDrive", "SystemRoot", "LOCALAPPDATA"]
                 .iter()
                 .any(|allowed| key.eq_ignore_ascii_case(allowed)))
-}
-
-#[cfg(debug_assertions)]
-fn bazel_bwrap_env_key_is_allowed(key: &str) -> bool {
-    option_env!("BAZEL_PACKAGE").is_some() && FS_HELPER_BAZEL_BWRAP_ENV_ALLOWLIST.contains(&key)
-}
-
-#[cfg(not(debug_assertions))]
-fn bazel_bwrap_env_key_is_allowed(_key: &str) -> bool {
-    false
 }
 
 #[tracing::instrument(name = "fs.sandbox_execute", skip_all)]

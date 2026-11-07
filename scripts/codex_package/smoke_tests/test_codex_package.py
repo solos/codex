@@ -494,9 +494,8 @@ def test_windows_debug_symbols_resolve_packaged_code(
     code_mode_host_debug_symbols: Path,
 ) -> None:
     """Windows host symbols match the packaged executable's debug signature."""
-    # Cargo embeds an underscored PDB name; Bazel uses the binary's name.
-    # Offer the archived PDB under both names so dumpbin still verifies that
-    # its signature matches the packaged executable, regardless of builder.
+    # Cargo embeds an underscored PDB name. Offer the archived PDB under both
+    # names so dumpbin still verifies its signature against the executable.
     cargo_symbols = code_mode_host_debug_symbols.with_name("codex_code_mode_host.pdb")
     shutil.copy2(code_mode_host_debug_symbols, cargo_symbols)
     symbols = (code_mode_host_debug_symbols, cargo_symbols)

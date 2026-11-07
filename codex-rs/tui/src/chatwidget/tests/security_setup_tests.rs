@@ -26,9 +26,6 @@ async fn security_setup_preserves_draft_action_and_dismissal_across_widgets() {
     let rendered = normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 70));
     insta::assert_snapshot!("security_setup_banner", rendered);
     let (mut replacement, mut events, _ops) = make_chatwidget_manual(Some("test-model-a")).await;
-    chat.app_event_tx
-        .voice_only
-        .store(/*val*/ true, std::sync::atomic::Ordering::Relaxed);
     replacement.inherit_security_setup(&mut chat);
     chat = replacement;
     assert!(render_bottom_popup(&chat, /*width*/ 70).contains("Set up security"));

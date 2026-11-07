@@ -173,7 +173,6 @@ impl ChatWidget {
         self.chat_keymap = runtime_keymap.chat.clone();
         self.bottom_pane.set_keymap_bindings(runtime_keymap);
         self.refresh_config_panel(/*notice*/ None);
-        self.update_realtime_footer();
         self.request_redraw();
     }
 }

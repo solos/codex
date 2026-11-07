@@ -81,38 +81,6 @@ def rust_formatter_group(*, check: bool) -> FormatterGroup:
     return FormatterGroup("Rust", commands)
 
 
-def buildifier_formatter_group(*, check: bool) -> FormatterGroup:
-    repository_files = subprocess.check_output(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=REPO_ROOT,
-    ).split(b"\0")
-    buildifier_files: list[str] = []
-    for encoded_path in repository_files:
-        if not encoded_path:
-            continue
-        path = Path(os.fsdecode(encoded_path))
-        name = path.name
-        if (
-            name in {"BUILD", "WORKSPACE", "MODULE.bazel"}
-            or name.startswith(("BUILD.", "WORKSPACE."))
-            or name.endswith((".BUILD.bazel", ".MODULE.bazel", ".bzl", ".sky"))
-            or ".bzl." in name
-            or ".sky." in name
-        ):
-            buildifier_files.append(path.as_posix())
-    buildifier_files.sort()
-
-    # Invoke DotSlash explicitly because Windows does not honor shebangs.
-    buildifier_args = [
-        "dotslash",
-        str(REPO_ROOT / "tools" / "buildifier"),
-        "-mode=check" if check else "-mode=fix",
-        "-lint=off",
-        *buildifier_files,
-    ]
-    return FormatterGroup("Bazel/Starlark", (Command(tuple(buildifier_args)),))
-
-
 def python_sdk_formatter_group(*, check: bool) -> FormatterGroup:
     # Each `--project` retains its local dependency and Ruff configuration context.
     uv_run_args = [
@@ -160,7 +128,6 @@ def formatter_groups(*, check: bool) -> tuple[FormatterGroup, ...]:
     return (
         just_formatter_group(check=check),
         rust_formatter_group(check=check),
-        buildifier_formatter_group(check=check),
         python_sdk_formatter_group(check=check),
         python_scripts_formatter_group(check=check),
     )

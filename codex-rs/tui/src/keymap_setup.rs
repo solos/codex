@@ -1232,22 +1232,6 @@ mod tests {
     }
 
     #[test]
-    fn picker_voice_toggle_snapshot() {
-        assert_snapshot!(
-            "keymap_voice_toggle",
-            render_picker(
-                build_keymap_action_menu_params(
-                    "chat".into(),
-                    "toggle_voice".into(),
-                    &RuntimeKeymap::defaults(),
-                    &TuiKeymap::default(),
-                ),
-                /*width*/ 80,
-            )
-        );
-    }
-
-    #[test]
     fn picker_question_actions_snapshot() {
         let runtime = RuntimeKeymap::defaults();
         let descriptions = ["edit_queued_message", "prompt_stack_back", "skip_question"]
@@ -1559,7 +1543,7 @@ mod tests {
         let mut view = build_keymap_debug_view(&RuntimeKeymap::defaults(), &TuiKeymap::default());
         view.show_delayed_hint_for_test();
 
-        view.handle_key_event(KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
 
         let rendered = render_debug(&view, /*width*/ 100);
         assert!(!rendered.contains("Still waiting?"));

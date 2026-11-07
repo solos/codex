@@ -1601,7 +1601,7 @@ where
 
 fn write_pretty_json(path: PathBuf, value: &Value) -> Result<()> {
     let mut value = value.clone();
-    // Keep Cargo and Bazel output identical without changing meaningful array order.
+    // Keep generated output stable without changing meaningful array order.
     value.sort_all_objects();
     let json = serde_json::to_vec_pretty(&value)
         .with_context(|| format!("Failed to serialize JSON schema to {}", path.display()))?;

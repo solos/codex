@@ -713,7 +713,7 @@ async fn mcp_tool_discovery_in_same_turn(tool_mode: ToolMode) -> Result<()> {
         .iter()
         .map(core_test_support::responses::ResponsesRequest::body_json)
         .collect::<Vec<_>>();
-    // Cargo and Bazel can serialize embedded JSON in different key orders.
+    // Feature sets can serialize embedded JSON in different key orders.
     // Normalize each output text before snapshot truncation and hashing.
     for body in &mut bodies {
         for item in body["input"].as_array_mut().expect("request input") {
@@ -1517,7 +1517,7 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context(
         }
         // Normalize opaque skill locators before snapshot truncation and hashing.
         body["input"] = serde_json::from_str(&input.replace(&skill_files, "<SKILLS_ROOT>/"))?;
-        // Cargo and Bazel can serialize the JSON inside the tool output in different key orders.
+        // Feature sets can serialize the JSON inside the tool output in different key orders.
         for item in body["input"].as_array_mut().expect("request input") {
             if item["type"] == "function_call_output" && item["call_id"] == "list-skills" {
                 let mut output: serde_json::Value =
