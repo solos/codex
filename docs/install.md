@@ -2,21 +2,24 @@
 
 ### System requirements
 
-| Requirement                 | Details                                                         |
-| --------------------------- | --------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 **via WSL2** |
-| Git (optional, recommended) | 2.23+ for built-in PR helpers                                   |
-| RAM                         | 4-GB minimum (8-GB recommended)                                 |
+| Requirement                 | Details                                                                     |
+| --------------------------- | --------------------------------------------------------------------------- |
+| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 (native package or WSL2) |
+| Git (optional, recommended) | 2.23+ for built-in PR helpers                                               |
+| RAM                         | 4-GB minimum (8-GB recommended)                                             |
 
-### DotSlash
+### Release packages
 
-The GitHub Release also contains a [DotSlash](https://dotslash-cli.com/) file for the Codex CLI named `codex`. Using a DotSlash file makes it possible to make a lightweight commit to source control to ensure all contributors use the same version of an executable, regardless of what platform they use for development.
+This fork publishes unsigned Cargo-built package archives on
+[GitHub Releases](https://github.com/solos/codex/releases/latest). Download the
+`codex-package-<target>` archive for your platform; see the root
+[README](../README.md#install-a-fork-release) for extraction instructions.
 
 ### Build from source
 
 ```bash
 # Clone the repository and navigate to the root of the Cargo workspace.
-git clone https://github.com/openai/codex.git
+git clone https://github.com/solos/codex.git
 cd codex/codex-rs
 
 # Install the Rust toolchain, if necessary.
