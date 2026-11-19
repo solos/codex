@@ -64,6 +64,7 @@ mod mcp_cmd;
 mod mcp_login;
 mod migrate_nfs_db;
 mod migrate_rollouts;
+mod model_cmd;
 mod plugin_cmd;
 mod queue_cmd;
 #[cfg(target_os = "windows")]
@@ -74,6 +75,7 @@ mod state_db_recovery;
 mod wsl_paths;
 
 use crate::mcp_cmd::McpCli;
+use crate::model_cmd::ModelCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::queue_cmd::QueueCommand;
@@ -148,6 +150,10 @@ enum Subcommand {
 
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
+
+    /// Inspect and configure the default model.
+    #[clap(visible_alias = "models")]
+    Model(ModelCli),
 
     /// Manage Codex plugins.
     Plugin(PluginCli),
@@ -914,6 +920,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
             mcp_cli.run(loader_overrides).await?;
         }
+        Some(Subcommand::Model(mut model_cli)) => {
+            prepend_config_flags(
+                &mut model_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            let loader_overrides =
+                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
+            model_cli.run(loader_overrides).await?;
+        }
         Some(Subcommand::Plugin(plugin_cli)) => {
             let PluginCli {
                 mut config_overrides,
@@ -1340,13 +1355,14 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Unarchive(_)
         | Subcommand::Fork(_)
         | Subcommand::Mcp(_)
+        | Subcommand::Model(_)
         | Subcommand::MigrateNfsDb(_)
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands, `codex mcp`, and `codex migrate-nfs-db`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex migrate-nfs-db`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands, `codex mcp`, `codex model`, and `codex migrate-nfs-db`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex model`, `codex migrate-nfs-db`, `codex sandbox`, and `codex debug prompt-input`."
         ),
     }
 }
@@ -1706,6 +1722,7 @@ fn unsupported_subcommand_name_for_strict_config(
             Some(app_server_subcommand_name(app_server.subcommand.as_ref()))
         }
         Some(Subcommand::Mcp(_)) => Some("mcp"),
+        Some(Subcommand::Model(_)) => Some("model"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::Index(_)) => Some("index"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
@@ -2248,6 +2265,12 @@ enabled = true
             Some("work")
         );
         assert_eq!(
+            profile_v2_for_args(&["codex", "--profile", "work", "model", "list"])
+                .expect("model supports profile-v2")
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
             profile_v2_for_args(&["codex", "--profile", "work", "sandbox"])
                 .expect("sandbox supports config profile")
                 .as_deref(),
@@ -2608,6 +2631,43 @@ enabled = true
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn model_list_parses_output_flags() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "model",
+            "list",
+            "--all",
+            "--json",
+            "--bundled",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Model(model)) = cli.subcommand else {
+            panic!("expected model subcommand");
+        };
+        let crate::model_cmd::ModelSubcommand::List(args) = model.subcommand else {
+            panic!("expected model list subcommand");
+        };
+        assert!(args.all);
+        assert!(args.json);
+        assert!(args.bundled);
+    }
+
+    #[test]
+    fn models_alias_parses_set_command() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "models", "set", "gpt-5.4"]).expect("parse");
+
+        let Some(Subcommand::Model(model)) = cli.subcommand else {
+            panic!("expected model subcommand");
+        };
+        let crate::model_cmd::ModelSubcommand::Set(args) = model.subcommand else {
+            panic!("expected model set subcommand");
+        };
+        assert_eq!(args.model, "gpt-5.4");
     }
 
     #[test]

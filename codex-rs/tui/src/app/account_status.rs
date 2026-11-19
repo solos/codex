@@ -4,15 +4,43 @@
 use super::App;
 use crate::app_event::AppEvent;
 use crate::app_server_session::AppServerSession;
+use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::Account;
+use codex_app_server_protocol::AccountUpdatedNotification;
+use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ServerNotification;
+use color_eyre::eyre::Result;
 use std::time::Duration;
 use uuid::Uuid;
 
 impl App {
+    pub(super) async fn refresh_account_after_login(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let response = app_server.read_account().await?;
+        let (auth_mode, plan_type) = match response.account {
+            Some(Account::ApiKey {}) => (Some(AuthMode::ApiKey), None),
+            Some(Account::Chatgpt { plan_type, .. }) => (Some(AuthMode::Chatgpt), Some(plan_type)),
+            Some(Account::AmazonBedrock { .. } | Account::Gcp {}) | None => (None, None),
+        };
+        self.handle_app_server_event(
+            app_server,
+            AppServerEvent::ServerNotification(Box::new(ServerNotification::AccountUpdated(
+                AccountUpdatedNotification {
+                    auth_mode,
+                    plan_type,
+                },
+            ))),
+        )
+        .await;
+        Ok(())
+    }
+
     pub(super) fn refresh_account_email(&mut self, app_server: &AppServerSession) {
         let request_id = Uuid::new_v4();
         self.account_email_request_id = Some(request_id);

@@ -116,6 +116,8 @@ pub(crate) struct OnboardingScreenArgs {
 pub(crate) struct OnboardingResult {
     pub directory_trust_persisted: bool,
     pub should_exit: bool,
+    pub login_completed: bool,
+    pub deferred_app_server_events: Vec<AppServerEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -573,7 +575,8 @@ pub(crate) async fn run_gov_cloud_guidance(tui: &mut Tui) -> Result<()> {
         should_exit: false,
     };
     let result = run_onboarding_screen(
-        screen, /*app_server_request_handle*/ None, /*app_server*/ None, tui,
+        screen, /*app_server_request_handle*/ None, /*app_server*/ None,
+        /*cancel_auth_on_escape*/ false, tui,
     )
     .await?;
     if result.should_exit {
@@ -589,13 +592,40 @@ pub(crate) async fn run_onboarding_app(
 ) -> Result<OnboardingResult> {
     let request_handle = args.app_server_request_handle.clone();
     let screen = OnboardingScreen::new(tui, args).await;
-    run_onboarding_screen(screen, request_handle, app_server, tui).await
+    run_onboarding_screen(
+        screen,
+        request_handle,
+        app_server,
+        /*cancel_auth_on_escape*/ false,
+        tui,
+    )
+    .await
+}
+
+pub(crate) async fn run_login_app(
+    args: OnboardingScreenArgs,
+    app_server: &mut AppServerSession,
+    tui: &mut Tui,
+) -> Result<OnboardingResult> {
+    let request_handle = args.app_server_request_handle.clone();
+    let mut screen = OnboardingScreen::new(tui, args).await;
+    // `/login` opens directly on the authentication step.
+    screen.steps.retain(|step| matches!(step, Step::Auth(_)));
+    run_onboarding_screen(
+        screen,
+        request_handle,
+        Some(app_server),
+        /*cancel_auth_on_escape*/ true,
+        tui,
+    )
+    .await
 }
 
 async fn run_onboarding_screen(
     onboarding_screen: OnboardingScreen,
     app_server_request_handle: Option<AppServerRequestHandle>,
     app_server: Option<&mut AppServerSession>,
+    cancel_auth_on_escape: bool,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     // Let the terminal select and copy login URLs and device codes, even in fullscreen mode.
@@ -606,6 +636,7 @@ async fn run_onboarding_screen(
                 onboarding_screen,
                 app_server_request_handle,
                 app_server,
+                cancel_auth_on_escape,
                 tui,
             )
             .await
@@ -620,10 +651,12 @@ async fn run_onboarding_screen_inner(
     mut onboarding_screen: OnboardingScreen,
     app_server_request_handle: Option<AppServerRequestHandle>,
     mut app_server: Option<&mut AppServerSession>,
+    cancel_auth_on_escape: bool,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
     use tokio_stream::StreamExt;
     let mut directory_trust_persisted = false;
+    let mut deferred_app_server_events = Vec::new();
     // One-time guard to fully clear the screen after ChatGPT login success message is shown
     let mut did_full_clear_after_success = false;
     let mut pending_copy: Option<(u64, String)> = None;
@@ -671,6 +704,12 @@ async fn run_onboarding_screen_inner(
                                     *widget.error.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
                                 }
                                 tui.frame_requester().schedule_frame();
+                            } else if cancel_auth_on_escape
+                                && key_event.kind == KeyEventKind::Press
+                                && keys::CANCEL.is_pressed(key_event)
+                            {
+                                onboarding_screen.cancel_auth_if_active();
+                                onboarding_screen.is_done = true;
                             } else {
                                 onboarding_screen.handle_key_event(key_event);
                             }
@@ -766,13 +805,24 @@ async fn run_onboarding_screen_inner(
                 if let Some(event) = event {
                     match event.event {
                         AppServerEvent::ServerNotification(notification) => {
-                            onboarding_screen.handle_app_server_notification(*notification);
+                            match notification.as_ref() {
+                                ServerNotification::AccountLoginCompleted(_)
+                                | ServerNotification::AccountUpdated(_) => {
+                                    onboarding_screen
+                                        .handle_app_server_notification(*notification);
+                                }
+                                _ => deferred_app_server_events.push(
+                                    AppServerEvent::ServerNotification(notification),
+                                ),
+                            }
                         }
                         AppServerEvent::Disconnected { message } => {
                             return Err(color_eyre::eyre::eyre!(message));
                         }
-                        AppServerEvent::Lagged { .. }
-                        | AppServerEvent::ServerRequest(_) => {}
+                        lagged_or_request @ (AppServerEvent::Lagged { .. }
+                        | AppServerEvent::ServerRequest(_)) => {
+                            deferred_app_server_events.push(lagged_or_request);
+                        }
                     }
                 }
             }
@@ -790,9 +840,15 @@ async fn run_onboarding_screen_inner(
             },
         )?;
     }
+    let login_completed = onboarding_screen
+        .steps
+        .iter()
+        .any(|step| matches!(step, Step::Auth(widget) if widget.is_authenticated()));
     Ok(OnboardingResult {
         directory_trust_persisted,
         should_exit: onboarding_screen.should_exit(),
+        login_completed,
+        deferred_app_server_events,
     })
 }
 

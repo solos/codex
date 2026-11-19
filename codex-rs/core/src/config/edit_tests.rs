@@ -1556,6 +1556,31 @@ model_reasoning_effort = "high"
     assert_eq!(contents, expected);
 }
 
+#[tokio::test]
+async fn async_builder_set_model_name_preserves_effort_and_comments() {
+    let tmp = tempdir().expect("tmpdir");
+    let codex_home = tmp.path().to_path_buf();
+    let config_path = codex_home.join(CONFIG_TOML_FILE);
+    std::fs::write(
+        &config_path,
+        "# model selection\nmodel = \"old-model\"\nmodel_reasoning_effort = \"high\"\n",
+    )
+    .expect("seed config");
+
+    ConfigEditsBuilder::new(&codex_home)
+        .set_model_name("new-model")
+        .apply()
+        .await
+        .expect("persist");
+
+    let contents = std::fs::read_to_string(config_path).expect("read config");
+    let expected = r#"# model selection
+model = "new-model"
+model_reasoning_effort = "high"
+"#;
+    assert_eq!(contents, expected);
+}
+
 #[test]
 fn blocking_builder_set_model_round_trips_back_and_forth() {
     let tmp = tempdir().expect("tmpdir");

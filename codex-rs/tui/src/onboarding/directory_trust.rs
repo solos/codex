@@ -99,6 +99,7 @@ pub(crate) async fn check_directory_trust(
             screen,
             Some(app_server.request_handle()),
             /*app_server*/ None,
+            /*cancel_auth_on_escape*/ false,
             tui,
         )
         .await?;

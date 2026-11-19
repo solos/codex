@@ -1088,6 +1088,49 @@ impl App {
                 }
                 return Ok(self.handle_exit_mode(app_server, mode).await);
             }
+            AppEvent::Login => {
+                let result = crate::onboarding::onboarding_screen::run_login_app(
+                    crate::onboarding::onboarding_screen::OnboardingScreenArgs {
+                        show_trust_screen: false,
+                        remote_project_trust: None,
+                        show_login_screen: true,
+                        bedrock_setup_enabled: false,
+                        login_status: crate::LoginStatus::NotAuthenticated,
+                        app_server_target: self.app_server_target.clone(),
+                        app_server_request_handle: Some(app_server.request_handle()),
+                        config: self.config.clone(),
+                    },
+                    app_server,
+                    tui,
+                )
+                .await;
+                match result {
+                    Ok(result) => {
+                        for event in result.deferred_app_server_events {
+                            self.handle_app_server_event(app_server, event).await;
+                        }
+                        if result.login_completed {
+                            if let Err(err) = self.refresh_account_after_login(app_server).await {
+                                tracing::error!("failed to refresh account after login: {err}");
+                                self.chat_widget.add_error_message(format!(
+                                    "Login succeeded, but the account state could not be refreshed: {err}"
+                                ));
+                            } else {
+                                self.chat_widget.add_info_message(
+                                    "Signed in to Codex.".to_string(),
+                                    /*hint*/ None,
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!("failed to log in: {err}");
+                        self.chat_widget
+                            .add_error_message(format!("Login failed: {err}"));
+                    }
+                }
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::Logout => match app_server.logout_account().await {
                 Ok(()) => {
                     self.show_shutdown_feedback(tui)?;

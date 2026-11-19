@@ -827,6 +827,15 @@ impl ConfigEditsBuilder {
         self
     }
 
+    /// Set only the model name, preserving any configured reasoning effort.
+    pub fn set_model_name(mut self, model: &str) -> Self {
+        self.edits.push(ConfigEdit::SetPath {
+            segments: vec!["model".to_string()],
+            value: value(model),
+        });
+        self
+    }
+
     pub fn set_service_tier(mut self, service_tier: Option<String>) -> Self {
         self.edits.push(ConfigEdit::SetServiceTier { service_tier });
         self

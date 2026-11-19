@@ -302,6 +302,18 @@ impl AuthModeWidget {
         self.request_frame.schedule_frame();
     }
 
+    pub(crate) fn is_authenticated(&self) -> bool {
+        self.sign_in_state.read().is_ok_and(|state| {
+            matches!(
+                &*state,
+                SignInState::ChatGptSuccessMessage
+                    | SignInState::ChatGptSuccess
+                    | SignInState::ApiKeyConfigured
+                    | SignInState::BedrockConfigured
+            )
+        })
+    }
+
     fn set_error(&self, message: Option<String>) {
         *self.error.write().unwrap() = message;
     }
