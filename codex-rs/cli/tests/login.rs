@@ -98,6 +98,78 @@ fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
 }
 
 #[test]
+fn login_with_api_key_saves_custom_base_url() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+    let base_url = "https://proxy.example.test/v1";
+
+    let login = codex_command(codex_home.path())?
+        .args([
+            "-c",
+            "forced_login_method=\"api\"",
+            "login",
+            "--with-api-key",
+            "--base-url",
+            base_url,
+        ])
+        .write_stdin("sk-test\n")
+        .assert()
+        .success();
+    insta::assert_snapshot!(String::from_utf8_lossy(&login.get_output().stderr), @r"
+    Reading API key from stdin...
+    Base URL saved: https://proxy.example.test/v1
+    API key saved. Authentication is checked when you send a request.
+    ");
+
+    let config: toml::Value = toml::from_str(&std::fs::read_to_string(
+        codex_home.path().join("config.toml"),
+    )?)?;
+    assert_eq!(config["openai_base_url"].as_str(), Some(base_url));
+    assert_eq!(
+        read_auth_json(codex_home.path())?["OPENAI_API_KEY"],
+        "sk-test"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn login_with_api_key_rejects_invalid_base_url() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+
+    codex_command(codex_home.path())?
+        .args([
+            "login",
+            "--with-api-key",
+            "--base-url",
+            "proxy.example.test/v1",
+        ])
+        .write_stdin("sk-test\n")
+        .assert()
+        .failure()
+        .stderr(contains("Base URL must start with http:// or https://"));
+
+    assert!(!codex_home.path().join("auth.json").exists());
+
+    Ok(())
+}
+
+#[test]
+fn login_base_url_requires_api_key_stdin() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+
+    codex_command(codex_home.path())?
+        .args(["login", "--base-url", "https://proxy.example.test/v1"])
+        .assert()
+        .failure()
+        .stderr(contains("--base-url can only be used with --with-api-key."));
+
+    Ok(())
+}
+
+#[test]
 fn api_key_auth_commands_work_when_log_dir_is_unavailable() -> Result<()> {
     let codex_home = TempDir::new()?;
     let log_dir = codex_home.path().join("unavailable-logs");

@@ -7,9 +7,12 @@ usage-based billing
 
   Paste or type your API key below.
 
-
 ╭API key───────────────────────────────╮
 │Paste or type your API key            │
 ╰──────────────────────────────────────╯
+╭Base URL──────────────────────────────╮
+│default: https://api.openai.com/v1    │
+╰──────────────────────────────────────╯
   Press enter to save
   Press esc to go back
+  Press tab to switch fields

@@ -106,6 +106,15 @@ pub fn session_picker_view_edit(mode: SessionPickerViewMode) -> ConfigEdit {
     }
 }
 
+/// Produces a config edit that sets the top-level `openai_base_url` override
+/// for the built-in `openai` model provider.
+pub fn openai_base_url_edit(base_url: &str) -> ConfigEdit {
+    ConfigEdit::SetPath {
+        segments: vec!["openai_base_url".to_string()],
+        value: value(base_url.to_string()),
+    }
+}
+
 /// Produces a config edit that sets `[tui].status_line` to an explicit ordered list.
 ///
 /// The array is written even when it is empty so "hide the status line" stays

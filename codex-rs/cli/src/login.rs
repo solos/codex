@@ -11,6 +11,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::Config;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
+use codex_core::config::edit::openai_base_url_edit;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::AuthRouteConfig;
@@ -225,6 +226,7 @@ pub async fn run_login_with_browser(cli_config_overrides: CliConfigOverrides) ->
 pub async fn run_login_with_api_key(
     cli_config_overrides: CliConfigOverrides,
     api_key: String,
+    base_url: Option<String>,
 ) -> ! {
     let config = load_managed_login_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
@@ -238,6 +240,17 @@ pub async fn run_login_with_api_key(
         std::process::exit(1);
     }
 
+    let base_url = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if let Some(url) = base_url {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            eprintln!("Base URL must start with http:// or https://");
+            std::process::exit(1);
+        }
+    }
+
     match login_with_api_key(
         &config.codex_home,
         &api_key,
@@ -245,6 +258,17 @@ pub async fn run_login_with_api_key(
         config.auth_keyring_backend_kind(),
     ) {
         Ok(_) => {
+            if let Some(url) = base_url {
+                if let Err(err) = ConfigEditsBuilder::for_config(&config)
+                    .with_edits([openai_base_url_edit(url)])
+                    .apply()
+                    .await
+                {
+                    eprintln!("Error saving base URL: {err}");
+                    std::process::exit(1);
+                }
+                eprintln!("Base URL saved: {url}");
+            }
             eprintln!("API key saved. {API_KEY_AUTHENTICATION_NOTICE}");
             std::process::exit(0);
         }

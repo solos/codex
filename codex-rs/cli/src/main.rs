@@ -485,6 +485,13 @@ struct LoginCommand {
     with_api_key: bool,
 
     #[arg(
+        long = "base-url",
+        value_name = "URL",
+        help = "API base URL to save in config.toml alongside the API key (default: https://api.openai.com/v1); must start with http:// or https://"
+    )]
+    base_url: Option<String>,
+
+    #[arg(
         long = "with-access-token",
         help = "Read the access token from stdin (e.g. `printenv CODEX_ACCESS_TOKEN | codex login --with-access-token`)"
     )]
@@ -1148,7 +1155,10 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                     run_login_status(login_cli.config_overrides).await;
                 }
                 None => {
-                    if login_cli.with_api_key && login_cli.with_access_token {
+                    if login_cli.base_url.is_some() && !login_cli.with_api_key {
+                        eprintln!("--base-url can only be used with --with-api-key.");
+                        std::process::exit(1);
+                    } else if login_cli.with_api_key && login_cli.with_access_token {
                         eprintln!(
                             "Choose one login credential source: --with-api-key or --with-access-token."
                         );
@@ -1167,7 +1177,12 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
                         let api_key = read_api_key_from_stdin();
-                        run_login_with_api_key(login_cli.config_overrides, api_key).await;
+                        run_login_with_api_key(
+                            login_cli.config_overrides,
+                            api_key,
+                            login_cli.base_url,
+                        )
+                        .await;
                     } else if login_cli.with_access_token {
                         let access_token = read_access_token_from_stdin();
                         run_login_with_access_token(login_cli.config_overrides, access_token).await;
