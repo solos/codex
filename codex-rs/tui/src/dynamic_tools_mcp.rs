@@ -53,7 +53,6 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) enum ThreadToolTransport {
-    Disabled,
     Dynamic,
     Mcp(Arc<DynamicToolMcpServer>),
 }
@@ -76,7 +75,6 @@ impl ThreadToolTransport {
 
     pub(crate) fn configure(&self, params: &mut ThreadStartParams) {
         match self {
-            Self::Disabled => params.dynamic_tools = None,
             Self::Dynamic => {
                 params.dynamic_tools = Some(dynamic_tools::non_delegation_tool_specs());
             }

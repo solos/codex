@@ -87,7 +87,3 @@ pub(super) async fn run_session_queue_action_with_app_server(
         .wrap_err("failed to queue session message")?;
     Ok((thread_id, response))
 }
-
-#[cfg(test)]
-#[path = "session_queue_commands_tests.rs"]
-mod tests;

@@ -933,7 +933,6 @@ interrupt_message = false
         };
 
         let requirements_toml = ConfigRequirementsToml {
-            config_server: None,
             application: None,
             allowed_login_methods: None,
             allowed_chatgpt_workspaces: None,
@@ -1042,7 +1041,6 @@ interrupt_message = false
         assert!(rendered.contains(&format!(
             "allow_appshots: false (source: {requirements_source})"
         )));
-        assert!(rendered.contains(&format!()));
         assert!(rendered.contains(&format!(
             "guardian_policy_config: configured (source: {requirements_source})"
         )));

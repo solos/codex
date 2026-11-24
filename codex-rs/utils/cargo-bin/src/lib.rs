@@ -94,7 +94,7 @@ fn resolve_bin_from_env(key: &str, value: std::ffi::OsString) -> Result<PathBuf,
 macro_rules! find_resource {
     ($resource:expr) => {{
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        Ok(manifest_dir.join($resource))
+        Ok::<_, std::convert::Infallible>(manifest_dir.join($resource))
     }};
 }
 

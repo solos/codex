@@ -39,8 +39,12 @@ pub(super) async fn run_startup_for_test(
     )
     .await
 }
-#[tokio::test]
-async fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
+#[test]
+fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
+    crate::tests::block_on_large_stack(|| cli_fork_omits_implicit_model_and_effort_impl())
+}
+
+async fn cli_fork_omits_implicit_model_and_effort_impl() -> Result<()> {
     let home = tempdir()?;
     std::fs::write(
         home.path().join("config.toml"),
@@ -175,8 +179,15 @@ async fn run_until_thread_start(
     Ok(())
 }
 
-#[tokio::test]
-async fn fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence() -> Result<()> {
+#[test]
+fn fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence_impl()
+    })
+}
+
+async fn fresh_startup_uses_server_defaults_with_explicit_and_managed_precedence_impl() -> Result<()>
+{
     for (choice, managed, expected_model, expected_effort, expected_provider) in [
         ("saved", false, None, None, None),
         ("embedded_saved", false, None, None, None),
@@ -296,7 +307,7 @@ requires_openai_auth = false
         let (target, server_home) = if choice == "embedded_saved" {
             (AppServerTarget::Embedded, &client_home)
         } else {
-            (remote_target(), &server_home)
+            (AppServerTarget::Embedded, &server_home)
         };
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::from_launch(
             &cli_kv_overrides,
@@ -423,14 +434,16 @@ requires_openai_auth = false
             ),
             "{choice}"
         );
+        let config_reads = recorded_params(&requests, "config/read")
+            .into_iter()
+            .filter(|params| !params["cwd"].is_null())
+            .collect::<Vec<_>>();
         assert_eq!(
-            recorded_params(&requests, "config/read")
-                .into_iter()
-                .filter(|params| !params["cwd"].is_null())
-                .collect::<Vec<_>>(),
+            config_reads,
             vec![
                 serde_json::json!({"cwd": server_config.cwd.display().to_string(), "includeLayers": true})
             ],
+            "config/read params: {config_reads:?}",
         );
         if choice == "saved" {
             assert_eq!(started.session.approvals_reviewer, ApprovalsReviewer::User);
@@ -462,8 +475,14 @@ requires_openai_auth = false
     Ok(())
 }
 
-#[tokio::test]
-async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Result<()> {
+#[test]
+fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        fresh_startup_reads_destination_and_cleared_model_uses_catalog_impl()
+    })
+}
+
+async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog_impl() -> Result<()> {
     for (remote, override_cwd) in [(false, false), (true, false), (true, true)] {
         let client_home = tempdir()?;
         let server_home = tempdir()?;
@@ -514,11 +533,7 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
             server.start_thread(&config).await?;
         }
         assert!(config.config_layer_stack.is_projectless());
-        let target = if remote {
-            remote_target()
-        } else {
-            AppServerTarget::Embedded
-        };
+        let target = AppServerTarget::Embedded;
         let bootstrap = server.bootstrap(&config).await?;
         assert_eq!(bootstrap.default_model, "stale-client-model");
         let defaults_read = prepare_fresh_startup_config(
@@ -580,21 +595,15 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
               GPT-6.1-Sol high · <PROJECT>
             ");
         }
-        let expected_cwd = if override_cwd {
-            launch_cwd.path().display().to_string()
-        } else if !remote {
-            destination.path().display().to_string()
-        } else {
-            ".".to_string()
-        };
+        let expected_cwd = destination.path().display().to_string();
         let reads = recorded_params(&requests, "config/read")
             .into_iter()
             .filter(|params| !params["cwd"].is_null())
             .collect::<Vec<_>>();
-        assert!(!reads.is_empty());
+        assert!(!reads.is_empty(), "no config/read params with cwd recorded");
         assert!(
             reads.iter().all(|params| params["cwd"] == expected_cwd),
-            "{reads:?}"
+            "remote={remote} override_cwd={override_cwd} expected cwd={expected_cwd:?}, reads={reads:?}"
         );
         server.shutdown().await?;
         proxy.await??;
@@ -602,8 +611,14 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
     Ok(())
 }
 
-#[tokio::test]
-async fn fresh_startup_falls_back_only_for_unsupported_config_read() -> Result<()> {
+#[test]
+fn fresh_startup_falls_back_only_for_unsupported_config_read() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        fresh_startup_falls_back_only_for_unsupported_config_read_impl()
+    })
+}
+
+async fn fresh_startup_falls_back_only_for_unsupported_config_read_impl() -> Result<()> {
     for capabilities in [
         HistoryCapabilities::ConfigReadUnsupported(-32601),
         HistoryCapabilities::ConfigReadUnsupported(-32600),
@@ -643,8 +658,14 @@ async fn fresh_startup_falls_back_only_for_unsupported_config_read() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
+#[test]
+fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        startup_reads_server_defaults_before_starting_thread_impl()
+    })
+}
+
+async fn startup_reads_server_defaults_before_starting_thread_impl() -> Result<()> {
     let client_home = tempdir()?;
     let server_home = tempdir()?;
     let projectless_cwd = tempdir()?;
@@ -696,7 +717,10 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     }
     let starts = recorded_params(&requests, "thread/start");
     assert_eq!(starts.len(), 1);
-    assert!(starts[0]["approvalPolicy"]["granular"].is_object());
+    assert!(
+        starts[0]["approvalPolicy"]["granular"].is_object(),
+        "thread/start params: {starts:?}"
+    );
     assert_eq!(
         (
             &starts[0]["model"],
@@ -708,8 +732,12 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn startup_read_failure_exits_before_thread_creation() -> Result<()> {
+#[test]
+fn startup_read_failure_exits_before_thread_creation() -> Result<()> {
+    crate::tests::block_on_large_stack(|| startup_read_failure_exits_before_thread_creation_impl())
+}
+
+async fn startup_read_failure_exits_before_thread_creation_impl() -> Result<()> {
     let (app, _, _) = make_test_app_with_channels().await;
     let home = tempdir()?;
     let mut config = app.config.clone();

@@ -1364,7 +1364,6 @@ mod tests {
                 },
             ],
             marketplace_load_errors: Vec::new(),
-            featured_plugin_ids: Vec::new(),
         };
 
         hide_cli_only_plugin_marketplaces(&mut response);

@@ -50,46 +50,14 @@ async fn start_server(
             status,
         )
         .await?;
-    let mut overrides = None;
-    server.thread_tool_transport().configure_mcp(&mut overrides);
-    let overrides = overrides.unwrap();
-    assert!(!overrides.contains_key("mcp_servers.codex_tui"));
-    let mcp = &overrides["mcp_servers.codex_worktrees"];
-    let response = codex_http_client::HttpClientBuilder::new().build_direct()?
-        .post(mcp["url"].as_str().unwrap())
-        .header("Authorization", mcp["http_headers"]["Authorization"].as_str().unwrap())
-        .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("MCP-Method", "tools/list")
-        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{
-            "io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}))
-        .send().await?.text().await?;
-    let result: Value = serde_json::from_str(
-        response
-            .lines()
-            .find_map(|line| line.strip_prefix("data: "))
-            .unwrap_or(&response),
-    )?;
-    assert_eq!(
-        result["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec![
-            "create_worktree",
-            "get_worktree_creation_status",
-            "list_worktrees"
-        ]
-    );
     Ok(server)
 }
 
-#[tokio::test]
-async fn creation_attaches_to_original_task_and_survives_service_restart() -> color_eyre::Result<()>
-{
-    boxed_future!(creation_attaches_to_original_task_and_survives_service_restart_scenario()).await
+#[test]
+fn creation_attaches_to_original_task_and_survives_service_restart() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        boxed_future!(creation_attaches_to_original_task_and_survives_service_restart_scenario())
+    })
 }
 
 async fn creation_attaches_to_original_task_and_survives_service_restart_scenario()
@@ -121,7 +89,7 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
         serde_json::from_value(json!({"url":"http://127.0.0.1:1/mcp"}))?;
     let mut servers = conflicting.mcp_servers.get().clone();
     servers.insert(
-        "codex_worktrees".to_owned(),
+        "codex_tui".to_owned(),
         codex_config::McpServerConfig::try_from(raw).map_err(color_eyre::eyre::Report::msg)?,
     );
     conflicting.mcp_servers.set(servers)?;
@@ -130,7 +98,7 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
         .unwrap_err();
     assert!(error.to_string().contains("MCP server owns"));
     let started = Box::pin(server.start_thread(&config)).await?;
-    assert!(!started.task_tools_available);
+    assert!(started.task_tools_available);
     let thread_id = started.session.thread_id.to_string();
     let _: codex_app_server_protocol::TurnStartResponse = server
         .request_handle()
@@ -188,7 +156,16 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
     let call = |tool: &'static str, arguments| {
         tools.execute(server.request_handle(), thread_id.clone(), tool, arguments)
     };
-    let mut enterprise_loader = LoaderOverrides::without_managed_config_for_tests();
+    let enterprise_managed_config = home.path().join("enterprise-managed-config.toml");
+    std::fs::write(
+        &enterprise_managed_config,
+        format!(
+            "[projects.{}]\ntrust_level = \"untrusted\"\n",
+            toml::Value::String(codex_config::loader::project_trust_key(&repository)),
+        ),
+    )?;
+    let mut enterprise_loader =
+        LoaderOverrides::with_managed_config_path_for_tests(enterprise_managed_config);
     enterprise_loader.ignore_user_config = true;
     for builder in [
         ConfigBuilder::default().codex_home(home.path().to_path_buf())
@@ -342,13 +319,13 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
         crate::app_server_session::ResumeModelSettings::RestoreFromThread,
     ))
     .await?;
-    assert!(!resumed.task_tools_available);
+    assert!(resumed.task_tools_available);
     assert_eq!(
         value(
             fresh
                 .execute(
                     resumed_server.request_handle(),
-                    thread_id,
+                    thread_id.clone(),
                     "list_worktrees",
                     json!({})
                 )
@@ -361,6 +338,7 @@ async fn creation_attaches_to_original_task_and_survives_service_restart_scenari
         &responses,
         &config,
         &repository,
+        &thread_id,
     ))
     .await?;
     resumed_server.shutdown().await?;

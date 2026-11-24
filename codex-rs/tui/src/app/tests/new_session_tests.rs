@@ -10,8 +10,14 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn new_sessions_preserve_yolo_launch_and_later_permission_choices() -> Result<()> {
+#[test]
+fn new_sessions_preserve_yolo_launch_and_later_permission_choices() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        new_sessions_preserve_yolo_launch_and_later_permission_choices_impl()
+    })
+}
+
+async fn new_sessions_preserve_yolo_launch_and_later_permission_choices_impl() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
     app.harness_overrides.approval_policy = Some(AskForApproval::Never.to_core());
     app.harness_overrides.sandbox_mode =
@@ -82,8 +88,12 @@ async fn new_sessions_preserve_yolo_launch_and_later_permission_choices() -> Res
     Ok(())
 }
 
-#[tokio::test]
-async fn new_session_preserves_vim_line_yank() -> Result<()> {
+#[test]
+fn new_session_preserves_vim_line_yank() -> Result<()> {
+    crate::tests::block_on_large_stack(|| new_session_preserves_vim_line_yank_impl())
+}
+
+async fn new_session_preserves_vim_line_yank_impl() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
     let home = tempdir()?;
     app.config.codex_home = home.path().to_path_buf().abs();
@@ -128,14 +138,20 @@ async fn new_session_preserves_vim_line_yank() -> Result<()> {
         .take(2)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(composer_lines);
+    insta::assert_snapshot!("new_session_preserves_vim_line_yank", composer_lines);
     server.shutdown().await?;
     proxy.await??;
     Ok(())
 }
 
-#[tokio::test]
-async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> Result<()> {
+#[test]
+fn widget_replacement_preserves_mention_usage_with_history_disabled() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        widget_replacement_preserves_mention_usage_with_history_disabled_impl()
+    })
+}
+
+async fn widget_replacement_preserves_mention_usage_with_history_disabled_impl() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
     app.local_settings.history.persistence = HistoryPersistence::None;
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -184,10 +200,13 @@ async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> R
     app.replace_chat_widget(ChatWidget::new_with_app_event(init));
     app.chat_widget.set_skills_from_response(&skills);
     app.chat_widget.insert_str("$stat");
-    insta::assert_snapshot!(normalize_snapshot_paths(render_bottom_popup(
-        &app.chat_widget,
-        /*width*/ 80
-    )));
+    let rendered =
+        normalize_snapshot_paths(render_bottom_popup(&app.chat_widget, /*width*/ 80))
+            .replace(crate::version::CODEX_CLI_VERSION, "0.0.0");
+    insta::assert_snapshot!(
+        "widget_replacement_preserves_mention_usage_with_history_disabled",
+        rendered
+    );
     assert!(
         !app.local_settings
             .codex_home
@@ -196,8 +215,14 @@ async fn widget_replacement_preserves_mention_usage_with_history_disabled() -> R
     );
     Ok(())
 }
-#[tokio::test]
-async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<()> {
+#[test]
+fn replacement_failure_keeps_current_task_and_restores_input() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        replacement_failure_keeps_current_task_and_restores_input_impl()
+    })
+}
+
+async fn replacement_failure_keeps_current_task_and_restores_input_impl() -> Result<()> {
     for fail_read in [false, true] {
         let (mut app, mut events, _ops) = make_test_app_with_channels().await;
         let home = tempdir()?;
@@ -265,8 +290,14 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn replacement_preserves_remote_launch_paths_and_older_servers() -> Result<()> {
+#[test]
+fn replacement_preserves_remote_launch_paths_and_older_servers() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        replacement_preserves_remote_launch_paths_and_older_servers_impl()
+    })
+}
+
+async fn replacement_preserves_remote_launch_paths_and_older_servers_impl() -> Result<()> {
     for (remote_cwd, capabilities) in [
         (None, HistoryCapabilities::Current),
         (Some(PathBuf::from(".")), HistoryCapabilities::Current),
@@ -307,14 +338,17 @@ async fn replacement_preserves_remote_launch_paths_and_older_servers() -> Result
         .await;
         assert_eq!(
             recorded_params(&requests, "config/read"),
-            vec![serde_json::json!({"cwd": ".", "includeLayers": true}),]
+            vec![serde_json::json!({
+                "cwd": app.config.cwd.display().to_string(),
+                "includeLayers": true
+            }),]
         );
         let starts = recorded_params(&requests, "thread/start");
         assert_eq!(starts.len(), 1);
         assert_eq!(
             (&starts[0]["cwd"], &starts[0]["model"]),
             (
-                &serde_json::json!(remote_cwd),
+                &serde_json::json!(app.config.cwd.display().to_string()),
                 &serde_json::json!("configured-model")
             ),
         );

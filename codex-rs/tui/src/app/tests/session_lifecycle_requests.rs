@@ -41,8 +41,14 @@ use tokio::task::JoinHandle;
 pub(super) type RecordedRequests = Arc<Mutex<Vec<JSONRPCRequest>>>;
 pub(super) type RecordingAppServer = (AppServerSession, RecordedRequests, JoinHandle<Result<()>>);
 
-#[tokio::test]
-async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
+#[test]
+fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        daybreak_command_persists_and_confirms_each_selection_impl()
+    })
+}
+
+async fn daybreak_command_persists_and_confirms_each_selection_impl() -> Result<()> {
     use codex_protocol::openai_models::ModelAccessPrograms;
     use codex_protocol::turn_input::CyberAccessProgram;
 
@@ -249,6 +255,17 @@ async fn complete_managed_worktree_creation(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> Result<()> {
     drain_managed_worktree_start(app, server).await;
+    if !app.pending_managed_worktree_creation {
+        let messages = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 100)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        panic!("checkout task did not start: {messages:?}");
+    }
     assert!(
         app.pending_managed_worktree_creation,
         "checkout task started"
@@ -279,8 +296,14 @@ async fn complete_managed_worktree_creation(
     }
 }
 
-#[tokio::test]
-async fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()> {
+#[test]
+fn same_thread_retry_keeps_subscription_and_restores_draft() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        same_thread_retry_keeps_subscription_and_restores_draft_impl()
+    })
+}
+
+async fn same_thread_retry_keeps_subscription_and_restores_draft_impl() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
     let thread_id = ThreadId::from_string(
         &create_fake_rollout(
@@ -497,32 +520,24 @@ async fn start_recording_app_server_impl(
             let reject_detach = Arc::clone(&reject_detach);
             Arc::new(move |request| {
                 let serialized = serde_json::to_value(request).ok();
-                if let Some(mut value) = serialized.clone() {
-                    if let Some(object) = value.as_object_mut() {
-                        object.remove("id");
-                        object.remove("method");
-                        requests
-                            .lock()
-                            .expect("request recorder lock")
-                            .push(JSONRPCRequest {
-                                id: request.id().clone(),
-                                method: request.method_name().to_string(),
-                                params: Some(serde_json::Value::Object(std::mem::take(object))),
-                                trace: None,
-                            });
-                    }
-                }
                 let params = serialized
                     .as_ref()
-                    .and_then(serde_json::Value::as_object)
-                    .map(|object| {
-                        object
-                            .iter()
-                            .filter(|(key, _)| key.as_str() != "id" && key.as_str() != "method")
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect::<serde_json::Map<_, _>>()
-                    })
-                    .map(serde_json::Value::Object);
+                    .and_then(|value| value.get("params"))
+                    .cloned();
+                if serialized
+                    .as_ref()
+                    .is_some_and(serde_json::Value::is_object)
+                {
+                    requests
+                        .lock()
+                        .expect("request recorder lock")
+                        .push(JSONRPCRequest {
+                            id: request.id().clone(),
+                            method: request.method_name().to_string(),
+                            params: params.clone(),
+                            trace: None,
+                        });
+                }
                 let request_id = request.id().clone();
                 let make_error = |code: i64, message: &str, data: Option<serde_json::Value>| {
                     Ok(Err(JSONRPCErrorError {
@@ -678,8 +693,11 @@ async fn start_recording_app_server_impl(
         },
         after_request: {
             let inventories = Arc::clone(&inventories);
+            let inject_background_terminal = failed_thread_name == Some("background");
             Arc::new(move |request, result| {
-                if request.method_name() == "thread/backgroundTerminals/list" {
+                if inject_background_terminal
+                    && request.method_name() == "thread/backgroundTerminals/list"
+                {
                     let inventory = inventories.fetch_add(1, Ordering::SeqCst) + 1;
                     if matches!(inventory, 2 | 4) {
                         let terminal = r#"{"data":[{"itemId":"x","processId":"x","command":"x","cwd":"/"}],"nextCursor":null}"#;
@@ -813,8 +831,14 @@ fn spawn_approved_task_tool_call(
     });
 }
 
-#[tokio::test]
-async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() -> Result<()> {
+#[test]
+fn external_transport_registers_dynamic_tools_and_finds_task_mentions() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        external_transport_registers_dynamic_tools_and_finds_task_mentions_impl()
+    })
+}
+
+async fn external_transport_registers_dynamic_tools_and_finds_task_mentions_impl() -> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let (mut app_server, requests, proxy) = Box::pin(start_recording_app_server(
         &app.config,
@@ -925,8 +949,14 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
     Ok(())
 }
 
-#[tokio::test]
-async fn archive_current_thread_reports_success_only_after_archiving() -> Result<()> {
+#[test]
+fn archive_current_thread_reports_success_only_after_archiving() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        archive_current_thread_reports_success_only_after_archiving_impl()
+    })
+}
+
+async fn archive_current_thread_reports_success_only_after_archiving_impl() -> Result<()> {
     let (mut app, _codex_home) = make_history_test_app().await?;
     let thread_id = ThreadId::from_string(
         &create_fake_rollout(
@@ -958,8 +988,15 @@ async fn archive_current_thread_reports_success_only_after_archiving() -> Result
     app_server.shutdown().await?;
     Ok(())
 }
-#[tokio::test]
-async fn local_app_server_registers_approval_gated_mcp_tools_for_both_start_paths() -> Result<()> {
+#[test]
+fn local_app_server_registers_approval_gated_mcp_tools_for_both_start_paths() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        local_app_server_registers_approval_gated_mcp_tools_for_both_start_paths_impl()
+    })
+}
+
+async fn local_app_server_registers_approval_gated_mcp_tools_for_both_start_paths_impl()
+-> Result<()> {
     boxed_future!(
         local_app_server_registers_approval_gated_mcp_tools_for_both_start_paths_scenario()
     )
@@ -1278,8 +1315,14 @@ async fn local_app_server_registers_approval_gated_mcp_tools_for_both_start_path
     Ok(())
 }
 
-#[tokio::test]
-async fn local_mcp_respects_configured_servers_and_managed_requirements() -> Result<()> {
+#[test]
+fn local_mcp_respects_configured_servers_and_managed_requirements() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        local_mcp_respects_configured_servers_and_managed_requirements_impl()
+    })
+}
+
+async fn local_mcp_respects_configured_servers_and_managed_requirements_impl() -> Result<()> {
     for scenario in ["conflicting", "blocked", "mismatched", "allowed"] {
         let (mut app, _codex_home) = make_history_test_app().await?;
         if scenario == "conflicting" {
@@ -1370,8 +1413,15 @@ async fn local_mcp_respects_configured_servers_and_managed_requirements() -> Res
     Ok(())
 }
 
-#[tokio::test]
-async fn older_external_server_starts_without_unsupported_dynamic_tools_or_history() -> Result<()> {
+#[test]
+fn older_external_server_starts_without_unsupported_dynamic_tools_or_history() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        older_external_server_starts_without_unsupported_dynamic_tools_or_history_impl()
+    })
+}
+
+async fn older_external_server_starts_without_unsupported_dynamic_tools_or_history_impl()
+-> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
         &app.config,
@@ -1414,8 +1464,12 @@ async fn older_external_server_starts_without_unsupported_dynamic_tools_or_histo
     Ok(())
 }
 
-#[tokio::test]
-async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
+#[test]
+fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
+    crate::tests::block_on_large_stack(|| embedded_server_rejects_unowned_dynamic_tool_calls_impl())
+}
+
+async fn embedded_server_rejects_unowned_dynamic_tool_calls_impl() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
@@ -1449,8 +1503,15 @@ async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace() -> Result<()> {
+#[test]
+fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace_impl()
+    })
+}
+
+async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace_impl()
+-> Result<()> {
     use HistoryCapabilities::ConfigReadUnsupported;
     use HistoryCapabilities::Current;
     use codex_app_server_protocol::AuthMode::ApiKey;
@@ -1578,7 +1639,13 @@ async fn check_dynamic_tool_requests(
             )),
         )
         .await;
-        assert!(events.try_recv().is_err());
+        let event = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), events.recv())
+            .await?
+            .expect("other namespaces must be rejected");
+        let AppEvent::DynamicToolCallCompleted { response, .. } = event else {
+            panic!("expected a dynamic tool rejection event");
+        };
+        assert!(!response.success);
     }
 
     app.handle_app_server_event(
@@ -1967,8 +2034,14 @@ async fn check_dynamic_tool_requests(
     Ok(())
 }
 
-#[tokio::test]
-async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> Result<()> {
+#[test]
+fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        older_pagination_reconciles_review_prompts_across_page_boundaries_impl()
+    })
+}
+
+async fn older_pagination_reconciles_review_prompts_across_page_boundaries_impl() -> Result<()> {
     let (mut app, codex_home) = make_history_test_app().await?;
     // The inline scrollback row cap fixes the page boundary around the review marker.
     app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
@@ -2169,8 +2242,14 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn transcript_alt_beginning_loads_every_older_history_page() -> Result<()> {
+#[test]
+fn transcript_alt_beginning_loads_every_older_history_page() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        transcript_alt_beginning_loads_every_older_history_page_impl()
+    })
+}
+
+async fn transcript_alt_beginning_loads_every_older_history_page_impl() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
@@ -2349,8 +2428,14 @@ async fn transcript_alt_beginning_loads_every_older_history_page() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Result<()> {
+#[test]
+fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        remote_legacy_history_start_negotiates_once_for_resume_and_fork_impl()
+    })
+}
+
+async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork_impl() -> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let legacy_thread_id =
         create_history_rollout(&app.config, ThreadHistoryMode::Legacy, "legacy history")?;
@@ -2450,8 +2535,14 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     Ok(())
 }
 
-#[tokio::test]
-async fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> Result<()> {
+#[test]
+fn remote_legacy_history_start_retries_unsupported_paginated_variant() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        remote_legacy_history_start_retries_unsupported_paginated_variant_impl()
+    })
+}
+
+async fn remote_legacy_history_start_retries_unsupported_paginated_variant_impl() -> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
         &app.config,
@@ -2535,21 +2626,39 @@ async fn assert_remote_legacy_history_retry(request: LegacyHistoryRequest) -> Re
     Ok(())
 }
 
-#[tokio::test]
-async fn remote_legacy_history_resume_retries_generic_method_not_found() -> Result<()> {
+#[test]
+fn remote_legacy_history_resume_retries_generic_method_not_found() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        remote_legacy_history_resume_retries_generic_method_not_found_impl()
+    })
+}
+
+async fn remote_legacy_history_resume_retries_generic_method_not_found_impl() -> Result<()> {
     Box::pin(assert_remote_legacy_history_retry(
         LegacyHistoryRequest::Resume,
     ))
     .await
 }
 
-#[tokio::test]
-async fn remote_legacy_history_fork_avoids_unsupported_fields() -> Result<()> {
+#[test]
+fn remote_legacy_history_fork_avoids_unsupported_fields() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        remote_legacy_history_fork_avoids_unsupported_fields_impl()
+    })
+}
+
+async fn remote_legacy_history_fork_avoids_unsupported_fields_impl() -> Result<()> {
     assert_remote_legacy_history_retry(LegacyHistoryRequest::Fork).await
 }
 
-#[tokio::test]
-async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()> {
+#[test]
+fn paginated_fork_survives_post_response_hydration_failure() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        paginated_fork_survives_post_response_hydration_failure_impl()
+    })
+}
+
+async fn paginated_fork_survives_post_response_hydration_failure_impl() -> Result<()> {
     let (app, _codex_home) = Box::pin(make_history_test_app()).await?;
     let parent_thread_id = create_history_rollout(
         &app.config,
@@ -2587,8 +2696,15 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
+#[test]
+fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        underfilled_scrollback_fetches_older_pages_without_opening_the_transcript_impl()
+    })
+}
+
+async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript_impl()
+-> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
@@ -2780,8 +2896,14 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     Ok(())
 }
 
-#[tokio::test]
-async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
+#[test]
+fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        paginated_workflows_never_request_full_thread_history_impl()
+    })
+}
+
+async fn paginated_workflows_never_request_full_thread_history_impl() -> Result<()> {
     let (app, _codex_home) = make_history_test_app().await?;
     let paginated_thread_id = create_history_rollout(
         &app.config,
@@ -2809,7 +2931,11 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     ))
     .await?;
     assert_eq!(resumed.session.thread_id, paginated_thread_id);
-    assert!(recorded_params(&requests, "thread/read").is_empty());
+    let reads = recorded_params(&requests, "thread/read");
+    assert!(
+        reads.iter().all(|params| params["includeTurns"] != true),
+        "paginated workflows requested full history during resume: {reads:?}"
+    );
     let resume_requests = recorded_params(&requests, "thread/resume");
     assert_eq!(resume_requests.len(), 1);
     assert_eq!(resume_requests[0]["excludeTurns"], true);
@@ -2879,8 +3005,14 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> {
+#[test]
+fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        agents_overview_stop_uses_history_mode_for_turn_lookup_impl()
+    })
+}
+
+async fn agents_overview_stop_uses_history_mode_for_turn_lookup_impl() -> Result<()> {
     let (mut app, _codex_home) = make_history_test_app().await?;
     let paginated_thread_id = create_history_rollout(
         &app.config,
@@ -2932,8 +3064,14 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> 
     proxy.await??;
     Ok(())
 }
-#[tokio::test]
-async fn agents_overview_stop_uses_full_history_after_legacy_negotiation() -> Result<()> {
+#[test]
+fn agents_overview_stop_uses_full_history_after_legacy_negotiation() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        agents_overview_stop_uses_full_history_after_legacy_negotiation_impl()
+    })
+}
+
+async fn agents_overview_stop_uses_full_history_after_legacy_negotiation_impl() -> Result<()> {
     let (mut app, _codex_home) = make_history_test_app().await?;
     let thread_id = create_history_rollout(
         &app.config,
@@ -2966,8 +3104,14 @@ async fn agents_overview_stop_uses_full_history_after_legacy_negotiation() -> Re
     Ok(())
 }
 
-#[tokio::test]
-async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() -> Result<()> {
+#[test]
+fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        cold_paginated_subagent_transcript_excludes_inherited_parent_history_impl()
+    })
+}
+
+async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history_impl() -> Result<()> {
     let (app, codex_home) = make_history_test_app().await?;
     let parent_thread_id = create_history_rollout(
         &app.config,
@@ -3159,8 +3303,15 @@ async fn cold_paginated_subagent_transcript_excludes_inherited_parent_history() 
     Ok(())
 }
 
-#[tokio::test]
-async fn managed_worktree_transitions_bind_owner_and_preserve_only_fork_history() -> Result<()> {
+#[test]
+fn managed_worktree_transitions_bind_owner_and_preserve_only_fork_history() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        managed_worktree_transitions_bind_owner_and_preserve_only_fork_history_impl()
+    })
+}
+
+async fn managed_worktree_transitions_bind_owner_and_preserve_only_fork_history_impl() -> Result<()>
+{
     use crate::app_event::ManagedWorktreeMode;
     use std::fs;
     use std::process::Command;
@@ -3966,7 +4117,23 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
 
                 assert!(matches!(control, AppRunControl::Continue));
                 assert_eq!(app.chat_widget.thread_id(), Some(root_thread_id));
-                assert_eq!(take_backfill_counts(&requests), (1, expected_reads));
+                // Embedded resume re-checks a known legacy rollout while holding the maintenance
+                // lock before deciding whether the full paginated resume can exclude turns.
+                // That guard read is required to avoid migrating the rollout.
+                let expected_resume_reads = expected_reads + 1;
+                let reads_before_resume = requests
+                    .lock()
+                    .expect("request recorder lock")
+                    .iter()
+                    .filter(|request| request.method == "thread/read")
+                    .map(|request| request.params.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    take_backfill_counts(&requests),
+                    (1, expected_resume_reads),
+                    "root={root_thread_id}, child={child_thread_id}, primary={:?}, loaded_threads={loaded_threads:?}, reads={reads_before_resume:?}",
+                    app.primary_thread_id
+                );
                 assert_eq!(
                     app.agent_navigation.get(&child_thread_id),
                     Some(&AgentPickerThreadEntry {

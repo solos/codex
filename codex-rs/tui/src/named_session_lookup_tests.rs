@@ -168,8 +168,12 @@ fn write_rollout(
     Ok(rollout_path.to_path_buf())
 }
 
-#[tokio::test]
-async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> {
+#[test]
+fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| resolves_name_and_preview_from_server_list_impl())
+}
+
+async fn resolves_name_and_preview_from_server_list_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -257,8 +261,12 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
     Ok(())
 }
 
-#[tokio::test]
-async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()> {
+#[test]
+fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| rejects_duplicate_labels_across_server_pages_impl())
+}
+
+async fn rejects_duplicate_labels_across_server_pages_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -328,8 +336,12 @@ async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()
     Ok(())
 }
 
-#[tokio::test]
-async fn skips_stale_listed_thread_before_valid_label() -> color_eyre::Result<()> {
+#[test]
+fn skips_stale_listed_thread_before_valid_label() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| skips_stale_listed_thread_before_valid_label_impl())
+}
+
+async fn skips_stale_listed_thread_before_valid_label_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;

@@ -1,12 +1,13 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 204
 expression: popup
 ---
   Plugins
   Browse plugins from available marketplaces.
   Installed 1 of 4 available plugins.
 
-   All Plugins   Installed (1)   OpenAI Curated   Workspace   Repo Marketplace   Add Marketplace
+   All Plugins   Installed (1)   OpenAI Curated   Repo Marketplace   Add Marketplace
 
   Type to search plugins
 

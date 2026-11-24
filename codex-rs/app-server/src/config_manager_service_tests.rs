@@ -1607,11 +1607,16 @@ async fn write_value_rejects_exact_managed_requirement() {
     let tmp = tempdir().expect("tempdir");
     let path = tmp.path().join(CONFIG_TOML_FILE);
     std::fs::write(&path, "allow_login_shell = true\n").unwrap();
+    std::fs::write(
+        tmp.path().join("requirements.toml"),
+        "allow_login_shell = false\n",
+    )
+    .unwrap();
 
     let service = ConfigManager::new_for_tests(
         tmp.path().to_path_buf(),
         vec![],
-        LoaderOverrides::without_managed_config_for_tests(),
+        LoaderOverrides::with_managed_config_path_for_tests(tmp.path().join("managed_config.toml")),
     );
 
     let error = service
@@ -1664,10 +1669,13 @@ enabled = false
 "#,
             toml_path(tmp.path(), "managed-sqlite"),
         );
+        std::fs::write(tmp.path().join("requirements.toml"), requirements).unwrap();
         let service = ConfigManager::new_for_tests(
             tmp.path().to_path_buf(),
             vec![],
-            LoaderOverrides::without_managed_config_for_tests(),
+            LoaderOverrides::with_managed_config_path_for_tests(
+                tmp.path().join("managed_config.toml"),
+            ),
         );
 
         let response = service
@@ -2910,4 +2918,8 @@ async fn permission_config_reload_merges_session_layers() -> Result<()> {
         vec!["first", "second"]
     );
     Ok(())
+}
+
+fn toml_path(tmp: &Path, name: &str) -> String {
+    tmp.join(name).to_string_lossy().replace('\\', "\\\\")
 }

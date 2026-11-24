@@ -10,8 +10,14 @@ use crate::session_start::complete_session_start;
 use codex_app_server_protocol::ThreadHistoryMode;
 use pretty_assertions::assert_eq;
 
-#[tokio::test]
-async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Result<()> {
+#[test]
+fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        foreign_backend_selection_cannot_resume_same_id_or_unarchive_impl()
+    })
+}
+
+async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive_impl() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let (mut server, requests, proxy) = start_recording_app_server(
@@ -102,8 +108,14 @@ async fn foreign_backend_selection_cannot_resume_same_id_or_unarchive() -> Resul
     proxy.await??;
     Ok(())
 }
-#[tokio::test]
-async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()> {
+#[test]
+fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        auxiliary_picker_connection_preserves_backend_selection_impl()
+    })
+}
+
+async fn auxiliary_picker_connection_preserves_backend_selection_impl() -> Result<()> {
     let mut app = make_test_app().await;
     let backend_id = BackendId::new();
     let mut sessions = Vec::new();
@@ -153,8 +165,14 @@ async fn auxiliary_picker_connection_preserves_backend_selection() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn startup_rejects_foreign_resume_and_fork_before_requests() -> Result<()> {
+#[test]
+fn startup_rejects_foreign_resume_and_fork_before_requests() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        startup_rejects_foreign_resume_and_fork_before_requests_impl()
+    })
+}
+
+async fn startup_rejects_foreign_resume_and_fork_before_requests_impl() -> Result<()> {
     let app = make_test_app().await;
     let target = SessionTarget {
         backend_id: BackendId::new(),
@@ -197,8 +215,14 @@ async fn startup_rejects_foreign_resume_and_fork_before_requests() -> Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn prepared_resume_cannot_activate_through_another_backend() -> Result<()> {
+#[test]
+fn prepared_resume_cannot_activate_through_another_backend() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        prepared_resume_cannot_activate_through_another_backend_impl()
+    })
+}
+
+async fn prepared_resume_cannot_activate_through_another_backend_impl() -> Result<()> {
     let (mut app, mut events, _) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let (mut server, requests, proxy) = start_recording_app_server(

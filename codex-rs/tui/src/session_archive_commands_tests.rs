@@ -148,8 +148,12 @@ fn thread_metadata(
     metadata
 }
 
-#[tokio::test]
-async fn archives_by_sqlite_name() -> color_eyre::Result<()> {
+#[test]
+fn archives_by_sqlite_name() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| archives_by_sqlite_name_impl())
+}
+
+async fn archives_by_sqlite_name_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -200,8 +204,12 @@ async fn archives_by_sqlite_name() -> color_eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn unarchives_by_sqlite_name() -> color_eyre::Result<()> {
+#[test]
+fn unarchives_by_sqlite_name() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| unarchives_by_sqlite_name_impl())
+}
+
+async fn unarchives_by_sqlite_name_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -252,8 +260,15 @@ async fn unarchives_by_sqlite_name() -> color_eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn delete_refuses_same_label_in_active_and_archived_sessions() -> color_eyre::Result<()> {
+#[test]
+fn delete_refuses_same_label_in_active_and_archived_sessions() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        delete_refuses_same_label_in_active_and_archived_sessions_impl()
+    })
+}
+
+async fn delete_refuses_same_label_in_active_and_archived_sessions_impl() -> color_eyre::Result<()>
+{
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -306,8 +321,12 @@ async fn delete_refuses_same_label_in_active_and_archived_sessions() -> color_ey
     Ok(())
 }
 
-#[tokio::test]
-async fn refuses_action_with_stale_sqlite_collection() -> color_eyre::Result<()> {
+#[test]
+fn refuses_action_with_stale_sqlite_collection() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| refuses_action_with_stale_sqlite_collection_impl())
+}
+
+async fn refuses_action_with_stale_sqlite_collection_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -369,8 +388,12 @@ async fn refuses_action_with_stale_sqlite_collection() -> color_eyre::Result<()>
     Ok(())
 }
 
-#[tokio::test]
-async fn trusts_sqlite_name_over_legacy_index_for_delete() -> color_eyre::Result<()> {
+#[test]
+fn trusts_sqlite_name_over_legacy_index_for_delete() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| trusts_sqlite_name_over_legacy_index_for_delete_impl())
+}
+
+async fn trusts_sqlite_name_over_legacy_index_for_delete_impl() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;
@@ -437,8 +460,15 @@ async fn trusts_sqlite_name_over_legacy_index_for_delete() -> color_eyre::Result
     Ok(())
 }
 
-#[tokio::test]
-async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_eyre::Result<()> {
+#[test]
+fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        queues_non_interactive_and_custom_sessions_by_server_label_impl()
+    })
+}
+
+async fn queues_non_interactive_and_custom_sessions_by_server_label_impl() -> color_eyre::Result<()>
+{
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;
     let runtime = state_runtime(&config).await?;

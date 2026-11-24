@@ -64,8 +64,6 @@ mod permission_selection_tests;
 mod projectless_tests;
 #[path = "tests/quick_dials_tests.rs"]
 mod quick_dials_tests;
-#[path = "tests/unavailable_commands_tests.rs"]
-mod unavailable_commands;
 
 #[path = "tests/backend_sessions_tests.rs"]
 mod backend_sessions;

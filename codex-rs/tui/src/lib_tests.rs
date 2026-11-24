@@ -22,7 +22,6 @@ fn tui_startup_future_stays_bounded() {
         Cli::parse_from(["codex"]),
         Arg0DispatchPaths::default(),
         LoaderOverrides::default(),
-        /*explicit_remote_endpoint*/ None,
     );
     let size = std::mem::size_of_val(&future);
 
@@ -41,6 +40,52 @@ async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         .codex_home(temp_dir.path().to_path_buf())
         .build()
         .await
+}
+
+pub(crate) async fn start_test_embedded_app_server(
+    config: Config,
+) -> color_eyre::Result<InProcessAppServerClient> {
+    let state_db = init_state_db_for_app_server_target(&config, &AppServerTarget::Embedded).await?;
+    start_embedded_app_server(
+        Arg0DispatchPaths::default(),
+        config,
+        Vec::new(),
+        LoaderOverrides::default(),
+        /*strict_config*/ false,
+        codex_feedback::CodexFeedback::new(),
+        /*log_db*/ None,
+        state_db,
+        Arc::new(EnvironmentManager::default_for_tests()),
+        Default::default(),
+    )
+    .await
+}
+
+/// Runs `future` on a thread with a stack large enough for the embedded
+/// app-server startup future, which overflows the default test-thread stack.
+/// A dedicated multi-thread runtime keeps spawned tasks on big stacks too.
+pub(crate) fn block_on_large_stack<F, Fut>(make_future: F) -> Fut::Output
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future,
+    Fut::Output: Send + 'static,
+{
+    const TEST_STACK_SIZE_BYTES: usize = 12 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_stack_size(TEST_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()
+                .expect("failed to build large-stack test runtime")
+                .block_on(make_future())
+        })
+        .expect("failed to spawn large-stack test thread")
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
 pub(crate) fn write_session_rollout(

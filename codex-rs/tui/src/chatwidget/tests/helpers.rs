@@ -1512,8 +1512,19 @@ pub(super) fn plugins_test_response(
     PluginListResponse {
         marketplaces,
         marketplace_load_errors: Vec::new(),
-        featured_plugin_ids: Vec::new(),
     }
+}
+
+pub(super) fn render_loaded_plugins_popup(
+    chat: &mut ChatWidget,
+    mut response: PluginListResponse,
+) -> String {
+    response
+        .marketplaces
+        .retain(|marketplace| marketplace.path.is_some());
+    chat.on_plugins_loaded(chat.config.cwd.to_path_buf(), Ok(response));
+    chat.add_plugins_output();
+    render_bottom_popup(chat, /*width*/ 100)
 }
 
 pub(super) fn plugins_test_detail(
@@ -1529,7 +1540,6 @@ pub(super) fn plugins_test_detail(
         marketplace_name: "ChatGPT Marketplace".to_string(),
         marketplace_path: Some(plugins_test_absolute_path("marketplaces/chatgpt")),
         summary,
-        share_url: None,
         description: description.map(str::to_string),
         skills: skills
             .iter()
@@ -1580,7 +1590,6 @@ pub(super) fn plugins_test_remote_detail(
         marketplace_name: marketplace_name.to_string(),
         marketplace_path: None,
         summary,
-        share_url: None,
         description: description.map(str::to_string),
         skills: Vec::new(),
         hooks: Vec::new(),

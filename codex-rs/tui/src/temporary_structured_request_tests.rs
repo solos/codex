@@ -56,8 +56,15 @@ fn turn_completed_notification(turn_id: &str, status: TurnStatus) -> ServerNotif
     })
 }
 
-#[tokio::test]
-async fn managed_workspace_default_respects_read_only_availability() -> color_eyre::Result<()> {
+#[test]
+fn managed_workspace_default_respects_read_only_availability() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        managed_workspace_default_respects_read_only_availability_impl()
+    })
+}
+
+async fn managed_workspace_default_respects_read_only_availability_impl() -> color_eyre::Result<()>
+{
     for read_only_allowed in [true, false] {
         let codex_home = tempdir()?;
         let requirements_path = codex_home.path().join("requirements.toml");
@@ -99,7 +106,6 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
             Vec::new(),
             loader_overrides,
             /*strict_config*/ false,
-            Default::default(),
             codex_feedback::CodexFeedback::new(),
             /*log_db*/ None,
             /*state_db*/ None,
@@ -158,9 +164,15 @@ async fn managed_workspace_default_respects_read_only_availability() -> color_ey
     Ok(())
 }
 
-#[tokio::test]
-async fn preserves_custom_permissions_and_disables_required_mcp_servers() -> color_eyre::Result<()>
-{
+#[test]
+fn preserves_custom_permissions_and_disables_required_mcp_servers() -> color_eyre::Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        preserves_custom_permissions_and_disables_required_mcp_servers_impl()
+    })
+}
+
+async fn preserves_custom_permissions_and_disables_required_mcp_servers_impl()
+-> color_eyre::Result<()> {
     let (chat_widget, _, _, _) =
         crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
     let mut config = chat_widget.config_ref().clone();

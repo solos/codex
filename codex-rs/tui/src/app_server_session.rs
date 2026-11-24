@@ -524,7 +524,7 @@ impl AppServerSession {
             None
         };
         let services = crate::dynamic_tools_mcp::ToolServices {
-            task_tools: !self.uses_embedded_app_server(),
+            task_tools: true,
             worktrees,
         };
         if !services.task_tools && services.worktrees.is_none() {
@@ -590,8 +590,6 @@ impl AppServerSession {
     pub(crate) fn thread_tool_transport(&self) -> ThreadToolTransport {
         if let Some(server) = self.dynamic_tool_mcp.as_ref() {
             ThreadToolTransport::Mcp(Arc::clone(server))
-        } else if self.uses_embedded_app_server() {
-            ThreadToolTransport::Disabled
         } else {
             ThreadToolTransport::Dynamic
         }

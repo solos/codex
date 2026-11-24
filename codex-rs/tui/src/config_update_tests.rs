@@ -29,9 +29,15 @@ fn trusted_project_edit_targets_project_trust_level() {
     );
 }
 
-#[tokio::test]
-async fn remote_project_trust_guards_thread_start_and_preserves_repository_decisions() -> Result<()>
-{
+#[test]
+fn remote_project_trust_guards_thread_start_and_preserves_repository_decisions() -> Result<()> {
+    crate::tests::block_on_large_stack(|| {
+        remote_project_trust_guards_thread_start_and_preserves_repository_decisions_impl()
+    })
+}
+
+async fn remote_project_trust_guards_thread_start_and_preserves_repository_decisions_impl()
+-> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let codex_home = temp_dir.path().join("codex-home");
     let project_root = temp_dir
