@@ -20,6 +20,7 @@ use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
+use std::fs;
 fn test_turn_environment(environment_id: &str) -> crate::session::turn_context::TurnEnvironment {
     crate::session::turn_context::TurnEnvironment::new(
         TurnEnvironmentSelection {
@@ -72,6 +73,110 @@ fn wants_no_sandbox_approval_granular_respects_sandbox_flag() {
             mcp_elicitations: true,
         }))
     );
+}
+
+#[tokio::test]
+async fn ledger_allows_repeated_patch_when_content_hash_is_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.txt");
+    fs::write(&path, "current contents\n").expect("write file");
+    let path = PathUri::from_host_native_path(&path).expect("absolute path");
+    let ledger = ApplyPatchFileLedger::default();
+    ledger.files.lock().expect("ledger lock").insert(
+        path.clone(),
+        FileFingerprint {
+            content_hash: content_hash("current contents\n"),
+        },
+    );
+
+    verify_ledger_before_patch(
+        &ledger,
+        std::iter::once(&path),
+        codex_exec_server::LOCAL_FS.as_ref(),
+        /*follow_symlinks*/ true,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect("unchanged content should pass");
+}
+
+#[tokio::test]
+async fn ledger_rejects_content_changed_since_last_patch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.txt");
+    fs::write(&path, "changed externally\n").expect("write file");
+    let path = PathUri::from_host_native_path(&path).expect("absolute path");
+    let ledger = ApplyPatchFileLedger::default();
+    ledger.files.lock().expect("ledger lock").insert(
+        path.clone(),
+        FileFingerprint {
+            content_hash: content_hash("previous contents\n"),
+        },
+    );
+
+    let error = verify_ledger_before_patch(
+        &ledger,
+        std::iter::once(&path),
+        codex_exec_server::LOCAL_FS.as_ref(),
+        /*follow_symlinks*/ true,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("external content change should be rejected");
+    assert!(error.contains("File changed since this session last edited it"));
+    assert!(error.contains("This patch was rejected"));
+    assert!(error.contains("Re-read the file"));
+
+    verify_ledger_before_patch(
+        &ledger,
+        std::iter::once(&path),
+        codex_exec_server::LOCAL_FS.as_ref(),
+        /*follow_symlinks*/ true,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect("a rebuilt patch should not stay blocked after the freshness rejection");
+}
+
+#[tokio::test]
+async fn ledger_clears_missing_entry_after_one_rejection() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("removed.txt");
+    let path = PathUri::from_host_native_path(&path).expect("absolute path");
+    let ledger = ApplyPatchFileLedger::default();
+    ledger.files.lock().expect("ledger lock").insert(
+        path.clone(),
+        FileFingerprint {
+            content_hash: content_hash("previous contents\n"),
+        },
+    );
+
+    verify_ledger_before_patch(
+        &ledger,
+        std::iter::once(&path),
+        codex_exec_server::LOCAL_FS.as_ref(),
+        /*follow_symlinks*/ true,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("a missing file should be rejected once");
+    assert!(
+        !ledger
+            .files
+            .lock()
+            .expect("ledger lock")
+            .contains_key(&path)
+    );
+
+    verify_ledger_before_patch(
+        &ledger,
+        std::iter::once(&path),
+        codex_exec_server::LOCAL_FS.as_ref(),
+        /*follow_symlinks*/ true,
+        /*sandbox*/ None,
+    )
+    .await
+    .expect("a missing stale entry should be cleared after rejection");
 }
 
 #[tokio::test]

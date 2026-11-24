@@ -284,6 +284,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
             web_search: self.endpoint == BedrockEndpoint::Mantle,
             external_web_access: false,
             remote_compaction: RemoteCompactionSupport::V2,
+            prompt_cache_breakpoints: false,
         }
     }
 
@@ -704,6 +705,7 @@ mod tests {
                 web_search: true,
                 external_web_access: false,
                 remote_compaction: RemoteCompactionSupport::V2,
+                prompt_cache_breakpoints: false,
             }
         );
     }
@@ -723,6 +725,7 @@ mod tests {
                 web_search: false,
                 external_web_access: false,
                 remote_compaction: RemoteCompactionSupport::V2,
+                prompt_cache_breakpoints: false,
             }
         );
     }

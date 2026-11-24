@@ -255,6 +255,7 @@ mod handlers;
 mod inject;
 mod interrupted_turn;
 mod reasoning_effort;
+mod recovery;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
@@ -1731,6 +1732,8 @@ impl Session {
                 }
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
+                self.reconcile_resumed_token_usage(&turn_context, &rollout_items)
+                    .await;
 
                 let thread_id = self.thread_id();
                 let current_settings = self.thread_settings_snapshot().await;
@@ -1774,6 +1777,8 @@ impl Session {
                 }
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
+                self.reconcile_resumed_token_usage(&turn_context, &rollout_items)
+                    .await;
 
                 let thread_settings_applied =
                     RolloutItem::EventMsg(thread_settings::applied_event(self).await);
@@ -1988,6 +1993,50 @@ impl Session {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
             _ => None,
         })
+    }
+
+    /// Reject a stale near-full-window anchor when the reconstructed history is much smaller.
+    ///
+    /// A compact can be persisted after its replacement history but before the post-compact
+    /// `TokenCount` event. Resuming that rollout must not immediately compact the already-small
+    /// history again.
+    async fn reconcile_resumed_token_usage(
+        &self,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+    ) {
+        let Some(mut info) = Self::last_token_info_from_rollout(rollout_items) else {
+            return;
+        };
+        let Some(context_window) = turn_context.model_context_window() else {
+            return;
+        };
+        let history = self.clone_history().await;
+        let base_instructions = self.get_base_instructions().await;
+        let Some(estimated_tokens) =
+            history.estimate_token_count_with_base_instructions(&base_instructions)
+        else {
+            return;
+        };
+        let anchor_tokens = info.last_token_usage.total_tokens;
+        let is_near_full_window =
+            i128::from(anchor_tokens) * 100 >= i128::from(context_window) * 90;
+        let is_far_above_estimate =
+            i128::from(anchor_tokens) > i128::from(estimated_tokens.max(0)) * 2;
+        if !is_near_full_window || !is_far_above_estimate {
+            return;
+        }
+
+        info.last_token_usage.total_tokens = estimated_tokens.max(0);
+        info.last_usage_includes_reasoning = Some(true);
+        info.model_context_window = Some(context_window);
+        {
+            let mut state = self.state.lock().await;
+            state.set_token_info(Some(info));
+        }
+        self.set_auto_compact_window_estimated_prefill_for_scope(turn_context, estimated_tokens)
+            .await;
+        self.send_token_count_event(turn_context).await;
     }
 
     fn last_token_usage_record_from_rollout(

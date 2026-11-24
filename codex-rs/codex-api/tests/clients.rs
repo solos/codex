@@ -13,6 +13,7 @@ use codex_api::Provider;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
 use codex_api::ResponsesOptions;
+use codex_api::serialize_responses_request;
 use codex_client::HttpTransport;
 use codex_client::Request;
 use codex_client::RequestBody;
@@ -358,6 +359,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         text: None,
         client_metadata: None,
         access_programs: None,
+        prompt_cache_breakpoints: false,
     };
     let expected = serde_json::to_value(&request)?;
 
@@ -379,6 +381,92 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         prepared.headers.get(http::header::CONTENT_TYPE),
         Some(&HeaderValue::from_static("application/json"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn responses_client_stream_request_adds_opt_in_cache_breakpoints() -> Result<()> {
+    let state = RecordingState::default();
+    let transport = RecordingTransport::new(state.clone());
+    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
+    let tools = vec![
+        serde_json::json!({
+            "type": "function",
+            "name": "first",
+            "parameters": {"type": "object"},
+        }),
+        serde_json::json!({
+            "type": "function",
+            "name": "last",
+            "parameters": {"type": "object"},
+        }),
+    ];
+    let request = ResponsesApiRequest {
+        model: "gpt-test".into(),
+        input: vec![
+            ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                role: "developer".into(),
+                content: vec![ContentItem::InputText {
+                    text: "base instructions".into(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
+                id: None,
+                role: "user".into(),
+                content: vec![ContentItem::InputText { text: "hi".into() }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
+        tools: Some(
+            Arc::<RawValue>::from(
+                RawValue::from_string(serde_json::to_string(&tools)?).expect("valid tool JSON"),
+            )
+            .into(),
+        ),
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+        access_programs: None,
+        prompt_cache_breakpoints: true,
+    };
+    let expected = serialize_responses_request(&request)?;
+
+    let _stream = client
+        .stream_request(request, ResponsesOptions::default())
+        .await?;
+
+    let requests = state.take_stream_requests();
+    let prepared = requests[0]
+        .prepare_body_for_send()
+        .expect("body should prepare");
+    let body: serde_json::Value =
+        serde_json::from_slice(prepared.body.as_deref().expect("body should be JSON"))?;
+    assert_eq!(body, expected);
+    assert_eq!(
+        body["input"][0]["content"][0]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        body["tools"][1]["cache_control"],
+        serde_json::json!({"type": "ephemeral"})
+    );
+    assert!(body.get("prompt_cache_breakpoints").is_none());
     Ok(())
 }
 
@@ -414,6 +502,7 @@ async fn responses_client_stream_request_sends_routing_fields_ahead_of_large_inp
         text: None,
         client_metadata: None,
         access_programs: None,
+        prompt_cache_breakpoints: false,
     };
     let expected = serde_json::to_value(&request)?;
 
@@ -504,6 +593,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         text: None,
         client_metadata: None,
         access_programs: None,
+        prompt_cache_breakpoints: false,
     };
     let client = ResponsesClient::new(transport.clone(), provider, Arc::new(NoAuth));
 
@@ -629,6 +719,7 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
         text: None,
         client_metadata: None,
         access_programs: None,
+        prompt_cache_breakpoints: false,
     };
 
     let mut extra_headers = HeaderMap::new();

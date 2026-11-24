@@ -16,6 +16,7 @@ pub(crate) use native_tool_review::review as review_native_tool_call;
 pub(crate) mod network_approval;
 pub(crate) mod orchestrator;
 pub(crate) mod parallel;
+mod protected_paths;
 pub(crate) mod registry;
 pub(crate) mod router;
 pub(crate) mod runtimes;

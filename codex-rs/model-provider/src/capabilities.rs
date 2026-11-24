@@ -16,6 +16,8 @@ pub struct ProviderCapabilities {
     pub web_search: bool,
     pub external_web_access: bool,
     pub remote_compaction: RemoteCompactionSupport,
+    /// Whether Codex should add explicit prompt-cache breakpoints to Responses requests.
+    pub prompt_cache_breakpoints: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -26,6 +28,7 @@ impl Default for ProviderCapabilities {
             web_search: true,
             external_web_access: true,
             remote_compaction: RemoteCompactionSupport::Unsupported,
+            prompt_cache_breakpoints: false,
         }
     }
 }
@@ -50,6 +53,9 @@ impl ProviderCapabilities {
             remote_compaction: overrides
                 .remote_compaction
                 .unwrap_or(defaults.remote_compaction),
+            prompt_cache_breakpoints: overrides
+                .prompt_cache_breakpoints
+                .unwrap_or(defaults.prompt_cache_breakpoints),
             ..defaults
         }
     }

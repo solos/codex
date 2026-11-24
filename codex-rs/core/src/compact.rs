@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
+use crate::context::AdditionalContextUserFragment;
 use crate::context::BaseInstructionsFragment;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
@@ -51,6 +52,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
@@ -61,6 +63,8 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const COMPACT_SKILL_HEAD_MAX_TOKENS: usize = 2_000;
+pub(crate) const COMPACT_SKILL_HEAD_TOTAL_MAX_TOKENS: usize = 6_000;
 
 /// Thread-local policy that preserves inherited context without changing model or skill budgets.
 /// Insert into `StartThreadOptions::thread_extension_init` to disable automatic compaction.
@@ -406,8 +410,15 @@ async fn run_compact_task_inner_impl(
     };
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
+    let retained_text = user_messages
+        .iter()
+        .map(|message| message.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recent_file_reads = collect_recent_file_reads(history_items, &retained_text);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    insert_recent_file_reads(&mut new_history, &recent_file_reads);
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
@@ -604,10 +615,22 @@ fn compacted_user_message<'a>(
     item: &'a ResponseItem,
     harness_metadata: Option<&'a CodexHarnessMetadata>,
 ) -> Option<CompactedUserMessage<'a>> {
-    let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
-        return None;
+    let message = match crate::event_mapping::parse_turn_item(item) {
+        Some(TurnItem::UserMessage(user)) => user.message(),
+        _ => {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            if role != "user" {
+                return None;
+            }
+            let message = content_items_to_text(content)?;
+            if !codex_skills_extension::is_skill_prompt_fragment(&message) {
+                return None;
+            }
+            message
+        }
     };
-    let message = user.message();
     if is_summary_message(&message) {
         return None;
     }
@@ -720,7 +743,10 @@ fn build_compacted_history_with_limit(
     let mut selected_messages = Vec::new();
     if max_tokens > 0 {
         let mut remaining = max_tokens;
-        for message in user_messages.iter().rev() {
+        for (position, message) in user_messages.iter().enumerate().rev() {
+            if codex_skills_extension::is_skill_prompt_fragment(&message.message) {
+                continue;
+            }
             if remaining == 0 {
                 break;
             }
@@ -791,18 +817,78 @@ fn build_compacted_history_with_limit(
             {
                 metadata.mark_retained_sources_incomplete();
             }
-            selected_messages.push(ResponseItemEnvelope {
-                item,
-                metadata: harness_metadata,
-            });
+            selected_messages.push((
+                position,
+                ResponseItemEnvelope {
+                    item,
+                    metadata: harness_metadata,
+                },
+            ));
             if tokens > remaining {
                 break;
             }
             remaining = remaining.saturating_sub(tokens);
         }
-        selected_messages.reverse();
     }
-    history.extend(selected_messages);
+
+    // Skill bodies get a separate bounded head budget so an early skill message cannot
+    // consume the ordinary user-message budget.
+    let mut skill_remaining = COMPACT_SKILL_HEAD_TOTAL_MAX_TOKENS;
+    for (position, message) in user_messages.iter().enumerate().rev() {
+        if skill_remaining == 0 {
+            break;
+        }
+        if !codex_skills_extension::is_skill_prompt_fragment(&message.message) {
+            continue;
+        }
+        let ResponseItem::Message {
+            id,
+            content,
+            internal_chat_message_metadata_passthrough,
+            ..
+        } = message.original
+        else {
+            continue;
+        };
+        let message_tokens = approx_token_count(&message.message);
+        let budget = COMPACT_SKILL_HEAD_MAX_TOKENS.min(skill_remaining);
+        let mut parts = Vec::new();
+        for part in content {
+            let ContentItem::InputText { text } = part else {
+                continue;
+            };
+            parts.push(AnnotatedContent::text(
+                text,
+                ContentItemKind("skill.instructions".to_string()),
+                Default::default(),
+            ));
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        let mut item = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
+            id: id.clone(),
+            role: "user".to_owned(),
+            content: Vec::new(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
+                .clone(),
+        };
+        set_annotated_content(&mut item, truncate_annotated_text(parts, budget));
+        let mut metadata = message.harness_metadata.cloned();
+        if message_tokens > budget
+            && let Some(metadata) = &mut metadata
+        {
+            metadata.mark_retained_sources_incomplete();
+        }
+        skill_remaining = skill_remaining.saturating_sub(message_tokens.min(budget));
+        selected_messages.push((position, ResponseItemEnvelope { item, metadata }));
+    }
+
+    selected_messages.sort_by_key(|(position, _)| *position);
+    history.extend(selected_messages.into_iter().map(|(_, message)| message));
 
     let summary_text = if summary_text.is_empty() {
         "(no summary available)".to_string()
@@ -815,6 +901,107 @@ fn build_compacted_history_with_limit(
     )));
 
     history
+}
+
+pub(crate) fn collect_recent_file_reads(
+    items: &[ResponseItemEnvelope],
+    retained_text: &str,
+) -> Vec<String> {
+    let mut reads = Vec::<String>::new();
+    for item in items.iter().rev() {
+        let ResponseItem::FunctionCall {
+            name, arguments, ..
+        } = &item.item
+        else {
+            continue;
+        };
+        if !matches!(name.as_str(), "exec_command" | "shell_command") {
+            continue;
+        }
+        let Ok(arguments) = serde_json::from_str::<serde_json::Value>(arguments) else {
+            continue;
+        };
+        let Some(command) = arguments
+            .get("command")
+            .or_else(|| arguments.get("cmd"))
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let parsed = codex_shell_command::parse_command::parse_shell_script(command);
+        for command in parsed.into_iter().rev() {
+            let ParsedCommand::Read { path, .. } = command else {
+                continue;
+            };
+            let path = path.to_string_lossy().into_owned();
+            if path.is_empty()
+                || reads.iter().any(|existing| existing == &path)
+                || retained_text_mentions_path(retained_text, &path)
+            {
+                continue;
+            }
+            reads.push(path);
+            if reads.len() == 5 {
+                return reads;
+            }
+        }
+    }
+    reads
+}
+
+pub(crate) fn retained_text_mentions_path(text: &str, path: &str) -> bool {
+    text.match_indices(path).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after_text = &text[index + path.len()..];
+        let after = after_text.chars().next();
+        let after_continues = after.is_some_and(|character| {
+            character != '.' && is_path_token_char(character)
+                || character == '.'
+                    && after_text[1..]
+                        .chars()
+                        .next()
+                        .is_some_and(is_path_token_char)
+        });
+        !before.is_some_and(is_path_token_char) && !after_continues
+    })
+}
+
+fn is_path_token_char(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '-' | '.' | '/' | '\\' | '~' | '$')
+}
+
+pub(crate) fn insert_recent_file_reads(history: &mut Vec<ResponseItemEnvelope>, paths: &[String]) {
+    if paths.is_empty() {
+        return;
+    }
+    let summary_index = history
+        .iter()
+        .rposition(|envelope| {
+            matches!(
+                &envelope.item,
+                ResponseItem::Message { content, .. }
+                    if content.iter().any(|part| match part {
+                        ContentItem::InputText { text } => is_summary_message(text),
+                        _ => false,
+                    })
+            )
+        })
+        .unwrap_or(history.len());
+    let body = format!(
+        "Recent file reads from before compaction (contents were discarded):\n{}\n\
+         Re-read the relevant files before editing instead of relying on memory.",
+        paths
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    history.insert(
+        summary_index,
+        ResponseItemEnvelope::new(ContextualUserFragment::into(
+            AdditionalContextUserFragment::new("compacted_file_reads".to_string(), body),
+        )),
+    );
 }
 
 struct CompactionResponse {

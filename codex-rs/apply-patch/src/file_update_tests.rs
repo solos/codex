@@ -276,3 +276,106 @@ g
 "#
     );
 }
+
+#[tokio::test]
+async fn apply_patch_rejects_ambiguous_fuzzy_matches() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ambiguous.txt");
+    fs::write(&path, "foo  \nbar\nmiddle\nfoo \nbar\n").unwrap();
+    let patch = wrap_patch(&format!(
+        r#"*** Update File: {}
+@@
+-foo
+-bar
++FOO
++BAR"#,
+        path.display()
+    ));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let err = apply_patch(
+        &patch,
+        &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+        &mut stdout,
+        &mut stderr,
+        LOCAL_FS.as_ref(),
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("ambiguous relaxed match should be rejected");
+
+    let message = err.to_string();
+    assert!(message.contains("Ambiguous patch context"));
+    assert!(message.contains("matched 2 locations"));
+    assert!(message.contains("Include more surrounding lines"));
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "foo  \nbar\nmiddle\nfoo \nbar\n"
+    );
+}
+
+#[tokio::test]
+async fn apply_patch_conflict_reports_expected_and_actual_lines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("conflict.txt");
+    fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    let patch = wrap_patch(&format!(
+        r#"*** Update File: {}
+@@
+-missing line
++replacement"#,
+        path.display()
+    ));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let err = apply_patch(
+        &patch,
+        &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+        &mut stdout,
+        &mut stderr,
+        LOCAL_FS.as_ref(),
+        /*sandbox*/ None,
+    )
+    .await
+    .expect_err("missing context should fail");
+
+    let message = err.to_string();
+    assert!(message.contains("Failed to find expected lines"));
+    assert!(message.contains("Tried exact"));
+    assert!(message.contains("Expected patch text"));
+    assert!(message.contains("Actual file near line"));
+    assert!(message.contains("Next step: re-read"));
+}
+
+#[tokio::test]
+async fn apply_patch_reports_when_unicode_normalized_matching_is_used() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("unicode.txt");
+    fs::write(&path, "let value = \u{201c}hello\u{201d};\n").unwrap();
+    let patch = wrap_patch(&format!(
+        r#"*** Update File: {}
+@@
+-let value = "hello";
++let value = "goodbye";"#,
+        path.display()
+    ));
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    apply_patch(
+        &patch,
+        &PathUri::from_host_native_path(dir.path()).expect("absolute test path"),
+        &mut stdout,
+        &mut stderr,
+        LOCAL_FS.as_ref(),
+        /*sandbox*/ None,
+    )
+    .await
+    .expect("unicode-normalized match should apply");
+
+    let stderr = String::from_utf8(stderr).unwrap();
+    assert!(stderr.contains("unicode-normalized matching"));
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "let value = \"goodbye\";\n"
+    );
+}

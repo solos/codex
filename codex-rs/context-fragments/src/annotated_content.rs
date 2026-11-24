@@ -5,6 +5,8 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::input_text;
+use codex_utils_string::TextTruncation;
+use codex_utils_string::approx_bytes_for_tokens;
 use codex_utils_string::plan_token_truncation;
 
 /// Content, classification and attribution travel together through edits and truncation.
@@ -22,6 +24,18 @@ pub fn truncate_annotated_text(
     parts: Vec<AnnotatedContent>,
     max_tokens: usize,
 ) -> Vec<AnnotatedContent> {
+    if max_tokens == 0 {
+        return parts
+            .into_iter()
+            .filter(|part| {
+                !matches!(
+                    part.content(),
+                    ContentItem::InputText { .. } | ContentItem::OutputText { .. }
+                )
+            })
+            .collect();
+    }
+
     let text: String = parts
         .iter()
         .filter_map(|part| match part.content() {
@@ -34,8 +48,73 @@ pub fn truncate_annotated_text(
     let Some(truncation) = plan_token_truncation(&text, max_tokens) else {
         return parts;
     };
+    let result = apply_annotated_truncation(&parts, &truncation);
+    if rendered_text_token_count(&result) <= max_tokens {
+        return result;
+    }
+
+    let separator_bytes = parts.len().saturating_add(1);
+    let truncation = plan_hard_annotated_truncation(&text, max_tokens, separator_bytes)
+        .expect("oversized text must have a hard truncation plan");
+    let result = apply_annotated_truncation(&parts, &truncation);
+    if rendered_text_token_count(&result) <= max_tokens {
+        return result;
+    }
+
+    parts
+        .into_iter()
+        .filter(|part| {
+            !matches!(
+                part.content(),
+                ContentItem::InputText { .. } | ContentItem::OutputText { .. }
+            )
+        })
+        .collect()
+}
+
+fn rendered_text_token_count(parts: &[AnnotatedContent]) -> usize {
+    let rendered = parts
+        .iter()
+        .filter_map(|part| match part.content() {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                Some(text.as_str())
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    codex_utils_string::approx_token_count(&rendered)
+}
+
+fn plan_hard_annotated_truncation(
+    text: &str,
+    max_tokens: usize,
+    separator_bytes: usize,
+) -> Option<TextTruncation> {
+    const MARKER: &str = "…";
+
+    let max_bytes = approx_bytes_for_tokens(max_tokens);
+    if text.len() <= max_bytes {
+        return None;
+    }
+    let content_bytes = max_bytes
+        .saturating_sub(MARKER.len())
+        .saturating_sub(separator_bytes);
+    let left_bytes = content_bytes / 2;
+    let right_bytes = content_bytes - left_bytes;
+    Some(TextTruncation {
+        removed: text.floor_char_boundary(left_bytes)
+            ..text.ceil_char_boundary(text.len().saturating_sub(right_bytes)),
+        marker: MARKER.to_string(),
+    })
+}
+
+fn apply_annotated_truncation(
+    parts: &[AnnotatedContent],
+    truncation: &TextTruncation,
+) -> Vec<AnnotatedContent> {
     let mut notice = Some(AnnotatedContent::text(
-        truncation.marker,
+        truncation.marker.clone(),
         ContentItemKind("unknown".to_string()),
         ContentItemMetadata::harness(),
     ));
@@ -45,14 +124,14 @@ pub fn truncate_annotated_text(
         let length = match part.content() {
             ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => text.len(),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
-                result.push(part);
+                result.push(part.clone());
                 continue;
             }
         };
         let start = offset;
         offset += length;
         if offset <= truncation.removed.start || start >= truncation.removed.end {
-            result.push(part);
+            result.push(part.clone());
             continue;
         }
         let prefix_end = truncation.removed.start.saturating_sub(start);

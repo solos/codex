@@ -267,7 +267,9 @@ impl ExecCommandHandler {
                 }))
             }
             Err(err) => {
-                let message = format!("exec_command failed: {err:?}");
+                let message = format!(
+                    "exec_command failed: {err}. Check the command, working directory, TTY mode, and environment. If the sandbox policy blocked the command, retry with explicit `sandbox_permissions: \"require_escalated\"` and a justification."
+                );
                 Err(FunctionCallError::RespondToModel(truncate_middle_chars(
                     &message,
                     EXEC_COMMAND_REJECTION_MAX_BYTES,

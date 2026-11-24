@@ -15,6 +15,11 @@ pub struct ModelProviderCapabilities {
     pub external_web_access: Option<bool>,
     /// Remote context-compaction protocol; omission preserves provider defaults.
     pub remote_compaction: Option<RemoteCompactionSupport>,
+    /// Whether outbound requests may add explicit prompt-cache breakpoints.
+    ///
+    /// Only enable this for non-OpenAI providers that understand OpenAI-compatible
+    /// content blocks with `cache_control`. Unsupported providers must leave it unset.
+    pub prompt_cache_breakpoints: Option<bool>,
 }
 
 /// Remote context-compaction protocols supported by a model provider.

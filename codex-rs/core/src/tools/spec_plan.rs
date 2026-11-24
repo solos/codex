@@ -642,22 +642,46 @@ fn build_model_visible_specs(
 
         let tool_name = tool.runtime.tool_name();
         let spec = Arc::unwrap_or_clone(tool.spec());
-        specs.push(spec_for_model_request(
-            turn_context,
-            model_info,
-            exposure,
-            &tool_name,
-            code_mode_tool_names,
-            spec,
+        specs.push((
+            tool_block_weight(tool),
+            spec_for_model_request(
+                turn_context,
+                model_info,
+                exposure,
+                &tool_name,
+                code_mode_tool_names,
+                spec,
+            ),
         ));
     }
-    specs.extend(hosted_specs);
+    specs.extend(hosted_specs.into_iter().map(|spec| (3, spec)));
+
+    // Tool declarations are a prompt-cache prefix. Keep their order independent of
+    // registry insertion order: built-ins, MCP, extensions/dynamic tools, then hosted tools.
+    specs.sort_by(|(left_weight, left), (right_weight, right)| {
+        left_weight
+            .cmp(right_weight)
+            .then_with(|| left.name().cmp(right.name()))
+    });
 
     let mcp_namespaces = registry
         .mcp_namespaces()
         .map(|(_, namespace)| namespace)
         .collect();
-    merge_into_namespaces(specs, &mcp_namespaces)
+    merge_into_namespaces(
+        specs.into_iter().map(|(_, spec)| spec).collect(),
+        &mcp_namespaces,
+    )
+}
+
+fn tool_block_weight(tool: &RegisteredTool) -> u8 {
+    if tool.runtime.mcp_server_name().is_some() {
+        1
+    } else if tool.runtime.is_extension_tool() || tool.runtime.is_third_party_tool() {
+        2
+    } else {
+        0
+    }
 }
 
 fn spec_for_model_request(

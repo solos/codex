@@ -96,8 +96,17 @@ fn test_apply_patch_cli_rejects_overlapping_end_of_file_chunks() -> anyhow::Resu
     run_apply_patch_in_dir(tmp.path(), patch)?
         .failure()
         .stderr(format!(
-            "Failed to find expected lines in {}:\none\n",
-            expected_target_path.display()
+            "Failed to find expected lines in {}.\n\
+             Tried exact, trailing-whitespace-insensitive, whitespace-insensitive, and Unicode-normalized matching from line 2.\n\
+             Expected patch text:\n\
+             {:>5} | one\n\
+             Actual file near line 2:\n\
+             {:>5} | one\n\
+             Next step: re-read {}, then rebuild the update with current surrounding lines.\n",
+            expected_target_path.display(),
+            1,
+            1,
+            expected_target_path.display(),
         ));
 
     assert_eq!(fs::read_to_string(target_path)?, "one\n");
@@ -226,8 +235,19 @@ fn test_apply_patch_cli_reports_missing_context() -> anyhow::Result<()> {
         .assert()
         .failure()
         .stderr(format!(
-            "Failed to find expected lines in {}:\nmissing\n",
-            expected_target_path.display()
+            "Failed to find expected lines in {}.\n\
+             Tried exact, trailing-whitespace-insensitive, whitespace-insensitive, and Unicode-normalized matching from line 1.\n\
+             Expected patch text:\n\
+             {:>5} | missing\n\
+             Actual file near line 2:\n\
+             {:>5} | line1\n\
+             {:>5} | line2\n\
+             Next step: re-read {}, then rebuild the update with current surrounding lines.\n",
+            expected_target_path.display(),
+            1,
+            1,
+            2,
+            expected_target_path.display(),
         ));
     assert_eq!(fs::read_to_string(&target_path)?, "line1\nline2\n");
 
@@ -386,8 +406,11 @@ fn test_apply_patch_cli_failure_after_partial_success_leaves_changes() -> anyhow
         .failure()
         .stdout("")
         .stderr(format!(
-            "Failed to read file to update {}: No such file or directory (os error 2)\n",
-            missing_file.display()
+            "Failed to read file to update {}: No such file or directory (os error 2)\n\
+             The patch failed after partially applying changes to: {} (added).\n\
+             Re-read those files before retrying so the next patch starts from the current contents.\n",
+            missing_file.display(),
+            new_file.display(),
         ));
 
     assert_eq!(fs::read_to_string(&new_file)?, "hello\n");

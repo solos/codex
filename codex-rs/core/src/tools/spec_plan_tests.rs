@@ -72,6 +72,20 @@ struct ToolPlanInputs {
     dynamic_tools: Vec<DynamicToolSpec>,
 }
 
+fn plugin_candidates(presentation: ToolSuggestPresentation) -> ToolSuggestCandidates {
+    ToolSuggestCandidates {
+        tools: vec![DiscoverableTool::from(DiscoverablePluginInfo {
+            id: "sample@openai-curated".to_string(),
+            name: "sample".to_string(),
+            description: Some("Sample plugin".to_string()),
+            has_skills: true,
+            mcp_server_names: Vec::new(),
+            app_connector_ids: Vec::new(),
+        })],
+        presentation,
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct ToolPlanProbe {
     visible_specs: Vec<ToolSpec>,
@@ -1792,8 +1806,8 @@ async fn unified_tool_runtimes_preserve_source_order_and_collision_priority() {
     let expected_source_order = [
         "exec_command",
         "mcp__registry",
-        "registry_extension",
         "registry_dynamic",
+        "registry_extension",
     ];
     let source_order = plan
         .visible_names
@@ -1824,6 +1838,73 @@ async fn unified_tool_runtimes_preserve_source_order_and_collision_priority() {
         panic!("expected exactly one MCP tool after the extension collision");
     };
     assert_eq!(tool.description, "lookup test tool");
+}
+
+#[tokio::test]
+async fn model_visible_specs_do_not_depend_on_external_registration_order() {
+    let plan = |reverse: bool| {
+        let mut mcp_tools = vec![
+            mcp_runtime("alpha", "mcp__alpha", "list", ToolExposure::Direct),
+            mcp_runtime("zeta", "mcp__zeta", "list", ToolExposure::Direct),
+        ];
+        let mut extensions = vec![
+            Arc::new(TestNamespaceExtensionTool {
+                namespace: "extension_alpha",
+                tool_name: "list",
+            }),
+            Arc::new(TestNamespaceExtensionTool {
+                namespace: "extension_zeta",
+                tool_name: "list",
+            }),
+        ];
+        if reverse {
+            mcp_tools.reverse();
+            extensions.reverse();
+        }
+        probe_with(
+            |turn| {
+                set_features(turn, &[Feature::ShellTool]);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).shell_type =
+                        ConfigShellToolType::UnifiedExec;
+                });
+            },
+            ToolPlanInputs {
+                tool_runtimes: mcp_tools,
+                extension_tool_executors: extensions
+                    .into_iter()
+                    .map(|tool| tool as Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>)
+                    .collect(),
+                ..ToolPlanInputs::default()
+            },
+        )
+    };
+
+    let forward = plan(false).await;
+    let reverse = plan(true).await;
+    assert_eq!(
+        serde_json::to_vec(&forward.visible_specs).expect("serialize forward specs"),
+        serde_json::to_vec(&reverse.visible_specs).expect("serialize reverse specs")
+    );
+    assert_eq!(
+        forward
+            .visible_names
+            .iter()
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "mcp__alpha" | "mcp__zeta" | "extension_alpha" | "extension_zeta"
+                )
+            })
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            "mcp__alpha",
+            "mcp__zeta",
+            "extension_alpha",
+            "extension_zeta",
+        ]
+    );
 }
 
 #[tokio::test]

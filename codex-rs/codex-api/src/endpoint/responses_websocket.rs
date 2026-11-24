@@ -6,6 +6,7 @@ use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+use crate::common::apply_prompt_cache_breakpoints;
 use crate::endpoint::responses_websocket_probe::ResponsesWebsocketClose;
 use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbe;
 use crate::endpoint::responses_websocket_probe::ResponsesWebsocketProbeError;
@@ -1050,8 +1051,18 @@ async fn send_websocket_request(
 }
 
 fn serialize_websocket_request(request: &ResponsesWsRequest<'_>) -> Result<String, ApiError> {
-    serde_json::to_string(request)
-        .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")))
+    let ResponsesWsRequest::ResponseCreate(response) = request;
+    if response.prompt_cache_breakpoints {
+        let mut body = serde_json::to_value(request).map_err(|err| {
+            ApiError::Stream(format!("failed to encode websocket request: {err}"))
+        })?;
+        apply_prompt_cache_breakpoints(&mut body, true);
+        serde_json::to_string(&body)
+            .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")))
+    } else {
+        serde_json::to_string(request)
+            .map_err(|err| ApiError::Stream(format!("failed to encode websocket request: {err}")))
+    }
 }
 
 #[cfg(test)]
@@ -1113,6 +1124,7 @@ mod tests {
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),
             )])),
+            prompt_cache_breakpoints: false,
         };
         let request = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
             previous_response_id: Some("resp-1".to_string()),
@@ -1134,6 +1146,61 @@ mod tests {
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
         assert_eq!(wire_payload, expected_payload);
+    }
+
+    #[test]
+    fn websocket_serialization_adds_opt_in_cache_breakpoints() {
+        let input = vec![ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "base instructions".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }];
+        let tools = to_raw_value(&vec![json!({
+            "type": "function",
+            "name": "lookup",
+            "parameters": {"type": "object"},
+        })])
+        .expect("serialize tools");
+        let request = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+            model: "gpt-test",
+            stream: true,
+            service_tier: None,
+            previous_response_id: None,
+            input: &input,
+            tools: Some(tools.as_ref()),
+            tool_choice: "auto",
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream_options: None,
+            include: &[],
+            prompt_cache_key: None,
+            text: None,
+            generate: None,
+            client_metadata: None,
+            access_programs: None,
+            prompt_cache_breakpoints: true,
+        });
+
+        let request_text =
+            serialize_websocket_request(&request).expect("serialize websocket request");
+        let wire_payload: Value =
+            serde_json::from_str(&request_text).expect("parse websocket request");
+        assert_eq!(
+            wire_payload["input"][0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            wire_payload["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(wire_payload.get("prompt_cache_breakpoints").is_none());
     }
 
     #[test]

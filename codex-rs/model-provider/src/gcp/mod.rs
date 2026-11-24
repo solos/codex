@@ -85,6 +85,7 @@ impl ModelProvider for GcpModelProvider {
             web_search: false,
             external_web_access: false,
             remote_compaction: RemoteCompactionSupport::V2,
+            prompt_cache_breakpoints: false,
         }
     }
 

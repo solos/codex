@@ -8,6 +8,8 @@ use crate::ApplyPatchError;
 use crate::IoError;
 use crate::UpdateFileChunk;
 use crate::seek_sequence;
+use crate::seek_sequence::MatchLevel;
+use crate::seek_sequence::SequenceMatch;
 use crate::text_file::Replacement;
 use crate::text_file::SourceFile;
 
@@ -18,6 +20,7 @@ mod tests;
 pub(crate) struct AppliedPatch {
     pub(crate) original_contents: String,
     pub(crate) new_contents: String,
+    pub(crate) fuzzy_matches: Vec<String>,
 }
 
 /// Return *only* the new file contents (joined into a single `String`) after
@@ -45,12 +48,13 @@ pub(crate) async fn derive_new_contents_from_chunks(
     let path_text = path.inferred_native_path_string();
     let mut source_file = SourceFile::parse(&original_contents);
     let original_lines = source_file.line_texts();
-    let replacements = compute_replacements(&original_lines, &path_text, chunks)?;
+    let (replacements, fuzzy_matches) = compute_replacements(&original_lines, &path_text, chunks)?;
     source_file.apply_replacements(&replacements);
     let new_contents = source_file.into_contents();
     Ok(AppliedPatch {
         original_contents,
         new_contents,
+        fuzzy_matches,
     })
 }
 
@@ -61,25 +65,33 @@ fn compute_replacements(
     original_lines: &[String],
     path: &str,
     chunks: &[UpdateFileChunk],
-) -> std::result::Result<Vec<Replacement>, ApplyPatchError> {
+) -> std::result::Result<(Vec<Replacement>, Vec<String>), ApplyPatchError> {
     let mut replacements: Vec<Replacement> = Vec::new();
+    let mut fuzzy_matches = Vec::new();
     let mut line_index: usize = 0;
 
     for chunk in chunks {
         // If a chunk has a `change_context`, we use seek_sequence to find it, then
         // adjust our `line_index` to continue from there.
         if let Some(ctx_line) = &chunk.change_context {
-            if let Some(idx) = seek_sequence::seek_sequence(
+            if let Some(sequence_match) = seek_sequence::seek_sequence(
                 original_lines,
                 std::slice::from_ref(ctx_line),
                 line_index,
                 /*eof*/ false,
             ) {
-                line_index = idx + 1;
+                note_fuzzy_match(path, &sequence_match, &mut fuzzy_matches);
+                line_index = sequence_match.index + 1;
             } else {
-                return Err(ApplyPatchError::ComputeReplacements(format!(
-                    "Failed to find context '{ctx_line}' in {path}"
-                )));
+                return Err(ApplyPatchError::ComputeReplacements(
+                    missing_sequence_error(
+                        original_lines,
+                        path,
+                        std::slice::from_ref(ctx_line),
+                        line_index,
+                        "context",
+                    ),
+                ));
             }
         }
 
@@ -121,7 +133,17 @@ fn compute_replacements(
             );
         }
 
-        if let Some(start_idx) = found {
+        if let Some(sequence_match) = found {
+            if sequence_match.level != MatchLevel::Exact && sequence_match.match_count > 1 {
+                return Err(ApplyPatchError::ComputeReplacements(format!(
+                    "Ambiguous patch context in {path}: the expected block matched {} locations using {} matching, first at line {}. Include more surrounding lines in `@@` / the update block, then retry.",
+                    sequence_match.match_count,
+                    sequence_match.level,
+                    sequence_match.index + 1,
+                )));
+            }
+            note_fuzzy_match(path, &sequence_match, &mut fuzzy_matches);
+            let start_idx = sequence_match.index;
             // Context lines occur in both sides of a patch chunk. Keep those
             // original lines in place so their exact contents and terminators
             // survive, especially when the file has mixed line endings.
@@ -152,17 +174,81 @@ fn compute_replacements(
             }
             line_index = start_idx + pattern.len();
         } else {
-            return Err(ApplyPatchError::ComputeReplacements(format!(
-                "Failed to find expected lines in {}:\n{}",
-                path,
-                chunk.old_lines.join("\n"),
-            )));
+            return Err(ApplyPatchError::ComputeReplacements(
+                missing_sequence_error(original_lines, path, pattern, line_index, "expected lines"),
+            ));
         }
     }
 
     replacements.sort_by_key(|(index, _, _)| *index);
 
-    Ok(replacements)
+    Ok((replacements, fuzzy_matches))
+}
+
+fn note_fuzzy_match(path: &str, sequence_match: &SequenceMatch, notices: &mut Vec<String>) {
+    if sequence_match.level != MatchLevel::Exact {
+        notices.push(format!(
+            "Applied update to {path} at line {} using {} matching.",
+            sequence_match.index + 1,
+            sequence_match.level
+        ));
+    }
+}
+
+fn missing_sequence_error(
+    original_lines: &[String],
+    path: &str,
+    expected: &[String],
+    search_start: usize,
+    label: &str,
+) -> String {
+    let anchor = expected
+        .iter()
+        .find(|line| !line.trim().is_empty())
+        .or_else(|| expected.first())
+        .map(String::as_str)
+        .unwrap_or("");
+    let nearest = (search_start..original_lines.len())
+        .max_by_key(|index| line_similarity(anchor, &original_lines[*index]))
+        .unwrap_or(search_start.min(original_lines.len()));
+    let window_start = nearest.saturating_sub(5);
+    let window_end = (nearest + 6).min(original_lines.len());
+    let actual = original_lines[window_start..window_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| format!("{:>5} | {line}", window_start + offset + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let expected = expected
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| format!("{:>5} | {line}", offset + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Failed to find {label} in {path}.\n\
+         Tried exact, trailing-whitespace-insensitive, whitespace-insensitive, and Unicode-normalized matching from line {}.\n\
+         Expected patch text:\n{expected}\n\
+         Actual file near line {}:\n{actual}\n\
+         Next step: re-read {path}, then rebuild the update with current surrounding lines.",
+        search_start + 1,
+        nearest + 1,
+    )
+}
+
+fn line_similarity(left: &str, right: &str) -> usize {
+    let left = left.trim();
+    let right = right.trim();
+    if left == right {
+        return usize::MAX;
+    }
+    let shared_prefix = left
+        .chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let containment_bonus = usize::from(!left.is_empty() && right.contains(left)) * left.len();
+    shared_prefix + containment_bonus
 }
 
 /// Intended result of a file update for apply_patch.
@@ -192,6 +278,7 @@ pub async fn unified_diff_from_chunks_with_context(
     let AppliedPatch {
         original_contents,
         new_contents,
+        ..
     } = derive_new_contents_from_chunks(path, chunks, fs, /*follow_symlinks*/ true, sandbox)
         .await?;
     let text_diff = TextDiff::from_lines(&original_contents, &new_contents);

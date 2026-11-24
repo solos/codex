@@ -3493,6 +3493,91 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
     assert_eq!(actual, Some(info2));
 }
 
+#[tokio::test]
+async fn record_initial_history_rejects_stale_near_window_token_anchor() {
+    let (session, turn_context) = make_session_and_context().await;
+    let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+    let context_window = turn_context
+        .model_context_window()
+        .expect("test model should expose a context window");
+    let stale_anchor = context_window.saturating_mul(95) / 100;
+    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+        TokenCountEvent {
+            info: Some(TokenUsageInfo {
+                total_token_usage: TokenUsage {
+                    total_tokens: stale_anchor,
+                    ..TokenUsage::default()
+                },
+                last_usage_includes_reasoning: Some(false),
+                last_token_usage: TokenUsage {
+                    total_tokens: stale_anchor,
+                    ..TokenUsage::default()
+                },
+                model_context_window: Some(context_window),
+            }),
+            rate_limits: None,
+        },
+    )));
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
+            conversation_id: ThreadId::default(),
+            history: Arc::new(rollout_items.clone()),
+            rollout_path: Some(PathBuf::from("/tmp/resume-after-compact.jsonl")),
+        }))
+        .await;
+
+    let history = session.clone_history().await;
+    let base_instructions = session.get_base_instructions().await;
+    let expected = history
+        .estimate_token_count_with_base_instructions(&base_instructions)
+        .expect("local estimate");
+    assert!(
+        stale_anchor > expected.saturating_mul(2),
+        "fixture must exercise the stale-anchor guard"
+    );
+    let actual = session.state.lock().await.token_info().expect("token info");
+    assert_eq!(actual.last_token_usage.total_tokens, expected.max(0));
+    assert_eq!(actual.last_usage_includes_reasoning, Some(true));
+}
+
+#[tokio::test]
+async fn record_initial_history_keeps_plausible_token_anchor() {
+    let (session, turn_context) = make_session_and_context().await;
+    let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+    let context_window = turn_context
+        .model_context_window()
+        .expect("test model should expose a context window");
+    let plausible_anchor = context_window / 2;
+    let info = TokenUsageInfo {
+        total_token_usage: TokenUsage::default(),
+        last_usage_includes_reasoning: Some(false),
+        last_token_usage: TokenUsage {
+            total_tokens: plausible_anchor,
+            ..TokenUsage::default()
+        },
+        model_context_window: Some(context_window),
+    };
+    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+        TokenCountEvent {
+            info: Some(info.clone()),
+            rate_limits: None,
+        },
+    )));
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            history_revision: None,
+            conversation_id: ThreadId::default(),
+            history: Arc::new(rollout_items),
+            rollout_path: Some(PathBuf::from("/tmp/plausible-anchor.jsonl")),
+        }))
+        .await;
+
+    assert_eq!(session.state.lock().await.token_info(), Some(info));
+}
+
 #[test]
 fn latest_token_usage_record_stops_at_compaction_checkpoint() {
     let thread_id = ThreadId::new();

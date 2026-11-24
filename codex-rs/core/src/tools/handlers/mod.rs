@@ -91,9 +91,42 @@ pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_str(arguments).map_err(|err| {
-        FunctionCallError::RespondToModel(format!("failed to parse function arguments: {err}"))
-    })
+    serde_json::from_str(arguments)
+        .map_err(|err| FunctionCallError::RespondToModel(function_argument_error_message(&err)))
+}
+
+fn function_argument_error_message(err: &serde_json::Error) -> String {
+    let detail = err.to_string();
+    let next_step = if let Some(field) = quoted_value_after(&detail, "missing field") {
+        format!(
+            "Add the required field `{field}` and retry with one JSON object that matches the tool schema."
+        )
+    } else if let Some(field) = quoted_value_after(&detail, "unknown field") {
+        format!(
+            "Remove or rename `{field}`. Compare the argument names with the tool schema before retrying."
+        )
+    } else if detail.contains("expected value")
+        || detail.contains("EOF while parsing")
+        || detail.contains("trailing characters")
+        || detail.contains("key must be a string")
+    {
+        "Send valid JSON for the tool arguments, then retry. Do not wrap the JSON in prose or a code fence."
+            .to_string()
+    } else if detail.contains("invalid type") {
+        "Correct the argument type shown above so it matches the tool schema, then retry."
+            .to_string()
+    } else {
+        "Compare the arguments with the tool schema, correct the reported mismatch, and retry."
+            .to_string()
+    };
+    format!("Invalid function arguments: {detail}. {next_step}")
+}
+
+fn quoted_value_after<'a>(message: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = message.split_once(marker)?.1;
+    let start = rest.find('`')? + 1;
+    let end = rest[start..].find('`')? + start;
+    Some(&rest[start..end])
 }
 
 fn resolve_sandbox_permissions(
@@ -430,6 +463,7 @@ mod tests {
     use super::EffectiveAdditionalPermissions;
     use super::implicit_granted_permissions;
     use super::normalize_and_validate_additional_permissions;
+    use super::parse_arguments;
     use super::preapproved_permission_profile;
     use crate::sandboxing::SandboxPermissions;
     use codex_protocol::models::AdditionalPermissionProfile;
@@ -447,6 +481,7 @@ mod tests {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
+    use serde::Deserialize;
     use tempfile::tempdir;
 
     fn network_permissions() -> AdditionalPermissionProfile {
@@ -477,6 +512,34 @@ mod tests {
             temporary_directories: None,
             user_home_dir: None,
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ParsedArguments {
+        command: String,
+    }
+
+    #[test]
+    fn parse_arguments_explains_missing_fields_and_next_step() {
+        let err = parse_arguments::<ParsedArguments>("{}").expect_err("missing command");
+        let crate::function_tool::FunctionCallError::RespondToModel(message) = err else {
+            panic!("parse failures should be model-facing");
+        };
+        assert!(message.contains("missing field `command`"));
+        assert!(message.contains("Add the required field `command`"));
+        assert!(message.contains("matches the tool schema"));
+    }
+
+    #[test]
+    fn parse_arguments_explains_unknown_fields_and_next_step() {
+        let err = parse_arguments::<ParsedArguments>(r#"{"command":"pwd","interrupt":true}"#)
+            .expect_err("unknown interrupt");
+        let crate::function_tool::FunctionCallError::RespondToModel(message) = err else {
+            panic!("parse failures should be model-facing");
+        };
+        assert!(message.contains("unknown field `interrupt`"));
+        assert!(message.contains("Remove or rename `interrupt`"));
     }
 
     #[test]

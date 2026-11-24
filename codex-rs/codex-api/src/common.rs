@@ -303,6 +303,9 @@ pub struct ResponsesApiRequest {
     pub client_metadata: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_programs: Option<AccessPrograms>,
+    /// Internal transport hint. Cache control is attached to content blocks when encoding.
+    #[serde(skip)]
+    pub prompt_cache_breakpoints: bool,
 }
 
 impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
@@ -325,6 +328,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
             generate: None,
             client_metadata: request.client_metadata.clone(),
             access_programs: request.access_programs,
+            prompt_cache_breakpoints: request.prompt_cache_breakpoints,
         }
     }
 }
@@ -359,6 +363,58 @@ pub struct ResponseCreateWsRequest<'a> {
     pub client_metadata: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_programs: Option<AccessPrograms>,
+    /// Internal transport hint. Cache control is attached to content blocks when encoding.
+    #[serde(skip)]
+    pub prompt_cache_breakpoints: bool,
+}
+
+/// Serializes a Responses request and, when enabled, attaches provider cache breakpoints.
+pub fn serialize_responses_request(request: &ResponsesApiRequest) -> serde_json::Result<Value> {
+    let mut body = serde_json::to_value(request)?;
+    apply_prompt_cache_breakpoints(&mut body, request.prompt_cache_breakpoints);
+    Ok(body)
+}
+
+/// Attaches stable cache boundaries after base instructions and after the tool declarations.
+///
+/// This is an opt-in extension for providers that accept OpenAI-compatible content
+/// blocks with an Anthropic-style `cache_control` field. Standard OpenAI requests
+/// leave it disabled and remain byte-for-byte unchanged.
+pub fn apply_prompt_cache_breakpoints(body: &mut Value, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    let ephemeral = || {
+        serde_json::json!({
+            "type": "ephemeral",
+        })
+    };
+
+    if let Some(first_item) = body
+        .get_mut("input")
+        .and_then(Value::as_array_mut)
+        .and_then(|input| input.first_mut())
+        .and_then(Value::as_object_mut)
+        && first_item.get("type").and_then(Value::as_str) == Some("message")
+        && first_item.get("role").and_then(Value::as_str) == Some("developer")
+        && let Some(last_content) = first_item
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|content| content.last_mut())
+            .and_then(Value::as_object_mut)
+    {
+        last_content.insert("cache_control".to_string(), ephemeral());
+    }
+
+    if let Some(last_tool) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+        .and_then(Value::as_object_mut)
+    {
+        last_tool.insert("cache_control".to_string(), ephemeral());
+    }
 }
 
 pub fn response_create_client_metadata(

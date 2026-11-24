@@ -673,6 +673,120 @@ fn build_token_limited_compacted_history_appends_summary_message() {
     assert_eq!(summary, summary_text);
 }
 
+#[test]
+fn compacted_history_keeps_bounded_skill_heads_outside_user_message_budget() {
+    let skill = user_message(&format!(
+        "<skill>\n<name>demo</name>\n{}</skill>",
+        "skill guidance ".repeat(2_000)
+    ));
+    let user_messages = collect_user_messages(std::slice::from_ref(&skill));
+    let history = super::build_compacted_history_with_limit(
+        Vec::new(),
+        &user_messages,
+        "summary text",
+        /*max_tokens*/ 1,
+    );
+
+    assert_eq!(
+        history.len(),
+        2,
+        "skill head and summary should be retained"
+    );
+    let ResponseItem::Message { content, .. } = &history[0].item else {
+        panic!("expected shared skill message");
+    };
+    let text = content_items_to_text(content).expect("skill text");
+    assert!(text.starts_with("<skill>"));
+    assert!(text.contains("<name>demo</name>"));
+    let token_count = approx_token_count(&text);
+    assert!(
+        token_count <= super::COMPACT_SKILL_HEAD_MAX_TOKENS,
+        "skill head must stay inside its dedicated budget: {token_count} tokens, {} bytes",
+        text.len()
+    );
+}
+
+#[test]
+fn compacted_file_read_list_keeps_recent_unique_paths_and_skips_retained_tail() {
+    let call = |call_id: &str, command: &str| ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
+        id: None,
+        name: "exec_command".to_string(),
+        namespace: None,
+        arguments: json!({"command": command}).to_string(),
+        encrypted_function_args: None,
+        call_id: call_id.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let items = vec![
+        ResponseItemEnvelope::new(call("old", "cat old.rs")),
+        ResponseItemEnvelope::new(call("new", "cat new.rs\ncat retained.rs")),
+    ];
+    let retained_user_message = user_message("Please use retained.rs");
+    let retained_user_messages = [retained_user_message];
+    let retained = collect_user_messages(&retained_user_messages);
+    let retained_text = retained
+        .iter()
+        .map(|message| message.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let reads = super::collect_recent_file_reads(&items, &retained_text);
+
+    assert_eq!(reads, vec!["new.rs".to_string(), "old.rs".to_string()]);
+}
+
+#[test]
+fn retained_text_path_mentions_require_token_boundaries() {
+    assert!(super::retained_text_mentions_path(
+        "Please inspect src/lib.rs.",
+        "src/lib.rs"
+    ));
+    assert!(super::retained_text_mentions_path(
+        "(src/lib.rs)",
+        "src/lib.rs"
+    ));
+    assert!(!super::retained_text_mentions_path(
+        "Please inspect src/lib.rs.bak.",
+        "src/lib.rs"
+    ));
+    assert!(!super::retained_text_mentions_path(
+        "Please inspect other/src/lib.rs.",
+        "src/lib.rs"
+    ));
+}
+
+#[test]
+fn compacted_file_read_fragment_is_inserted_before_summary() {
+    let summary_text = format!("{}\nsummary text", super::SUMMARY_PREFIX);
+    let mut history = super::build_compacted_history(Vec::new(), &[], &summary_text);
+
+    super::insert_recent_file_reads(
+        &mut history,
+        &["src/lib.rs".to_string(), "src/main.rs".to_string()],
+    );
+
+    assert_eq!(history.len(), 2);
+    let ResponseItem::Message { content, .. } = &history[0].item else {
+        panic!("expected file-read context message");
+    };
+    let fragment = content_items_to_text(content).expect("file-read context text");
+    assert!(
+        fragment.contains("<external_compacted_file_reads>"),
+        "{fragment}"
+    );
+    assert!(fragment.contains("- src/lib.rs"));
+    let ResponseItem::Message { content, .. } = &history[1].item else {
+        panic!("summary should remain last");
+    };
+    assert!(
+        content_items_to_text(content)
+            .expect("summary text")
+            .contains("summary text")
+    );
+}
+
 #[test_case(false; "legacy")]
 #[test_case(true; "attributed text with discarded media")]
 fn build_compacted_history_preserves_user_message_passthrough_metadata(attributed: bool) {

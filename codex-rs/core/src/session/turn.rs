@@ -13,6 +13,7 @@ use crate::compact_remote_v2::BackgroundCompactionCandidate;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::ResumeDirectlyGuidance;
 use crate::context::UserVerificationNotice;
 use crate::cyber_access_program;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -470,7 +471,7 @@ pub(crate) async fn run_turn(
     // 2. After auto-compact, while a model/tool continuation is pending.
 
     let mut next_step_context = Some(first_step_context);
-    let mut guardian_budget_compacted = false;
+    let mut recovery_state = super::recovery::RecoveryState::default();
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -596,7 +597,7 @@ pub(crate) async fn run_turn(
         .await;
         match sampling_request_result {
             Ok((sampling_request_output, notify_messages)) => {
-                guardian_budget_compacted = false;
+                recovery_state.record_success();
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
@@ -852,31 +853,103 @@ pub(crate) async fn run_turn(
             Err(err)
                 if auto_summarization_enabled
                     && matches!(err.details(), CodexErrorDetails::ContextWindowExceeded)
-                    && !guardian_budget_compacted
-                    && sess
-                        .services
-                        .thread_extension_data
-                        .get::<crate::guardian::ExhaustedReviewBudget>()
-                        .is_some() =>
+                    && recovery_state.can_attempt_reactive_compact()
+                    && !cancellation_token.is_cancelled() =>
             {
-                // Tool continuations can also cross the complete-request limit.
-                // Only summarizing compaction preserves the action and evidence;
-                // token-budget resets must fail closed and retire the reviewer.
-                // Retry once per model step, so ineffective compaction cannot loop.
-                guardian_budget_compacted = true;
-                sess.services
+                let claimed = recovery_state.claim_reactive_compact();
+                debug_assert!(claimed, "guard checked the same recovery claim");
+                if sess
+                    .services
                     .thread_extension_data
-                    .insert(crate::guardian::ExhaustedReviewBudget::Compacting);
-                run_auto_compact(
+                    .get::<crate::guardian::ExhaustedReviewBudget>()
+                    .is_some()
+                {
+                    // Tool continuations can also cross the complete-request limit.
+                    // Only summarizing compaction preserves the action and evidence;
+                    // token-budget resets must fail closed and retire the reviewer.
+                    sess.services
+                        .thread_extension_data
+                        .insert(crate::guardian::ExhaustedReviewBudget::Compacting);
+                }
+                let candidate = super::async_compaction::take_ready(&sess, &turn_context).await;
+                match run_auto_compact(
                     &sess,
                     Arc::clone(&step_context),
                     Arc::clone(&step_context),
                     &mut client_session,
                     CompactionReason::ContextLimit,
                     CompactionPhase::MidTurn,
-                    /*candidate*/ None,
+                    candidate,
                 )
-                .await?;
+                .await
+                {
+                    Ok(true) => {
+                        can_drain_pending_input = false;
+                        continue;
+                    }
+                    Ok(false) => {
+                        emit_terminal_turn_error(&sess, &turn_context, &err).await;
+                        return Ok(None);
+                    }
+                    Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        emit_terminal_turn_error(&sess, &turn_context, &err).await;
+                        return Ok(None);
+                    }
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.details(),
+                    CodexErrorDetails::ResponseIncomplete(incomplete)
+                        if incomplete.reason == "max_output_tokens"
+                ) && recovery_state.can_attempt_max_output_resume()
+                    && !cancellation_token.is_cancelled() =>
+            {
+                let Some(attempt) = recovery_state.claim_max_output_resume() else {
+                    emit_terminal_turn_error(&sess, &turn_context, &err).await;
+                    return Ok(None);
+                };
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: format!(
+                            "Output token limit reached; resuming directly (attempt {attempt}/{}).",
+                            super::recovery::MAX_OUTPUT_RESUME_ATTEMPTS
+                        ),
+                    }),
+                )
+                .await;
+                sess.record_conversation_items(
+                    &turn_context,
+                    &step_context.settings.model_info,
+                    &[ContextualUserFragment::into(ResumeDirectlyGuidance)],
+                )
+                .await;
+                can_drain_pending_input = false;
+                continue;
+            }
+            Err(err)
+                if matches!(err.details(), CodexErrorDetails::InvalidImageRequest())
+                    && recovery_state.can_attempt_invalid_image_retry()
+                    && !cancellation_token.is_cancelled() =>
+            {
+                let claimed = recovery_state.claim_invalid_image_retry();
+                debug_assert!(claimed, "guard checked the same recovery claim");
+                turn_context
+                    .extension_data
+                    .insert(super::recovery::OmitImagesForRecovery);
+                sess.track_turn_codex_error(turn_context.as_ref(), &err);
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::Warning(WarningEvent {
+                        message: "The provider rejected an image. Retrying without image content; use a smaller replacement image if it is still needed."
+                            .to_string(),
+                    }),
+                )
+                .await;
                 can_drain_pending_input = false;
                 continue;
             }
@@ -899,7 +972,7 @@ pub(crate) async fn run_turn(
                 .await;
                 let event = EventMsg::Error(ErrorEvent {
                     misalignment: None,
-                    message: "Invalid image in your last message. Please remove it and try again."
+                    message: "Invalid image in your last message. Replace it with a smaller image and try again."
                         .to_string(),
                     codex_error_info: Some(error),
                 });
@@ -907,19 +980,7 @@ pub(crate) async fn run_turn(
                 break;
             }
             Err(e) => {
-                info!("Turn error: {e:#}");
-                if matches!(
-                    e.details(),
-                    CodexErrorDetails::MisalignmentPolicyViolation { .. }
-                ) {
-                    sess.conversation.retire_handoffs_for_misalignment().await;
-                }
-                let error = e.to_codex_protocol_error();
-                sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone(), e.details())
-                    .await;
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(&turn_context, event).await;
+                emit_terminal_turn_error(&sess, &turn_context, &e).await;
                 // let the user continue the conversation
                 break;
             }
@@ -927,6 +988,22 @@ pub(crate) async fn run_turn(
     }
 
     Ok(last_agent_message)
+}
+
+async fn emit_terminal_turn_error(sess: &Session, turn_context: &TurnContext, error: &CodexErr) {
+    info!("Turn error: {error:#}");
+    if matches!(
+        error.details(),
+        CodexErrorDetails::MisalignmentPolicyViolation { .. }
+    ) {
+        sess.conversation.retire_handoffs_for_misalignment().await;
+    }
+    let codex_error = error.to_codex_protocol_error();
+    sess.emit_turn_error_lifecycle(turn_context, codex_error.clone(), error.details())
+        .await;
+    sess.track_turn_codex_error(turn_context, error);
+    let event = EventMsg::Error(error.to_error_event(/*message_prefix*/ None));
+    sess.send_event(turn_context, event).await;
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -1796,6 +1873,12 @@ async fn run_sampling_request(
                 .await
         };
         let mut prompt_input = prompt_input;
+        if turn_store
+            .get::<super::recovery::OmitImagesForRecovery>()
+            .is_some()
+        {
+            super::recovery::omit_images_for_recovery(&mut prompt_input);
+        }
         sess.services
             .executed_tool_calls
             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);

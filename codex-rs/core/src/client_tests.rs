@@ -41,6 +41,7 @@ use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
+use codex_model_provider_info::ModelProviderCapabilities;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -510,6 +511,82 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
+}
+
+#[test]
+fn prompt_cache_breakpoints_require_non_openai_opt_in() -> anyhow::Result<()> {
+    let mut oss_provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    oss_provider.capabilities = Some(ModelProviderCapabilities {
+        prompt_cache_breakpoints: Some(true),
+        ..Default::default()
+    });
+    let openai_provider = ModelProviderInfo {
+        capabilities: Some(ModelProviderCapabilities {
+            prompt_cache_breakpoints: Some(true),
+            ..Default::default()
+        }),
+        ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+    };
+    let prompt = Prompt {
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            ..Default::default()
+        },
+        tools: Arc::from([ToolSpec::Function(ResponsesApiTool {
+            name: "lookup".to_string(),
+            description: "Looks up a value.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::default(),
+            output_schema: None,
+        })]),
+        ..Default::default()
+    };
+
+    for (provider, expected) in [
+        (oss_provider.clone(), true),
+        (
+            ModelProviderInfo {
+                capabilities: None,
+                ..oss_provider.clone()
+            },
+            false,
+        ),
+        (openai_provider, false),
+    ] {
+        let mut client = test_model_client(SessionSource::Cli);
+        Arc::get_mut(&mut client.state)
+            .expect("test client should have unique session state")
+            .provider = create_model_provider(provider, /*auth_manager*/ None);
+        let responses_metadata = test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let request = client.build_responses_request(
+            &prompt,
+            &test_model_info(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            /*include_internal*/ false,
+        )?;
+        assert_eq!(request.prompt_cache_breakpoints, expected);
+
+        let body = codex_api::serialize_responses_request(&request)?;
+        assert_eq!(
+            body["input"][0]["content"][0]
+                .get("cache_control")
+                .is_some(),
+            expected
+        );
+        assert_eq!(body["tools"][0].get("cache_control").is_some(), expected);
+    }
+    Ok(())
 }
 
 fn output_with_tool_result_metadata(metadata: ToolResultMetadata) -> ResponseItem {

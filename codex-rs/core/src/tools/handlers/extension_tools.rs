@@ -94,6 +94,10 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
 }
 
 impl CoreToolRuntime for ExtensionToolAdapter {
+    fn is_extension_tool(&self) -> bool {
+        true
+    }
+
     fn environments_for_input(
         &self,
         invocation: &ToolInvocation,

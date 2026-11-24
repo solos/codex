@@ -8,10 +8,16 @@ use crate::ResponseStream;
 use crate::client::ModelClientSession;
 use crate::client::ResponsesHttpExecutor;
 use crate::client_common::ResponseEvent;
+use crate::compact::COMPACT_SKILL_HEAD_MAX_TOKENS;
+use crate::compact::COMPACT_SKILL_HEAD_TOTAL_MAX_TOKENS;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::compact::collect_recent_file_reads;
 use crate::compact::compaction_status_from_result;
+use crate::compact::content_items_to_text;
+use crate::compact::insert_recent_file_reads;
+use crate::compact::retained_text_mentions_path;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
@@ -37,6 +43,7 @@ use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
+use codex_context_fragments::truncate_annotated_text;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_history::CodexHarnessMetadata;
@@ -55,10 +62,8 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
-use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -490,12 +495,23 @@ fn build_v2_compacted_history(
         .zip(prompt_input_metadata)
         .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
         .collect::<Vec<_>>();
+    let recent_file_reads = collect_recent_file_reads(&prompt_input, "");
     let retained = v2_history_item_groups(prompt_input)
         .filter(|group| is_retained_for_remote_compaction_v2(&group.source, features))
         .flat_map(HistoryItemGroup::into_items)
         .collect::<Vec<_>>();
     let mut retained =
         truncate_retained_messages(retained, RETAINED_MESSAGE_TOKEN_BUDGET, image_budget);
+    let retained_text = retained
+        .iter()
+        .filter_map(|envelope| message_text(&envelope.item))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let recent_file_reads = recent_file_reads
+        .into_iter()
+        .filter(|path| !retained_text_mentions_path(&retained_text, path))
+        .collect::<Vec<_>>();
+    insert_recent_file_reads(&mut retained, &recent_file_reads);
     let retained_image_count = retained
         .iter()
         .map(|envelope| retained_input_image_count(&envelope.item))
@@ -565,10 +581,12 @@ fn is_retained_for_remote_compaction_v2(
     };
 
     match role.as_str() {
-        "user" => matches!(
-            crate::event_mapping::parse_turn_item(item),
-            Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
-        ),
+        "user" => {
+            matches!(
+                crate::event_mapping::parse_turn_item(item),
+                Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
+            ) || is_skill_instruction_message(item)
+        }
         "developer" => {
             features.enabled(Feature::RetainClientDeveloperMessages)
                 && is_client_authored_developer_message(envelope)
@@ -609,13 +627,14 @@ fn truncate_retained_messages(
     image_budget: RetainedImageBudget,
 ) -> Vec<ResponseItemEnvelope> {
     let mut remaining = max_tokens;
+    let mut skill_remaining = COMPACT_SKILL_HEAD_TOTAL_MAX_TOKENS;
     let mut truncated_reversed = Vec::with_capacity(items.len());
     for group in v2_history_item_groups(items)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
     {
-        if remaining == 0 {
+        if remaining == 0 && skill_remaining == 0 {
             continue;
         }
 
@@ -638,6 +657,33 @@ fn truncate_retained_messages(
             content_tokens.max(1)
         };
         let token_count = source_tokens.saturating_add(notice_tokens);
+        if is_skill_instruction_message(&group.source.item) {
+            if skill_remaining == 0 {
+                continue;
+            }
+            let budget = COMPACT_SKILL_HEAD_MAX_TOKENS.min(skill_remaining);
+            if token_count <= budget {
+                if let Some(notice) = group.attached_notice {
+                    truncated_reversed.push(notice);
+                }
+                truncated_reversed.push(group.source);
+            } else if budget > notice_tokens {
+                let Some(truncated) =
+                    truncate_message_text_to_token_budget(group.source, budget - notice_tokens)
+                else {
+                    continue;
+                };
+                if let Some(notice) = group.attached_notice {
+                    truncated_reversed.push(notice);
+                }
+                truncated_reversed.push(truncated);
+            }
+            skill_remaining = skill_remaining.saturating_sub(token_count.min(budget));
+            continue;
+        }
+        if remaining == 0 {
+            continue;
+        }
         if token_count <= remaining {
             if let Some(notice) = group.attached_notice {
                 truncated_reversed.push(notice);
@@ -702,6 +748,17 @@ fn truncate_retained_messages(
     truncated_reversed
 }
 
+fn is_skill_instruction_message(item: &ResponseItem) -> bool {
+    message_text(item).is_some_and(|text| codex_skills_extension::is_skill_prompt_fragment(&text))
+}
+
+fn message_text(item: &ResponseItem) -> Option<String> {
+    let ResponseItem::Message { content, .. } = item else {
+        return None;
+    };
+    content_items_to_text(content)
+}
+
 fn message_content_token_count(item: &ResponseItem) -> usize {
     let ResponseItem::Message { content, .. } = item else {
         return usize::try_from(estimate_item_token_count(item)).unwrap_or(usize::MAX);
@@ -731,32 +788,7 @@ fn truncate_message_text_to_token_budget(
     max_tokens: usize,
 ) -> Option<ResponseItemEnvelope> {
     let content = to_annotated_content(&mut envelope.item)?;
-
-    let mut remaining = max_tokens;
-    let mut truncated_content = Vec::with_capacity(content.len());
-    for mut content_item in content {
-        match content_item.content_mut() {
-            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
-                if remaining == 0 {
-                    continue;
-                }
-
-                let token_count = approx_token_count(text);
-                if token_count <= remaining {
-                    remaining = remaining.saturating_sub(token_count);
-                } else {
-                    *text = truncate_text(text, TruncationPolicy::Tokens(remaining));
-                    remaining = 0;
-                }
-                if !text.is_empty() {
-                    truncated_content.push(content_item);
-                }
-            }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
-                truncated_content.push(content_item);
-            }
-        }
-    }
+    let truncated_content = truncate_annotated_text(content, max_tokens);
 
     if truncated_content.is_empty() {
         return None;
@@ -956,6 +988,43 @@ mod tests {
     }
 
     #[test]
+    fn build_v2_compacted_history_adds_recent_file_read_fragment() {
+        let call = ResponseItem::FunctionCall {
+            status: None,
+            encrypted_content: None,
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: serde_json::json!({"command": "cat src/lib.rs"}).to_string(),
+            encrypted_function_args: None,
+            call_id: "read".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let output = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "new".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        let (history, _) = build_without_metadata(
+            vec![call, message("user", "keep going", /*phase*/ None)],
+            output.clone(),
+        );
+
+        assert_eq!(history.len(), 3);
+        let ResponseItem::Message { content, .. } = &history[1].item else {
+            panic!("expected file-read context message");
+        };
+        let fragment = content_items_to_text(content).expect("file-read context text");
+        assert!(
+            fragment.contains("<external_compacted_file_reads>"),
+            "{fragment}"
+        );
+        assert!(fragment.contains("- src/lib.rs"));
+        assert_eq!(history[2].item, output);
+    }
+
+    #[test]
     fn retained_history_truncation_preserves_metadata() {
         let item = ResponseItemEnvelope {
             item: message("user", "word ".repeat(200).as_str(), /*phase*/ None),
@@ -967,6 +1036,39 @@ mod tests {
 
         assert_eq!(truncated.len(), 1);
         assert_eq!(truncated[0].metadata, Some(CodexHarnessMetadata::default()));
+    }
+
+    #[test]
+    fn retained_history_keeps_skill_head_outside_the_main_budget() {
+        let skill = message(
+            "user",
+            &format!(
+                "<skill>\n<name>demo</name>\n{}</skill>",
+                "skill guidance ".repeat(2_000)
+            ),
+            /*phase*/ None,
+        );
+        let recent = message(
+            "user",
+            &format!("recent user message {}", "context ".repeat(100)),
+            /*phase*/ None,
+        );
+
+        let truncated = truncate_without_metadata(vec![skill, recent], /*max_tokens*/ 4);
+
+        assert_eq!(truncated.len(), 2);
+        let ResponseItem::Message { content, .. } = &truncated[0] else {
+            panic!("expected retained skill message");
+        };
+        let text = content_items_to_text(content).expect("skill text");
+        assert!(text.starts_with("<skill>"));
+        assert!(text.contains("<name>demo</name>"));
+        let token_count = approx_token_count(&text);
+        assert!(
+            token_count <= COMPACT_SKILL_HEAD_MAX_TOKENS,
+            "skill head must stay inside its dedicated budget: {token_count} tokens, {} bytes",
+            text.len()
+        );
     }
 
     #[test]

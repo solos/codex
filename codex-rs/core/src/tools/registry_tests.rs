@@ -861,6 +861,45 @@ async fn dispatch_uses_canonical_tool_names_for_lifecycle_contributors() -> anyh
     Ok(())
 }
 
+#[test]
+fn unsupported_tool_call_suggests_the_closest_registered_name() {
+    let mut registry = ToolRegistry::default();
+    registry.register_trusted(Arc::new(TestHandler {
+        tool_name: codex_tools::ToolName::plain("exec_command"),
+    }));
+
+    let message = unsupported_tool_call_message(
+        &ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        &codex_tools::ToolName::plain("exec_comand"),
+        &registry,
+    );
+
+    assert!(message.contains("`exec_comand` is not registered"));
+    assert!(message.contains("Did you mean `exec_command`?"));
+    assert!(message.contains("Retry with that exact tool name"));
+}
+
+#[test]
+fn unsupported_tool_call_points_to_tool_search_without_a_close_match() {
+    let mut registry = ToolRegistry::default();
+    registry.register_trusted(Arc::new(TestHandler {
+        tool_name: codex_tools::ToolName::plain("exec_command"),
+    }));
+
+    let message = unsupported_tool_call_message(
+        &ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        &codex_tools::ToolName::plain("database_query"),
+        &registry,
+    );
+
+    assert!(message.contains("`tool_search`"));
+    assert!(!message.contains("Did you mean"));
+}
+
 fn test_invocation(
     session: Arc<crate::session::session::Session>,
     turn: Arc<crate::session::turn_context::TurnContext>,

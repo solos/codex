@@ -1,6 +1,7 @@
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
+use crate::common::serialize_responses_request;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -80,8 +81,16 @@ impl<T: HttpTransport> ResponsesClient<T> {
             compression,
             turn_state,
         } = options;
-        let body = EncodedJsonBody::encode(&request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        let body = if request.prompt_cache_breakpoints {
+            let body = serialize_responses_request(&request).map_err(|e| {
+                ApiError::Stream(format!("failed to encode responses request: {e}"))
+            })?;
+            EncodedJsonBody::encode(&body)
+                .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?
+        } else {
+            EncodedJsonBody::encode(&request)
+                .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?
+        };
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {

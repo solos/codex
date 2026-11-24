@@ -33,3 +33,26 @@ fn capability_overrides_preserve_unspecified_provider_defaults() {
         );
     }
 }
+
+#[test]
+fn prompt_cache_breakpoints_require_an_explicit_override() {
+    let info = ModelProviderInfo {
+        name: "Custom".to_string(),
+        ..Default::default()
+    };
+    let default_provider =
+        create_model_provider(info.clone(), /*auth_manager*/ None).capabilities();
+    assert!(!default_provider.prompt_cache_breakpoints);
+
+    let enabled_provider = create_model_provider(
+        ModelProviderInfo {
+            capabilities: Some(ModelProviderCapabilities {
+                prompt_cache_breakpoints: Some(true),
+                ..Default::default()
+            }),
+            ..info
+        },
+        /*auth_manager*/ None,
+    );
+    assert!(enabled_provider.capabilities().prompt_cache_breakpoints);
+}

@@ -7,6 +7,9 @@ mod streaming_parser;
 mod text_file;
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::io;
 use std::path::PathBuf;
 
@@ -69,6 +72,13 @@ impl Default for ApplyPatchOptions {
             follow_symlinks: true,
         }
     }
+}
+
+/// Hash format used for the optional write-before-edit freshness check.
+pub fn content_hash(content: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -335,6 +345,27 @@ pub async fn apply_patch_with_options(
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
+    apply_patch_with_options_and_freshness(
+        patch, options, cwd, /*expected_hashes*/ None, stdout, stderr, fs, sandbox,
+    )
+    .await
+}
+
+/// Applies a patch while rejecting any target whose current contents no longer match
+/// the fingerprint captured by the caller.
+///
+/// The check runs immediately before each write/delete, closing the gap between an
+/// earlier tool-level freshness check and the patch's own file reads.
+pub async fn apply_patch_with_options_and_freshness(
+    patch: &str,
+    options: ApplyPatchOptions,
+    cwd: &PathUri,
+    expected_hashes: Option<&HashMap<PathUri, u64>>,
+    stdout: &mut impl std::io::Write,
+    stderr: &mut impl std::io::Write,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let hunks = match parse_patch(patch) {
         Ok(source) => source.hunks,
         Err(e) => {
@@ -362,7 +393,17 @@ pub async fn apply_patch_with_options(
         }
     };
 
-    apply_hunks_with_options(&hunks, options, cwd, stdout, stderr, fs, sandbox).await
+    apply_hunks_with_options(
+        &hunks,
+        options,
+        cwd,
+        expected_hashes,
+        stdout,
+        stderr,
+        fs,
+        sandbox,
+    )
+    .await
 }
 
 /// Applies hunks and continues to update stdout/stderr
@@ -378,6 +419,7 @@ pub async fn apply_hunks(
         hunks,
         ApplyPatchOptions::default(),
         cwd,
+        /*expected_hashes*/ None,
         stdout,
         stderr,
         fs,
@@ -392,21 +434,58 @@ async fn apply_hunks_with_options(
     hunks: &[Hunk],
     options: ApplyPatchOptions,
     cwd: &PathUri,
+    expected_hashes: Option<&HashMap<PathUri, u64>>,
     stdout: &mut impl std::io::Write,
     stderr: &mut impl std::io::Write,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> Result<AppliedPatchDelta, ApplyPatchFailure> {
     let mut delta = AppliedPatchDelta::empty();
-    match apply_hunks_to_files(hunks, options, cwd, fs, sandbox, &mut delta).await {
-        Ok(affected_paths) => {
+    match apply_hunks_to_files(
+        hunks,
+        options,
+        cwd,
+        expected_hashes,
+        fs,
+        sandbox,
+        &mut delta,
+    )
+    .await
+    {
+        Ok((affected_paths, fuzzy_matches)) => {
+            for notice in fuzzy_matches {
+                writeln!(stderr, "{notice}").map_err(|error| {
+                    ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
+                })?;
+            }
             print_summary(&affected_paths, stdout).map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
             })?;
             Ok(delta)
         }
         Err(error) => {
-            let msg = error.to_string();
+            let mut msg = error.to_string();
+            if !delta.changes().is_empty() {
+                let changed_paths = delta
+                    .changes()
+                    .iter()
+                    .map(|change| {
+                        let operation = match &change.change {
+                            AppliedPatchFileChange::Add { .. } => "added",
+                            AppliedPatchFileChange::Update { .. } => "updated",
+                            AppliedPatchFileChange::Delete { .. } => "deleted",
+                        };
+                        format!(
+                            "{} ({operation})",
+                            change.path.inferred_native_path_string()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                msg.push_str(&format!(
+                    "\nThe patch failed after partially applying changes to: {changed_paths}.\nRe-read those files before retrying so the next patch starts from the current contents."
+                ));
+            }
             writeln!(stderr, "{msg}").map_err(|error| {
                 ApplyPatchFailure::new(ApplyPatchError::from(error), delta.clone())
             })?;
@@ -439,10 +518,11 @@ async fn apply_hunks_to_files(
     hunks: &[Hunk],
     options: ApplyPatchOptions,
     cwd: &PathUri,
+    expected_hashes: Option<&HashMap<PathUri, u64>>,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
     delta: &mut AppliedPatchDelta,
-) -> anyhow::Result<AffectedPaths> {
+) -> anyhow::Result<(AffectedPaths, Vec<String>)> {
     let ApplyPatchOptions { follow_symlinks } = options;
     if hunks.is_empty() {
         anyhow::bail!("No files were modified.");
@@ -451,6 +531,7 @@ async fn apply_hunks_to_files(
     let mut added: Vec<PathBuf> = Vec::new();
     let mut modified: Vec<PathBuf> = Vec::new();
     let mut deleted: Vec<PathBuf> = Vec::new();
+    let mut fuzzy_matches = Vec::new();
     // A failed write can still have modified the target before surfacing an
     // error (for example by truncating before ENOSPC), so the accumulated
     // delta is no longer exact when a write fails.
@@ -479,6 +560,7 @@ async fn apply_hunks_to_files(
                     &mut delta.exact,
                 )
                 .await;
+                ensure_expected_hash(&path_uri, overwritten_content.as_deref(), expected_hashes)?;
                 try_write!(
                     write_file_with_missing_parent_retry(
                         fs,
@@ -514,6 +596,7 @@ async fn apply_hunks_to_files(
                 if deleted_content.is_none() {
                     delta.exact = false;
                 }
+                ensure_expected_hash(&path_uri, deleted_content.as_deref(), expected_hashes)?;
                 ensure_not_directory(&path_uri, fs, follow_symlinks, sandbox)
                     .await
                     .with_context(|| {
@@ -572,6 +655,7 @@ async fn apply_hunks_to_files(
                 let AppliedPatch {
                     original_contents,
                     new_contents,
+                    fuzzy_matches: file_fuzzy_matches,
                 } = derive_new_contents_from_chunks(
                     &path_uri,
                     chunks,
@@ -580,6 +664,8 @@ async fn apply_hunks_to_files(
                     sandbox,
                 )
                 .await?;
+                ensure_expected_hash(&path_uri, Some(&original_contents), expected_hashes)?;
+                fuzzy_matches.extend(file_fuzzy_matches);
                 if let Some(dest) = move_path {
                     let dest_uri = cwd.join(&dest.to_string_lossy())?;
                     let overwritten_move_content = read_optional_file_text_for_delta(
@@ -590,6 +676,11 @@ async fn apply_hunks_to_files(
                         &mut delta.exact,
                     )
                     .await;
+                    ensure_expected_hash(
+                        &dest_uri,
+                        overwritten_move_content.as_deref(),
+                        expected_hashes,
+                    )?;
                     try_write!(
                         write_file_with_missing_parent_retry(
                             fs,
@@ -682,11 +773,37 @@ async fn apply_hunks_to_files(
             }
         }
     }
-    Ok(AffectedPaths {
-        added,
-        modified,
-        deleted,
-    })
+    Ok((
+        AffectedPaths {
+            added,
+            modified,
+            deleted,
+        },
+        fuzzy_matches,
+    ))
+}
+
+fn ensure_expected_hash(
+    path: &PathUri,
+    current_content: Option<&str>,
+    expected_hashes: Option<&HashMap<PathUri, u64>>,
+) -> anyhow::Result<()> {
+    let Some(expected_hash) = expected_hashes.and_then(|hashes| hashes.get(path)) else {
+        return Ok(());
+    };
+    let Some(current_content) = current_content else {
+        anyhow::bail!(
+            "File changed or disappeared since this session last edited it: {}. The patch was rejected; re-read the file and rebuild the patch.",
+            path.inferred_native_path_string()
+        );
+    };
+    if content_hash(current_content) != *expected_hash {
+        anyhow::bail!(
+            "File changed since this session last edited it: {}. The patch was rejected; re-read the file and rebuild the patch from its current contents.",
+            path.inferred_native_path_string()
+        );
+    }
+    Ok(())
 }
 
 async fn ensure_not_directory(
@@ -851,6 +968,63 @@ mod tests {
     /// Helper to construct a patch with the given body.
     fn wrap_patch(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    #[tokio::test]
+    async fn freshness_hash_is_checked_immediately_before_writing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("freshness.txt");
+        fs::write(&path, "original\n").unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute test path");
+        let path_uri = PathUri::from_host_native_path(&path).expect("absolute file path");
+        let expected_hashes = HashMap::from([(path_uri, content_hash("stale snapshot\n"))]);
+        let patch = wrap_patch("*** Update File: freshness.txt\n@@\n-original\n+changed");
+
+        let failure = apply_patch_with_options_and_freshness(
+            &patch,
+            ApplyPatchOptions::default(),
+            &cwd,
+            Some(&expected_hashes),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .expect_err("stale fingerprint must reject the write");
+
+        assert!(
+            failure
+                .to_string()
+                .contains("File changed since this session last edited it")
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "original\n");
+    }
+
+    #[tokio::test]
+    async fn matching_freshness_hash_allows_the_patch() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("freshness.txt");
+        fs::write(&path, "original\n").unwrap();
+        let cwd = PathUri::from_host_native_path(dir.path()).expect("absolute test path");
+        let path_uri = PathUri::from_host_native_path(&path).expect("absolute file path");
+        let expected_hashes = HashMap::from([(path_uri, content_hash("original\n"))]);
+        let patch = wrap_patch("*** Update File: freshness.txt\n@@\n-original\n+changed");
+
+        apply_patch_with_options_and_freshness(
+            &patch,
+            ApplyPatchOptions::default(),
+            &cwd,
+            Some(&expected_hashes),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            LOCAL_FS.as_ref(),
+            /*sandbox*/ None,
+        )
+        .await
+        .expect("matching fingerprint should allow the write");
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "changed\n");
     }
 
     #[tokio::test]
@@ -1317,8 +1491,8 @@ mod tests {
         );
         assert_eq!(stdout_str, expected_out);
 
-        // No stderr expected.
-        assert_eq!(String::from_utf8(stderr).unwrap(), "");
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("unicode-normalized matching"));
     }
 
     #[cfg(unix)]

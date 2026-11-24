@@ -439,6 +439,7 @@ fn responses_request_properties_mismatch(
         text: previous_text,
         client_metadata: _,
         access_programs: _,
+        prompt_cache_breakpoints: previous_prompt_cache_breakpoints,
     } = previous;
     let ResponsesApiRequest {
         model: current_model,
@@ -456,6 +457,7 @@ fn responses_request_properties_mismatch(
         text: current_text,
         client_metadata: _,
         access_programs: _,
+        prompt_cache_breakpoints: current_prompt_cache_breakpoints,
     } = current;
 
     // Stream options control delivery for this response, not the context
@@ -480,6 +482,8 @@ fn responses_request_properties_mismatch(
         "service_tier_changed"
     } else if previous_prompt_cache_key != current_prompt_cache_key {
         "prompt_cache_key_changed"
+    } else if previous_prompt_cache_breakpoints != current_prompt_cache_breakpoints {
+        "prompt_cache_breakpoints_changed"
     } else if previous_text != current_text {
         "text_changed"
     } else {
@@ -1167,6 +1171,11 @@ impl ModelClient {
             text,
             client_metadata: Some(client_metadata),
             access_programs: None,
+            // The instruction boundary is only unambiguous when base instructions are present.
+            prompt_cache_breakpoints: !is_openai
+                && !model_info.use_responses_lite
+                && !prompt.base_instructions.text.is_empty()
+                && self.state.provider.capabilities().prompt_cache_breakpoints,
         };
         Ok(request)
     }

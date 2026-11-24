@@ -103,6 +103,11 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         false
     }
 
+    /// True for tools registered through the extension executor adapter.
+    fn is_extension_tool(&self) -> bool {
+        false
+    }
+
     /// Identify the environments selected by the original input.
     fn environments_for_input(
         &self,
@@ -753,7 +758,7 @@ impl ToolRegistry {
         let tool = match self.tool(&tool_name) {
             Some(tool) => tool,
             None => {
-                let message = unsupported_tool_call_message(&invocation.payload, &tool_name);
+                let message = unsupported_tool_call_message(&invocation.payload, &tool_name, self);
                 let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
                 let mut tool_result_tags = Vec::with_capacity(2);
                 sandbox_tags.append_metric_tags(&mut tool_result_tags);
@@ -836,6 +841,9 @@ impl ToolRegistry {
             Ok(environments) => environments,
             Err(err) => return Err(fail_before_execution(&invocation, err).await),
         };
+        if let Err(err) = super::protected_paths::enforce_protected_path_redline(&invocation) {
+            return Err(fail_before_execution(&invocation, err).await);
+        }
         if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
             let tool_cwd = match tool.pre_tool_use_cwd(&invocation) {
                 Ok(cwd) => cwd,
@@ -1093,11 +1101,64 @@ fn function_hook_tool_input(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.to_string()))
 }
 
-fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) -> String {
-    match payload {
-        ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
-        _ => format!("unsupported call: {tool_name}"),
+fn unsupported_tool_call_message(
+    payload: &ToolPayload,
+    tool_name: &ToolName,
+    registry: &ToolRegistry,
+) -> String {
+    let requested = flat_tool_name(tool_name);
+    let kind = if matches!(payload, ToolPayload::Custom { .. }) {
+        "custom tool call"
+    } else {
+        "tool call"
+    };
+    let mut message = format!("Unsupported {kind}: `{requested}` is not registered in this turn.");
+    if let Some(suggestion) = closest_registered_tool_name(registry, &requested) {
+        message.push_str(&format!(
+            " Did you mean `{suggestion}`? Retry with that exact tool name and arguments matching its schema."
+        ));
+    } else {
+        message.push_str(
+            " Use `tool_search` to discover available tools when it is enabled, otherwise retry with the exact registered tool name.",
+        );
     }
+    message
+}
+
+fn closest_registered_tool_name(registry: &ToolRegistry, requested: &str) -> Option<String> {
+    let requested = requested.to_ascii_lowercase();
+    registry
+        .entries()
+        .filter_map(|tool| {
+            let candidate = flat_tool_name(&tool.runtime.tool_name()).into_owned();
+            let normalized = candidate.to_ascii_lowercase();
+            let distance = edit_distance(&requested, &normalized);
+            let prefix_match =
+                normalized.starts_with(&requested) || requested.starts_with(&normalized);
+            let max_distance = if prefix_match {
+                2
+            } else {
+                (requested.len().max(normalized.len()) / 3).clamp(1, 4)
+            };
+            (distance <= max_distance).then_some((distance, candidate))
+        })
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+        .map(|(_, name)| name)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + usize::from(left_byte != right_byte));
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 #[cfg(test)]
 #[path = "registry_tests.rs"]

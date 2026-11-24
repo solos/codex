@@ -1,5 +1,33 @@
+/// Match strictness used to locate a patch sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MatchLevel {
+    Exact,
+    Rstrip,
+    Trim,
+    Unicode,
+}
+
+impl std::fmt::Display for MatchLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MatchLevel::Exact => "exact",
+            MatchLevel::Rstrip => "trailing-whitespace-insensitive",
+            MatchLevel::Trim => "whitespace-insensitive",
+            MatchLevel::Unicode => "unicode-normalized",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SequenceMatch {
+    pub(crate) index: usize,
+    pub(crate) level: MatchLevel,
+    /// Number of locations that matched at `level`.
+    pub(crate) match_count: usize,
+}
+
 /// Attempt to find the sequence of `pattern` lines within `lines` beginning at or after `start`.
-/// Returns the starting index of the match or `None` if not found. Matches are attempted with
+/// Returns the first match and the strictness level used. Matches are attempted with
 /// decreasing strictness: exact match, then ignoring trailing whitespace, then ignoring leading
 /// and trailing whitespace. When `eof` is true, we first try starting at the end-of-file (so that
 /// patterns intended to match file endings are applied at the end), and fall back to searching
@@ -14,9 +42,13 @@ pub(crate) fn seek_sequence(
     pattern: &[String],
     start: usize,
     eof: bool,
-) -> Option<usize> {
+) -> Option<SequenceMatch> {
     if pattern.is_empty() {
-        return Some(start);
+        return Some(SequenceMatch {
+            index: start,
+            level: MatchLevel::Exact,
+            match_count: 1,
+        });
     }
 
     // When the pattern is longer than the available input there is no possible
@@ -32,37 +64,51 @@ pub(crate) fn seek_sequence(
     } else {
         start
     };
-    // Exact match first.
-    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        if lines[i..i + pattern.len()] == *pattern {
-            return Some(i);
-        }
-    }
-    // Then rstrip match.
-    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        let mut ok = true;
-        for (p_idx, pat) in pattern.iter().enumerate() {
-            if lines[i + p_idx].trim_end() != pat.trim_end() {
-                ok = false;
-                break;
+    let find_matches = |matches: &mut dyn FnMut(usize, usize) -> bool| {
+        let mut indices = Vec::new();
+        for i in search_start..=lines.len().saturating_sub(pattern.len()) {
+            if matches(i, pattern.len()) {
+                indices.push(i);
             }
         }
-        if ok {
-            return Some(i);
-        }
+        indices
+    };
+
+    let exact = find_matches(&mut |i, len| lines[i..i + len] == *pattern);
+    if let Some(first) = exact.first() {
+        return Some(SequenceMatch {
+            index: *first,
+            level: MatchLevel::Exact,
+            match_count: exact.len(),
+        });
     }
-    // Finally, trim both sides to allow more lenience.
-    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        let mut ok = true;
-        for (p_idx, pat) in pattern.iter().enumerate() {
-            if lines[i + p_idx].trim() != pat.trim() {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            return Some(i);
-        }
+
+    let rstrip = find_matches(&mut |i, len| {
+        pattern.iter().enumerate().all(|(pattern_index, expected)| {
+            lines[i + pattern_index].trim_end() == expected.trim_end()
+        }) && len == pattern.len()
+    });
+    if let Some(first) = rstrip.first() {
+        return Some(SequenceMatch {
+            index: *first,
+            level: MatchLevel::Rstrip,
+            match_count: rstrip.len(),
+        });
+    }
+
+    let trim = find_matches(&mut |i, len| {
+        pattern
+            .iter()
+            .enumerate()
+            .all(|(pattern_index, expected)| lines[i + pattern_index].trim() == expected.trim())
+            && len == pattern.len()
+    });
+    if let Some(first) = trim.first() {
+        return Some(SequenceMatch {
+            index: *first,
+            level: MatchLevel::Trim,
+            match_count: trim.len(),
+        });
     }
 
     // ------------------------------------------------------------------
@@ -94,24 +140,21 @@ pub(crate) fn seek_sequence(
             .collect::<String>()
     }
 
-    for i in search_start..=lines.len().saturating_sub(pattern.len()) {
-        let mut ok = true;
-        for (p_idx, pat) in pattern.iter().enumerate() {
-            if normalise(&lines[i + p_idx]) != normalise(pat) {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            return Some(i);
-        }
-    }
-
-    None
+    let unicode = find_matches(&mut |i, len| {
+        pattern.iter().enumerate().all(|(pattern_index, expected)| {
+            normalise(&lines[i + pattern_index]) == normalise(expected)
+        }) && len == pattern.len()
+    });
+    unicode.first().map(|first| SequenceMatch {
+        index: *first,
+        level: MatchLevel::Unicode,
+        match_count: unicode.len(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::MatchLevel;
     use super::seek_sequence;
     use std::string::ToString;
 
@@ -124,8 +167,9 @@ mod tests {
         let lines = to_vec(&["foo", "bar", "baz"]);
         let pattern = to_vec(&["bar", "baz"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false,),
-            Some(1)
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false)
+                .map(|matched| (matched.index, matched.level)),
+            Some((1, MatchLevel::Exact))
         );
     }
 
@@ -135,8 +179,9 @@ mod tests {
         // Pattern omits trailing whitespace.
         let pattern = to_vec(&["foo", "bar"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false,),
-            Some(0)
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false)
+                .map(|matched| (matched.index, matched.level)),
+            Some((0, MatchLevel::Rstrip))
         );
     }
 
@@ -146,8 +191,9 @@ mod tests {
         // Pattern omits any additional whitespace.
         let pattern = to_vec(&["foo", "bar"]);
         assert_eq!(
-            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false,),
-            Some(0)
+            seek_sequence(&lines, &pattern, /*start*/ 0, /*eof*/ false)
+                .map(|matched| (matched.index, matched.level)),
+            Some((0, MatchLevel::Trim))
         );
     }
 
