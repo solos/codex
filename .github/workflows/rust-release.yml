@@ -481,8 +481,6 @@ jobs:
       contents: read
       id-token: write
 
-    env:
-
     strategy:
       fail-fast: false
       matrix:
@@ -664,8 +662,6 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
-
-    env:
 
     strategy:
       fail-fast: false
@@ -893,8 +889,6 @@ jobs:
       contents: read
       id-token: write
 
-    env:
-
     strategy:
       fail-fast: false
       matrix:
@@ -993,8 +987,6 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
-
-    env:
 
     strategy:
       fail-fast: false
