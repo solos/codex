@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: openai/fence@e017427978b91977d79a3023842166ab79b5b816 # pin@v0.12.2
+      - uses: openai/fence@f9751ca5d767dc0199e88733c2b286bd4800a008 # pin@v0.12.5
         with:
           mode: audit
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
