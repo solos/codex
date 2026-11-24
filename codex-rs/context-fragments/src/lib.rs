@@ -13,6 +13,7 @@ pub use annotated_content::message_from_parts;
 pub use annotated_content::set_annotated_content;
 pub use annotated_content::to_annotated_content;
 pub use annotated_content::truncate_annotated_text;
+pub use annotated_content::truncate_annotated_text_preserving_prefix;
 pub use fragment::AttributedFragment;
 pub use fragment::ContextualUserFragment;
 pub use fragment::RenderedFragment;

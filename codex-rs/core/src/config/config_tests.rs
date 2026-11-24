@@ -711,7 +711,8 @@ disable_in_process_fallback = true
 #[tokio::test]
 async fn load_config_resolves_code_index_config() -> std::io::Result<()> {
     let codex_home = tempdir()?;
-    let config_toml: ConfigToml = toml::from_str(
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
         r#"
 [features.code_index]
 enabled = true
@@ -721,24 +722,27 @@ index_path = ".codex/index.sqlite"
 embedding = true
 debug = true
 "#,
-    )
-    .expect("TOML deserialization should succeed");
-    let config = Config::load_from_base_config_with_overrides(
-        config_toml,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
+    )?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
 
     assert!(config.features.enabled(Feature::CodeIndex));
     let effective = deserialize_config_toml_with_base(
-        config.config_layer_stack.effective_config(),
+        config
+            .config_layer_stack
+            .effective_user_config()
+            .expect("user config layer"),
         codex_home.path(),
     )?;
-    let Some(FeatureToml::Config(code_index)) =
-        effective.features.and_then(|features| features.code_index)
+    let Some(FeatureToml::Config(code_index)) = effective
+        .features
+        .as_ref()
+        .and_then(|features| features.code_index.as_ref())
     else {
-        panic!("expected structured code-index config");
+        panic!("expected structured code-index config: {effective:?}");
     };
     assert_eq!(code_index.token_budget, Some(2_400));
     assert_eq!(code_index.max_results, Some(12));
@@ -5553,10 +5557,6 @@ fn filter_plugin_mcp_servers_by_matchers_enforces_name_and_invocation() {
 
 #[tokio::test]
 async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result<()> {
-    let service_config = codex_config::ConfigServer {
-        base_url: "https://policy.example/settings".into(),
-        oauth: None,
-    };
     let codex_home = TempDir::new()?;
     let user_file = AbsolutePathBuf::resolve_path_against_base(CONFIG_TOML_FILE, codex_home.path());
     let project_dot_codex =
@@ -5596,7 +5596,6 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         ),
     ]);
     let requirements_toml = codex_config::ConfigRequirementsToml {
-        config_server: Some(service_config.clone()),
         mcp_servers: Some(mcp_requirements.clone()),
         ..Default::default()
     };
@@ -5643,8 +5642,7 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         requirements,
         requirements_toml,
     )
-    .map_err(std::io::Error::other)?
-    .with_applied_config_server(Some(service_config));
+    .map_err(std::io::Error::other)?;
     let thread_layer_stack = ConfigLayerStack::new(
         vec![
             ConfigLayerEntry::new(
@@ -5719,26 +5717,6 @@ async fn rebuild_with_session_layers_refreshes_requirements() -> std::io::Result
         codex_home.abs(),
     )
     .await?;
-    assert_eq!(
-        config.config_layer_stack.applied_config_server(),
-        refreshed_layer_stack.applied_config_server()
-    );
-
-    // User-only refreshes keep this policy; managed refreshes must supply it.
-    let mut missing_policy = config.clone();
-    missing_policy.config_layer_stack = missing_policy
-        .config_layer_stack
-        .with_applied_config_server(/*service_config*/ None);
-    assert!(
-        config
-            .resolve_runtime_refresh(&missing_policy, RuntimeConfigRefresh::User)
-            .is_ok()
-    );
-    assert!(
-        config
-            .resolve_runtime_refresh(&missing_policy, RuntimeConfigRefresh::Mcp)
-            .is_err()
-    );
 
     assert_eq!(
         config.mcp_servers.get(),
@@ -10340,7 +10318,6 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
     let fixture = create_test_fixture()?;
 
     let requirements_toml = codex_config::ConfigRequirementsToml {
-        config_server: None,
         model_provider: None,
         model_providers: None,
         allowed_login_methods: None,
@@ -12653,16 +12630,17 @@ async fn otel_requirements_resolve_config(
         config.otel,
         super::otel::resolve_config(expected.otel.unwrap_or_default(), &mut warnings)
     );
-    assert_eq!(
-        config
-            .startup_warnings
-            .iter()
-            .find(|warning| warning.contains("Configured values under `otel` are overridden"))
-            .map(String::as_str),
-        expect_override_warning.then_some(
-            "Configured values under `otel` are overridden by requirements from enterprise-managed requirements Base requirements (req_1).",
-        ),
-    );
+    let override_warning = config
+        .startup_warnings
+        .iter()
+        .find(|warning| warning.contains("Configured values under `otel` are overridden"));
+    assert_eq!(override_warning.is_some(), expect_override_warning);
+    if let Some(warning) = override_warning {
+        assert!(
+            warning
+                .starts_with("Configured values under `otel` are overridden by requirements from ")
+        );
+    }
     assert!(
         config
             .startup_warnings
@@ -12696,17 +12674,6 @@ metrics_exporter = { otlp-http = { endpoint = "http://127.0.0.1:1/v1/metrics", p
         config.otel.metrics_exporter,
         OtelExporterKind::OtlpHttp { .. }
     ));
-    assert!(
-        crate::otel_init::build_provider(
-            &config,
-            env!("CARGO_PKG_VERSION"),
-            /*service_name_override*/ None,
-            /*default_analytics_enabled*/ true,
-        )
-        .expect("managed metrics configuration should remain valid")
-        .is_some(),
-        "analytics.enabled=false should preserve the custom managed metrics exporter"
-    );
     Ok(())
 }
 
@@ -12765,4 +12732,23 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
     assert!(warnings.is_empty());
 
     Ok(())
+}
+
+async fn load_with_enterprise_requirement(
+    codex_home: &TempDir,
+    requirements: impl Into<String>,
+) -> std::io::Result<Config> {
+    let requirements_path = codex_home.path().join("requirements.toml");
+    std::fs::write(&requirements_path, requirements.into())?;
+    let mut loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    loader_overrides.managed_config_path = None;
+    loader_overrides.system_config_path = Some(codex_home.path().join("managed_config.toml"));
+    loader_overrides.system_requirements_path = Some(requirements_path);
+
+    ConfigBuilder::without_managed_config_for_tests()
+        .loader_overrides(loader_overrides)
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await
 }

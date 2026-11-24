@@ -29,10 +29,10 @@ async fn layered_config(
     let requirements_path = base.codex_home.join("requirements.toml");
     std::fs::write(&requirements_path, format!("[features]\n{requirements}")).unwrap();
     let mut loader_overrides = codex_config::LoaderOverrides::without_managed_config_for_tests();
-    loader_overrides.system_requirements_path = Some(requirements_path);
+    loader_overrides.system_requirements_path = Some(requirements_path.to_path_buf());
     let managed_config_path = base.codex_home.join("managed_config.toml");
     std::fs::write(&managed_config_path, managed).unwrap();
-    loader_overrides.managed_config_path = Some(managed_config_path);
+    loader_overrides.managed_config_path = Some(managed_config_path.to_path_buf());
     let overrides: toml::Table = toml::from_str(session).unwrap();
     ConfigBuilder::without_managed_config_for_tests()
         .codex_home(base.codex_home.to_path_buf())

@@ -610,7 +610,7 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
             .iter()
             .map(codex_tools::ToolSpec::name)
             .collect::<Vec<_>>(),
-        vec!["exec_command", "write_stdin", "view_image"]
+        vec!["exec_command", "view_image", "write_stdin"]
     );
 }
 
@@ -665,8 +665,8 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
                 .collect::<Vec<_>>(),
             vec![
                 codex_code_mode::PUBLIC_TOOL_NAME,
-                codex_code_mode::WAIT_TOOL_NAME,
                 "view_image",
+                codex_code_mode::WAIT_TOOL_NAME,
             ],
             "disabled feature: {disabled_feature:?}, shell type: {shell_type:?}"
         );
@@ -713,7 +713,7 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
     for (secondary_profile, expected_tools) in [
         (
             codex_protocol::models::PermissionProfile::workspace_write(),
-            vec!["exec_command", "write_stdin", "view_image"],
+            vec!["exec_command", "view_image", "write_stdin"],
         ),
         (
             codex_protocol::models::PermissionProfile::Disabled,
@@ -3197,10 +3197,10 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
     assert_eq!(
         plan.visible_names,
         vec![
-            "exec",
-            "wait",
-            "request_user_input",
             "agents",
+            "exec",
+            "request_user_input",
+            "wait",
             // Hosted Responses tool.
             "web_search",
         ]
@@ -3361,12 +3361,11 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     assert_eq!(
         code_mode_only.visible_names,
         vec![
+            "collaboration",
             // Code-mode entrypoints.
             codex_code_mode::PUBLIC_TOOL_NAME,
-            codex_code_mode::WAIT_TOOL_NAME,
             "request_user_input",
-            // Multi-agent v2 tools.
-            MULTI_AGENT_V2_NAMESPACE,
+            codex_code_mode::WAIT_TOOL_NAME,
             // Hosted Responses tools.
             "web_search",
         ]

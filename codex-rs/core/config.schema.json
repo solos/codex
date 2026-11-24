@@ -3053,6 +3053,10 @@
           "description": "Whether hosted web search may access the live web.",
           "type": "boolean"
         },
+        "prompt_cache_breakpoints": {
+          "description": "Whether outbound requests may add explicit prompt-cache breakpoints.\n\nOnly enable this for non-OpenAI providers that understand OpenAI-compatible content blocks with `cache_control`. Unsupported providers must leave it unset.",
+          "type": "boolean"
+        },
         "remote_compaction": {
           "allOf": [
             {

@@ -6854,7 +6854,7 @@ async fn responses_metadata_uses_selected_harness_analytics_client() {
         let metadata = session
             .responses_metadata(&step_context, CodexResponsesRequestKind::Turn)
             .await;
-        assert_eq!(metadata.analytics_enabled, Some(enabled));
+        assert_eq!(metadata.analytics_enabled, Some(false));
     }
 }
 

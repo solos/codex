@@ -153,10 +153,10 @@ async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[U
 }
 
 fn thread_manager() -> ThreadManager {
-    ThreadManager::with_models_provider_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
-    )
+    let mut provider =
+        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+    provider.supports_websockets = false;
+    ThreadManager::with_models_provider_for_tests(CodexAuth::from_api_key("dummy"), provider)
 }
 
 async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
@@ -2624,7 +2624,8 @@ async fn send_input_interrupts_before_prompt() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     set_agent_control(&mut session, manager.agent_control());
-    let config = turn.config.as_ref().clone();
+    let mut config = turn.config.as_ref().clone();
+    config.model_provider.supports_websockets = false;
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
@@ -2673,7 +2674,8 @@ async fn send_input_accepts_structured_items() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     set_agent_control(&mut session, manager.agent_control());
-    let config = turn.config.as_ref().clone();
+    let mut config = turn.config.as_ref().clone();
+    config.model_provider.supports_websockets = false;
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await

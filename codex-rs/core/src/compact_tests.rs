@@ -599,20 +599,19 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages(
                     .cloned()
                     .unwrap_or_default()
             };
-            assert_eq!(
-                content,
-                &vec![
-                    ContentItem::InputText {
-                        text: big[..32].to_string()
-                    },
-                    ContentItem::InputText {
-                        text: format!("…{} tokens truncated…", 250 * content_parts - max_tokens)
-                    },
-                    ContentItem::InputText {
-                        text: big[big.len() - 32..].to_string()
-                    },
-                ]
-            );
+            let [
+                ContentItem::InputText { text: head },
+                ContentItem::InputText { text: marker },
+                ContentItem::InputText { text: tail },
+            ] = content.as_slice()
+            else {
+                panic!("expected a truncated head, marker, and tail: {content:?}");
+            };
+            assert!(!head.is_empty());
+            assert!(big.starts_with(head));
+            assert_eq!(marker, "…");
+            assert!(!tail.is_empty());
+            assert!(big.ends_with(tail));
             assert_eq!(
                 internal_chat_message_metadata_passthrough
                     .as_ref()
@@ -629,9 +628,10 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages(
         other => panic!("unexpected item in history: {other:?}"),
     };
 
+    assert!(truncated_text.contains('…'));
     assert!(
-        truncated_text.contains("tokens truncated"),
-        "expected truncation marker in truncated user message"
+        approx_token_count(&truncated_text) <= max_tokens,
+        "truncated user message exceeded its token budget"
     );
     assert!(
         !truncated_text.contains(&big),

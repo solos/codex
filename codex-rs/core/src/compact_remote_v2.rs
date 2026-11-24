@@ -43,7 +43,7 @@ use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
-use codex_context_fragments::truncate_annotated_text;
+use codex_context_fragments::truncate_annotated_text_preserving_prefix;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_history::CodexHarnessMetadata;
@@ -788,7 +788,7 @@ fn truncate_message_text_to_token_budget(
     max_tokens: usize,
 ) -> Option<ResponseItemEnvelope> {
     let content = to_annotated_content(&mut envelope.item)?;
-    let truncated_content = truncate_annotated_text(content, max_tokens);
+    let truncated_content = truncate_annotated_text_preserving_prefix(content, max_tokens);
 
     if truncated_content.is_empty() {
         return None;
@@ -806,6 +806,7 @@ mod tests {
     use super::*;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ContentItemKind;
+    use codex_protocol::models::ContentItemMetadata;
     use codex_protocol::models::InternalChatMessageMetadataPassthrough;
     use codex_protocol::models::MessagePhase;
     use pretty_assertions::assert_eq;
@@ -1155,13 +1156,30 @@ mod tests {
                     status: None,
                     id: None,
                     role: "user".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "midd…1 tokens truncated…1234".to_string(),
-                    }],
+                    content: vec![
+                        ContentItem::InputText {
+                            text: "m".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "…".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "34".to_string(),
+                        },
+                    ],
                     phase: None,
                     internal_chat_message_metadata_passthrough: Some(
                         InternalChatMessageMetadataPassthrough {
-                            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                            content_item_kinds: Some(vec![
+                                ContentItemKind("unknown".to_string()),
+                                ContentItemKind("unknown".to_string()),
+                                ContentItemKind("unknown".to_string()),
+                            ]),
+                            content_item_metadata: Some(vec![
+                                ContentItemMetadata::default(),
+                                ContentItemMetadata::harness(),
+                                ContentItemMetadata::default(),
+                            ]),
                             ..Default::default()
                         },
                     ),
@@ -1262,10 +1280,8 @@ mod tests {
                         },
                         detail: None,
                     },
-                    ContentItem::OutputText {
-                        annotations: None,
-                        logprobs: None,
-                        text: "uv…1 tokens truncated…yz".to_string(),
+                    ContentItem::InputText {
+                        text: "…".to_string(),
                     },
                     ContentItem::InputImage {
                         image: ImageReference::Inline {
@@ -1281,8 +1297,14 @@ mod tests {
                         content_item_kinds: Some(vec![
                             ContentItemKind("user.text".to_string()),
                             ContentItemKind("user.image".to_string()),
-                            ContentItemKind("user.text".to_string()),
+                            ContentItemKind("unknown".to_string()),
                             ContentItemKind("user.image".to_string()),
+                        ]),
+                        content_item_metadata: Some(vec![
+                            ContentItemMetadata::default(),
+                            ContentItemMetadata::default(),
+                            ContentItemMetadata::harness(),
+                            ContentItemMetadata::default(),
                         ]),
                         ..Default::default()
                     },

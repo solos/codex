@@ -9,6 +9,8 @@ use codex_utils_string::TextTruncation;
 use codex_utils_string::approx_bytes_for_tokens;
 use codex_utils_string::plan_token_truncation;
 
+const TRUNCATION_MARKER: &str = "…";
+
 /// Content, classification and attribution travel together through edits and truncation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnnotatedContent {
@@ -46,7 +48,18 @@ pub fn truncate_annotated_text(
         })
         .collect();
     let Some(truncation) = plan_token_truncation(&text, max_tokens) else {
-        return parts;
+        if rendered_text_token_count(&parts) <= max_tokens {
+            return parts;
+        }
+        let separator_bytes = parts.len().saturating_add(1);
+        let truncation =
+            plan_hard_text_truncation(&text, approx_bytes_for_tokens(max_tokens), separator_bytes)
+                .expect("oversized text must have a hard truncation plan");
+        let result = apply_annotated_truncation(&parts, &truncation);
+        if rendered_text_token_count(&result) <= max_tokens {
+            return result;
+        }
+        return without_text(parts);
     };
     let result = apply_annotated_truncation(&parts, &truncation);
     if rendered_text_token_count(&result) <= max_tokens {
@@ -54,13 +67,82 @@ pub fn truncate_annotated_text(
     }
 
     let separator_bytes = parts.len().saturating_add(1);
-    let truncation = plan_hard_annotated_truncation(&text, max_tokens, separator_bytes)
-        .expect("oversized text must have a hard truncation plan");
+    let truncation =
+        plan_hard_text_truncation(&text, approx_bytes_for_tokens(max_tokens), separator_bytes)
+            .expect("oversized text must have a hard truncation plan");
     let result = apply_annotated_truncation(&parts, &truncation);
     if rendered_text_token_count(&result) <= max_tokens {
         return result;
     }
 
+    without_text(parts)
+}
+
+/// Applies a bounded head/tail truncation without discarding later text parts
+/// until the earliest parts have consumed the budget.
+///
+/// This preserves retained message prefixes while still accounting for the
+/// truncation marker and separators in the final token budget.
+pub fn truncate_annotated_text_preserving_prefix(
+    parts: Vec<AnnotatedContent>,
+    max_tokens: usize,
+) -> Vec<AnnotatedContent> {
+    if max_tokens == 0 {
+        return without_text(parts);
+    }
+
+    let max_bytes = approx_bytes_for_tokens(max_tokens);
+    let mut rendered_text_bytes = 0usize;
+    let mut text_budget_exhausted = false;
+    let mut result = Vec::with_capacity(parts.len());
+    for part in parts {
+        let text = match part.content() {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => text,
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                result.push(part);
+                continue;
+            }
+        };
+        if text_budget_exhausted || text.is_empty() {
+            continue;
+        }
+
+        let separator_bytes = usize::from(rendered_text_bytes > 0);
+        let text_end = rendered_text_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(text.len());
+        if text_end <= max_bytes {
+            rendered_text_bytes = text_end;
+            result.push(part);
+            continue;
+        }
+
+        let available_bytes = max_bytes.saturating_sub(rendered_text_bytes + separator_bytes);
+        if available_bytes < TRUNCATION_MARKER.len() {
+            text_budget_exhausted = true;
+            continue;
+        }
+        // Reserve the two possible separators introduced by splitting this part.
+        let Some(truncation) = plan_hard_text_truncation(text, available_bytes, 2) else {
+            text_budget_exhausted = true;
+            continue;
+        };
+        let truncated = apply_annotated_truncation(std::slice::from_ref(&part), &truncation);
+        rendered_text_bytes = rendered_text_bytes
+            .saturating_add(separator_bytes)
+            .saturating_add(rendered_text_byte_count(&truncated));
+        result.extend(truncated);
+        text_budget_exhausted = true;
+    }
+
+    if rendered_text_token_count(&result) <= max_tokens {
+        result
+    } else {
+        without_text(result)
+    }
+}
+
+fn without_text(parts: Vec<AnnotatedContent>) -> Vec<AnnotatedContent> {
     parts
         .into_iter()
         .filter(|part| {
@@ -73,39 +155,43 @@ pub fn truncate_annotated_text(
 }
 
 fn rendered_text_token_count(parts: &[AnnotatedContent]) -> usize {
-    let rendered = parts
+    codex_utils_string::approx_token_count(&rendered_text(parts))
+}
+
+fn rendered_text_byte_count(parts: &[AnnotatedContent]) -> usize {
+    rendered_text(parts).len()
+}
+
+fn rendered_text(parts: &[AnnotatedContent]) -> String {
+    parts
         .iter()
         .filter_map(|part| match part.content() {
             ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
-                Some(text.as_str())
+                (!text.is_empty()).then_some(text.as_str())
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    codex_utils_string::approx_token_count(&rendered)
+        .join("\n")
 }
 
-fn plan_hard_annotated_truncation(
+fn plan_hard_text_truncation(
     text: &str,
-    max_tokens: usize,
+    max_bytes: usize,
     separator_bytes: usize,
 ) -> Option<TextTruncation> {
-    const MARKER: &str = "…";
-
-    let max_bytes = approx_bytes_for_tokens(max_tokens);
-    if text.len() <= max_bytes {
+    if text.is_empty() {
         return None;
     }
     let content_bytes = max_bytes
-        .saturating_sub(MARKER.len())
+        .saturating_sub(TRUNCATION_MARKER.len())
         .saturating_sub(separator_bytes);
     let left_bytes = content_bytes / 2;
     let right_bytes = content_bytes - left_bytes;
     Some(TextTruncation {
         removed: text.floor_char_boundary(left_bytes)
             ..text.ceil_char_boundary(text.len().saturating_sub(right_bytes)),
-        marker: MARKER.to_string(),
+        marker: TRUNCATION_MARKER.to_string(),
     })
 }
 
