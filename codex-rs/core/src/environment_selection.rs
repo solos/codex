@@ -1511,6 +1511,25 @@ mod tests {
         .expect("runtime paths")
     }
 
+    async fn environment_manager_with_remote(
+        exec_server_url: String,
+        local_runtime_paths: ExecServerRuntimeOptions,
+    ) -> EnvironmentManager {
+        let manager = EnvironmentManager::create_for_tests(
+            Some(exec_server_url.clone()),
+            Some(local_runtime_paths),
+        )
+        .await;
+        manager
+            .upsert_environment(
+                REMOTE_ENVIRONMENT_ID.to_string(),
+                exec_server_url,
+                /*connect_timeout*/ None,
+            )
+            .expect("remote environment");
+        manager
+    }
+
     pub(super) async fn read_websocket_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
         loop {
             match timeout(std::time::Duration::from_secs(5), websocket.next())
@@ -1585,7 +1604,7 @@ mod tests {
         assert_eq!(
             default_thread_environment_requests(&manager, &cwd, std::slice::from_ref(&cwd)),
             vec![TurnEnvironmentRequest {
-                environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                 cwd: cwd_uri.clone(),
                 workspace_roots: vec![cwd_uri],
                 config: EnvironmentConfigState::FromThread,
@@ -1594,7 +1613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn toml_default_thread_environment_requests_include_local_and_remote() {
+    async fn codex_home_default_thread_environment_requests_use_local_default() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             temp_dir.path().join("environments.toml"),
@@ -1617,20 +1636,12 @@ url = "ws://127.0.0.1:8765"
 
         assert_eq!(
             default_thread_environment_requests(&manager, &cwd, std::slice::from_ref(&cwd)),
-            vec![
-                TurnEnvironmentRequest {
-                    environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-                    cwd: cwd_uri.clone(),
-                    workspace_roots: vec![cwd_uri.clone()],
-                    config: EnvironmentConfigState::FromThread,
-                },
-                TurnEnvironmentRequest {
-                    environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-                    cwd: cwd_uri.clone(),
-                    workspace_roots: vec![cwd_uri],
-                    config: EnvironmentConfigState::FromThread,
-                },
-            ]
+            vec![TurnEnvironmentRequest {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                cwd: cwd_uri.clone(),
+                workspace_roots: vec![cwd_uri],
+                config: EnvironmentConfigState::FromThread,
+            }]
         );
     }
 
@@ -1836,12 +1847,9 @@ url = "ws://127.0.0.1:8765"
             .await
             .expect("bind websocket listener");
         let manager = Arc::new(
-            EnvironmentManager::create_for_tests(
-                Some(format!(
-                    "ws://{}",
-                    listener.local_addr().expect("listener address")
-                )),
-                Some(test_runtime_paths()),
+            environment_manager_with_remote(
+                format!("ws://{}", listener.local_addr().expect("listener address")),
+                test_runtime_paths(),
             )
             .await,
         );
@@ -1920,11 +1928,8 @@ url = "ws://127.0.0.1:8765"
             .await
             .expect("bind websocket listener");
         let manager = Arc::new(
-            EnvironmentManager::create_for_tests_with_local(
-                Some(format!(
-                    "ws://{}",
-                    listener.local_addr().expect("listener address")
-                )),
+            environment_manager_with_remote(
+                format!("ws://{}", listener.local_addr().expect("listener address")),
                 test_runtime_paths(),
             )
             .await,
@@ -2135,11 +2140,8 @@ url = "ws://127.0.0.1:8765"
     #[tokio::test]
     async fn failed_resolution_is_replaced_from_the_environment_manager() {
         let manager = Arc::new(
-            EnvironmentManager::create_for_tests(
-                Some("http://example.com".to_string()),
-                Some(test_runtime_paths()),
-            )
-            .await,
+            environment_manager_with_remote("http://example.com".to_string(), test_runtime_paths())
+                .await,
         );
         let selection = TurnEnvironmentSelection {
             selected_capability_roots: Default::default(),
@@ -2236,12 +2238,12 @@ url = "ws://127.0.0.1:8765"
             .await
             .expect("bind first listener");
         let manager = Arc::new(
-            EnvironmentManager::create_for_tests(
-                Some(format!(
+            environment_manager_with_remote(
+                format!(
                     "ws://{}",
                     first_listener.local_addr().expect("first listener address")
-                )),
-                Some(test_runtime_paths()),
+                ),
+                test_runtime_paths(),
             )
             .await,
         );

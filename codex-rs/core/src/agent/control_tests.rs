@@ -1469,6 +1469,10 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         "gpt-5.6-luna",
         "residency reload must preserve the worker model instead of inheriting its parent model",
     );
+    let expected_worker_provider = match route {
+        V2ReloadRoute::Sender => &harness.config.model_providers["openai"],
+        V2ReloadRoute::NestedParent => &harness.config.model_provider,
+    };
     assert_eq!(
         (
             reloaded_child.config_snapshot().await.model_provider_id,
@@ -1482,7 +1486,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         ),
         (
             stored_child.model_provider,
-            harness.config.model_provider.clone()
+            expected_worker_provider.clone()
         ),
         "residency reload must preserve the worker provider instead of inheriting its sender's provider",
     );
